@@ -364,7 +364,7 @@ export default function App() {
         const r = await fetch(`${PUENTE_URL}/api/dispatches`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pedido: { ...pedido, items: lineas } }),
+          body: JSON.stringify({ pedido, items: lineas }),
         });
         if (r.ok) {
           const data = await r.json();
