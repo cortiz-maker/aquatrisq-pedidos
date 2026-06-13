@@ -129,10 +129,10 @@ export default function App() {
     (async () => {
       try {
         const [c, p, t, d] = await Promise.all([
-          supabase.from("clientes").select("*").eq("activo", true).order("nombre"),
+          supabase.from("clientes").select("*").order("nombre"),
           supabase.from("productos").select("*").eq("activo", true).order("nombre"),
           supabase.from("precio_tramos").select("*"),
-          supabase.from("domicilios").select("id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal").eq("activo", true),
+          supabase.from("domicilios").select("id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal"),
         ]);
         if (c.error) throw c.error;
         if (p.error) throw p.error;
@@ -288,7 +288,7 @@ export default function App() {
     setTipoDocumento(c.es_empresa ? "factura" : "boleta");
 
     const [dom, plan, dc] = await Promise.all([
-      supabase.from("domicilios").select("*").eq("cliente_id", c.id).eq("activo", true).order("es_principal", { ascending: false }),
+      supabase.from("domicilios").select("*").eq("cliente_id", c.id).order("es_principal", { ascending: false }),
       supabase.from("planes_contratados").select("*").eq("cliente_id", c.id).eq("tipo", "prepago").eq("estado", "activo"),
       supabase.from("descuentos_cliente").select("*").eq("cliente_id", c.id).eq("activo", true),
     ]);
