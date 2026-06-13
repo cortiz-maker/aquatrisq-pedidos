@@ -99,6 +99,16 @@ export default function App() {
   const [vista, setVista] = useState("inicio");
   const [confirma, setConfirma] = useState(null); // { guia, mensaje, emailEnviado, emailDestino, sync }
 
+  // ── Autenticación (Supabase Auth) ──────────────────────────
+  const [authReady, setAuthReady] = useState(false);
+  const [session, setSession] = useState(null);
+  const [rol, setRol] = useState(null);           // admin | operador | gerencial
+  const [perfilNombre, setPerfilNombre] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [logueando, setLogueando] = useState(false);
+
   // Agregar email faltante al cliente desde el formulario
   const [emailNuevo, setEmailNuevo] = useState("");
   const [guardandoEmail, setGuardandoEmail] = useState(false);
@@ -198,6 +208,69 @@ export default function App() {
     if (vista === "inicio") cargarDashboard(periodo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vista, periodo, credsListas]);
+
+  // ── Sesión: detectar login, cargar rol del perfil ──────────
+  useEffect(() => {
+    if (!credsListas) { setAuthReady(true); return; }
+    let activo = true;
+    async function cargarPerfil(sess) {
+      if (!sess) { setRol(null); setPerfilNombre(""); return; }
+      const { data } = await supabase
+        .from("perfiles")
+        .select("rol, nombre, activo")
+        .eq("id", sess.user.id)
+        .maybeSingle();
+      if (!activo) return;
+      if (data && data.activo) {
+        setRol(data.rol);
+        setPerfilNombre(data.nombre || sess.user.email);
+        setVista("inicio");
+      } else {
+        setRol(null);
+      }
+    }
+    supabase.auth.getSession().then(({ data }) => {
+      if (!activo) return;
+      setSession(data.session);
+      cargarPerfil(data.session).finally(() => activo && setAuthReady(true));
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, sess) => {
+      setSession(sess);
+      cargarPerfil(sess);
+    });
+    return () => { activo = false; sub.subscription.unsubscribe(); };
+  }, [credsListas]);
+
+  async function iniciarSesion() {
+    setLoginError("");
+    setLogueando(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: loginEmail.trim(),
+        password: loginPass,
+      });
+      if (error) setLoginError("Email o contraseña incorrectos.");
+      else setLoginPass("");
+    } catch (e) {
+      setLoginError(e.message || "No se pudo iniciar sesión.");
+    } finally {
+      setLogueando(false);
+    }
+  }
+
+  async function cerrarSesion() {
+    await supabase.auth.signOut();
+    setRol(null);
+    setPerfilNombre("");
+    setVista("inicio");
+  }
+
+  // El perfil gerencial no opera pedidos ni mantiene clientes.
+  useEffect(() => {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor")) {
+      setVista("inicio");
+    }
+  }, [rol, vista]);
 
   // Mantener emailNuevo sincronizado con el cliente elegido
   useEffect(() => {
@@ -690,6 +763,60 @@ export default function App() {
   }
 
   // ── Render ─────────────────────────────────────────────────
+  // Pantalla de login (si hay credenciales de Supabase pero no hay sesión válida)
+  if (credsListas && !authReady) {
+    return (
+      <div className="aq aq-login-wrap">
+        <style>{css}</style>
+        <div className="aq-card">Cargando…</div>
+      </div>
+    );
+  }
+  if (credsListas && (!session || !rol)) {
+    return (
+      <div className="aq aq-login-wrap">
+        <style>{css}</style>
+        <div className="aq-login">
+          <img src="/logo-aquatrisq.png" className="aq-logo-big" alt="Aquatrisq" />
+          <h1>Aquatrisq</h1>
+          <p className="aq-login-sub">Gestión de pedidos</p>
+          {session && !rol && (
+            <div className="aq-result bad" style={{ marginBottom: 12 }}>
+              Tu usuario no tiene un perfil asignado o está inactivo. Contacta al administrador.
+            </div>
+          )}
+          <label className="aq-full">
+            Email
+            <input
+              type="email"
+              value={loginEmail}
+              autoComplete="username"
+              onChange={(e) => setLoginEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && iniciarSesion()}
+            />
+          </label>
+          <label className="aq-full">
+            Contraseña
+            <input
+              type="password"
+              value={loginPass}
+              autoComplete="current-password"
+              onChange={(e) => setLoginPass(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && iniciarSesion()}
+            />
+          </label>
+          {loginError && <div className="aq-result bad">{loginError}</div>}
+          <button className="aq-btn" disabled={logueando || !loginEmail || !loginPass} onClick={iniciarSesion}>
+            {logueando ? "Entrando…" : "Entrar"}
+          </button>
+          {session && !rol && (
+            <button className="aq-link" style={{ marginTop: 12 }} onClick={cerrarSesion}>Cerrar sesión</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="aq">
       <style>{css}</style>
@@ -702,11 +829,19 @@ export default function App() {
             <p>Gestión de pedidos</p>
           </div>
         </div>
-        {credsListas && (
+        {credsListas && rol && (
           <nav className="aq-nav">
             <button className={vista === "inicio" ? "on" : ""} onClick={() => setVista("inicio")}>Inicio</button>
-            <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
-            <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>Clientes</button>
+            {rol !== "gerencial" && (
+              <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
+            )}
+            {rol !== "gerencial" && (
+              <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>Clientes</button>
+            )}
+            <span className="aq-user" title={rol}>
+              {perfilNombre} · {rol}
+              <button className="aq-logout" onClick={cerrarSesion} aria-label="Cerrar sesión">Salir</button>
+            </span>
           </nav>
         )}
       </header>
@@ -1243,11 +1378,11 @@ const css = `
 .aq { --navy:#1B2F6E; --blue:#5B8DB8; --ink:#1d2433; --muted:#6b7686; --line:#e3e8f0; --bg:#f4f6fb; --ok:#1f7a4d; --bad:#b3261e;
   font-family:'Hanken Grotesk',system-ui,sans-serif; color:var(--ink); background:var(--bg); min-height:100vh; }
 .aq-header { background:var(--navy); color:#fff; padding:18px 20px; }
-.aq-brand { display:flex; align-items:center; gap:14px; max-width:760px; margin:0 auto; }
+.aq-brand { display:flex; align-items:center; gap:14px; }
 .aq-mark { font-size:30px; color:var(--blue); line-height:1; }
 .aq-header h1 { font-family:'Fraunces',serif; font-weight:600; font-size:22px; margin:0; letter-spacing:.2px; }
 .aq-header p { margin:0; font-size:13px; color:#c5d2e8; }
-.aq-main { max-width:760px; margin:0 auto; padding:18px 16px 60px; display:flex; flex-direction:column; gap:14px; }
+.aq-main { max-width:1200px; margin:0 auto; padding:18px 24px 60px; display:flex; flex-direction:column; gap:14px; }
 .aq-card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
 .aq-card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--navy); margin:0 0 12px; font-weight:700; }
 .aq-row-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
@@ -1310,12 +1445,26 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 
 /* Logo + navegación */
 .aq-logo { width:42px; height:42px; border-radius:10px; background:#fff; object-fit:contain; padding:3px; }
-.aq-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+.aq-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:14px 24px; }
 .aq-nav { display:flex; gap:6px; max-width:760px; }
 .aq-nav button { background:rgba(255,255,255,.12); color:#dce6f6; border:none; font:inherit; font-weight:600; font-size:13px;
   padding:7px 13px; border-radius:9px; cursor:pointer; }
 .aq-nav button:hover { background:rgba(255,255,255,.2); }
 .aq-nav button.on { background:#fff; color:var(--navy); }
+.aq-user { display:flex; align-items:center; gap:8px; color:#c5d2e8; font-size:12px; margin-left:6px; }
+.aq-logout { background:rgba(255,255,255,.12); color:#fff; border:none; font:inherit; font-size:12px; font-weight:600;
+  padding:6px 11px; border-radius:8px; cursor:pointer; }
+.aq-logout:hover { background:rgba(255,255,255,.24); }
+
+/* Login */
+.aq-login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+.aq-login { background:#fff; border:1px solid var(--line); border-radius:16px; padding:28px 26px; width:100%; max-width:360px;
+  display:flex; flex-direction:column; text-align:center; }
+.aq-logo-big { width:84px; height:84px; object-fit:contain; margin:0 auto 8px; }
+.aq-login h1 { font-family:'Fraunces',serif; font-weight:600; font-size:24px; color:var(--navy); margin:0; }
+.aq-login-sub { color:var(--muted); font-size:14px; margin:2px 0 18px; }
+.aq-login label { text-align:left; margin-top:0; margin-bottom:12px; }
+.aq-login .aq-btn { margin-top:4px; }
 
 /* Período */
 .aq-period { display:flex; align-items:center; justify-content:space-between; }
