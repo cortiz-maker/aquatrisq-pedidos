@@ -113,6 +113,7 @@ export default function App() {
   // Mantenedor de bloqueo
   const [buscarMant, setBuscarMant] = useState("");
   const [clienteMant, setClienteMant] = useState(null);
+  const [domMant, setDomMant] = useState(null);
   const [bloqMant, setBloqMant] = useState(false);
   const [motivoMant, setMotivoMant] = useState("");
   const [operadorMant, setOperadorMant] = useState("");
@@ -206,24 +207,47 @@ export default function App() {
   }
 
   // ── Mantenedor de bloqueo ──────────────────────────────────
+  // Busca igual que el formulario: por cliente (nombre/RUT/código) y por
+  // domicilio (identificador_dt como 0004-1, o dirección), resolviendo al cliente dueño.
   const resultadosMant = useMemo(() => {
     const q = buscarMant.trim().toLowerCase();
     if (!q) return [];
-    return clientes
+    const porCliente = clientes
       .filter(
         (c) =>
           (c.nombre || "").toLowerCase().includes(q) ||
           (c.rut || "").toLowerCase().includes(q) ||
           (c.codigo_cliente || "").toLowerCase().includes(q)
       )
-      .slice(0, 8);
-  }, [buscarMant, clientes]);
+      .map((c) => ({ cliente: c, dom: null }));
 
-  function elegirMant(c) {
-    setClienteMant(c);
+    const porDomicilio = todosDomicilios
+      .filter(
+        (d) =>
+          (d.identificador_dt || "").toLowerCase().includes(q) ||
+          (d.direccion || "").toLowerCase().includes(q) ||
+          (d.etiqueta || "").toLowerCase().includes(q)
+      )
+      .map((d) => ({ cliente: clientes.find((c) => c.id === d.cliente_id), dom: d }))
+      .filter((r) => r.cliente);
+
+    const vistos = new Set();
+    return [...porDomicilio, ...porCliente]
+      .filter((r) => {
+        const k = r.cliente.id + "|" + (r.dom?.id || "");
+        if (vistos.has(k)) return false;
+        vistos.add(k);
+        return true;
+      })
+      .slice(0, 8);
+  }, [buscarMant, clientes, todosDomicilios]);
+
+  function elegirMant(r) {
+    setClienteMant(r.cliente);
+    setDomMant(r.dom || null);
     setBuscarMant("");
-    setBloqMant(!!c.bloqueado);
-    setMotivoMant(c.motivo_bloqueo || "");
+    setBloqMant(!!r.cliente.bloqueado);
+    setMotivoMant(r.cliente.motivo_bloqueo || "");
     setOkMant("");
   }
 
@@ -734,17 +758,26 @@ export default function App() {
             {!clienteMant ? (
               <div className="aq-search">
                 <input
-                  placeholder="Buscar por nombre, RUT o código"
+                  placeholder="Buscar por identificador (0004-1), nombre, dirección o RUT"
                   value={buscarMant}
                   onChange={(e) => setBuscarMant(e.target.value)}
                   autoFocus
                 />
                 {resultadosMant.length > 0 && (
                   <ul className="aq-results">
-                    {resultadosMant.map((c) => (
-                      <li key={c.id} onClick={() => elegirMant(c)} className={c.bloqueado ? "aq-li-alerta" : ""}>
-                        <strong>{c.bloqueado ? "⚠ " : ""}{c.nombre}</strong>
-                        <span>{c.codigo_cliente || c.rut || ""}{c.bloqueado ? " · bloqueado" : ""}</span>
+                    {resultadosMant.map((r) => (
+                      <li
+                        key={r.cliente.id + "|" + (r.dom?.id || "")}
+                        onClick={() => elegirMant(r)}
+                        className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
+                      >
+                        <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
+                        <span>
+                          {r.dom?.identificador_dt
+                            ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
+                            : (r.cliente.codigo_cliente || r.cliente.rut || "")}
+                          {r.cliente.bloqueado ? " · bloqueado" : ""}
+                        </span>
                       </li>
                     ))}
                   </ul>
@@ -755,10 +788,17 @@ export default function App() {
                 <div className="aq-chosen">
                   <div>
                     <strong>{clienteMant.nombre}</strong>
-                    <span>{clienteMant.codigo_cliente || clienteMant.rut || ""}</span>
+                    <span>
+                      {domMant?.identificador_dt
+                        ? domMant.identificador_dt + " · " + (domMant.direccion || "")
+                        : (clienteMant.codigo_cliente || clienteMant.rut || "")}
+                    </span>
                   </div>
-                  <button className="aq-link" onClick={() => { setClienteMant(null); setOkMant(""); }}>Cambiar</button>
+                  <button className="aq-link" onClick={() => { setClienteMant(null); setDomMant(null); setOkMant(""); }}>Cambiar</button>
                 </div>
+                <p className="aq-muted" style={{ marginTop: 6 }}>
+                  El bloqueo aplica a todo el cliente y sus domicilios.
+                </p>
                 <label className="aq-check" style={{ marginTop: 14 }}>
                   <input type="checkbox" checked={bloqMant} onChange={(e) => setBloqMant(e.target.checked)} />
                   Cliente bloqueado para comprar
