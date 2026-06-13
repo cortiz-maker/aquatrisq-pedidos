@@ -295,7 +295,8 @@ export default function App() {
           codigo: prod ? prod.codigo : null,
           cantidad: cant,
           precio_unit: pu,
-          subtotal: Math.round(cant * pu),
+          // 'subtotal' es columna generada en la base (cantidad * precio_unit);
+          // Postgres la calcula sola, por eso no la enviamos.
         };
       });
       const { error: eItems } = await supabase.from("pedido_items").insert(lineas);
