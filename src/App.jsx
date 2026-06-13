@@ -107,6 +107,8 @@ export default function App() {
   const hoyPeriodo = () => new Date().toISOString().slice(0, 7); // YYYY-MM
   const [periodo, setPeriodo] = useState(hoyPeriodo());
   const [pedidosMes, setPedidosMes] = useState([]);
+  const [filtroEstado, setFiltroEstado] = useState("todos"); // todos | enviados | pendientes
+  const [buscarPedido, setBuscarPedido] = useState("");
   const [cargandoDash, setCargandoDash] = useState(false);
   const [errorDash, setErrorDash] = useState("");
 
@@ -622,18 +624,61 @@ export default function App() {
   }
 
   // ── Métricas del dashboard (mes seleccionado) ──────────────
+  // Mapas para resolver cliente y domicilio sin consultas nuevas.
+  const clientePorId = useMemo(() => {
+    const m = {};
+    clientes.forEach((c) => { m[c.id] = c; });
+    return m;
+  }, [clientes]);
+  const domPorId = useMemo(() => {
+    const m = {};
+    todosDomicilios.forEach((d) => { m[d.id] = d; });
+    return m;
+  }, [todosDomicilios]);
+
+  const infoPedido = (p) => {
+    const c = clientePorId[p.cliente_id];
+    const d = domPorId[p.domicilio_id];
+    return {
+      nombre: c?.nombre || "Cliente",
+      comuna: d?.comuna || d?.direccion || "",
+      ident: d?.identificador_dt || c?.codigo_cliente || "",
+    };
+  };
+
   const dash = (() => {
     const ped = pedidosMes;
     const est = (p) => String(p.estado_entrega || p.estado || "").toLowerCase();
+    const hoy = new Date().toISOString().slice(0, 10);
     return {
       ingresados: ped.length,
       enviados: ped.filter((p) => p.estado_sync === "enviado_dt").length,
       pendientes: ped.filter((p) => p.estado_sync !== "enviado_dt").length,
       entregados: ped.filter((p) => est(p).includes("entreg")).length,
+      paraHoy: ped.filter((p) => (p.fecha_min_entrega || "").slice(0, 10) === hoy).length,
       monto: ped.reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
+      porCobrar: ped.filter((p) => p.por_cobrar).reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
       tieneEstado: ped.some((p) => p.estado_entrega != null || p.estado != null),
     };
   })();
+
+  const pedidosFiltrados = useMemo(() => {
+    const q = buscarPedido.trim().toLowerCase();
+    return pedidosMes.filter((p) => {
+      if (filtroEstado === "enviados" && p.estado_sync !== "enviado_dt") return false;
+      if (filtroEstado === "pendientes" && p.estado_sync === "enviado_dt") return false;
+      if (!q) return true;
+      const i = infoPedido(p);
+      return (
+        (p.numero_guia || "").toLowerCase().includes(q) ||
+        i.nombre.toLowerCase().includes(q) ||
+        i.comuna.toLowerCase().includes(q) ||
+        i.ident.toLowerCase().includes(q)
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pedidosMes, filtroEstado, buscarPedido, clientePorId, domPorId]);
+
   const periodoLabel = (() => {
     const [y, m] = periodo.split("-").map(Number);
     const s = new Date(y, m - 1, 1).toLocaleDateString("es-CL", { month: "long", year: "numeric" });
@@ -700,45 +745,102 @@ export default function App() {
             ) : (
               <>
                 <div className="aq-kpis">
-                  <div className="aq-kpi"><span>Ingresados</span><strong>{dash.ingresados}</strong></div>
-                  <div className="aq-kpi"><span>Enviados a DT</span><strong>{dash.enviados}</strong></div>
-                  <div className="aq-kpi"><span>Pendientes de envío</span><strong>{dash.pendientes}</strong></div>
+                  <button
+                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "todos" ? " on" : "")}
+                    onClick={() => setFiltroEstado("todos")}
+                  >
+                    <span>Ingresados</span><strong>{dash.ingresados}</strong>
+                  </button>
+                  <button
+                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "enviados" ? " on" : "")}
+                    onClick={() => setFiltroEstado("enviados")}
+                  >
+                    <span>Enviados a DT</span><strong>{dash.enviados}</strong>
+                  </button>
+                  <button
+                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "pendientes" ? " on" : "")}
+                    onClick={() => setFiltroEstado("pendientes")}
+                  >
+                    <span>Pendientes</span><strong>{dash.pendientes}</strong>
+                  </button>
                   <div className="aq-kpi">
-                    <span>Entregados</span>
-                    <strong>{dash.tieneEstado ? dash.entregados : "—"}</strong>
+                    <span>Para hoy</span><strong>{dash.paraHoy}</strong>
                   </div>
-                  <div className="aq-kpi aq-kpi-wide"><span>Monto del mes</span><strong>{CLP(dash.monto)}</strong></div>
                 </div>
-                {!dash.tieneEstado && (
-                  <p className="aq-muted" style={{ marginTop: 0 }}>
-                    El estado “Entregado” se activará cuando conectemos el retorno de DispatchTrack (webhook).
-                  </p>
-                )}
+
+                <div className="aq-money">
+                  <div className="aq-money-card navy">
+                    <span>Monto del mes</span>
+                    <strong>{CLP(dash.monto)}</strong>
+                  </div>
+                  <div className="aq-money-card cobrar">
+                    <span>Por cobrar</span>
+                    <strong>{CLP(dash.porCobrar)}</strong>
+                  </div>
+                </div>
 
                 <section className="aq-card">
                   <div className="aq-row-head">
                     <h2>Pedidos del período</h2>
                     <button className="aq-btn-sec" onClick={() => setVista("nuevo")}>+ Nuevo pedido</button>
                   </div>
-                  {pedidosMes.length === 0 ? (
-                    <p className="aq-muted">Sin pedidos en {periodoLabel}.</p>
+
+                  <input
+                    className="aq-buscar-ped"
+                    placeholder="Buscar por guía, cliente o comuna…"
+                    value={buscarPedido}
+                    onChange={(e) => setBuscarPedido(e.target.value)}
+                  />
+
+                  {pedidosFiltrados.length === 0 ? (
+                    <p className="aq-muted">
+                      {pedidosMes.length === 0
+                        ? `Sin pedidos en ${periodoLabel}.`
+                        : "Ningún pedido coincide con el filtro."}
+                    </p>
                   ) : (
                     <div className="aq-tabla">
-                      {pedidosMes.slice(0, 60).map((p) => (
-                        <div className="aq-tr" key={p.id}>
-                          <strong>{p.numero_guia || "—"}</strong>
-                          <span className="aq-muted">
-                            {p.created_at ? new Date(p.created_at).toLocaleDateString("es-CL") : ""}
-                          </span>
-                          <span>{CLP(p.monto_total)}</span>
-                          <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>
-                            {p.estado_sync === "enviado_dt" ? "En DT" : "Pendiente"}
-                          </span>
-                        </div>
-                      ))}
+                      {pedidosFiltrados.slice(0, 80).map((p) => {
+                        const i = infoPedido(p);
+                        return (
+                          <div className="aq-tr" key={p.id}>
+                            <div className="aq-tr-main">
+                              <strong>{i.nombre}</strong>
+                              <span className="aq-tr-sub">
+                                {p.numero_guia || "—"}{i.comuna ? " · " + i.comuna : ""}
+                              </span>
+                            </div>
+                            <span className="aq-tr-fecha">
+                              {p.fecha_min_entrega
+                                ? new Date(p.fecha_min_entrega).toLocaleDateString("es-CL", { day: "2-digit", month: "short" })
+                                : p.created_at
+                                ? new Date(p.created_at).toLocaleDateString("es-CL", { day: "2-digit", month: "short" })
+                                : ""}
+                            </span>
+                            <span className="aq-tr-monto">
+                              {CLP(p.monto_total)}
+                              {p.por_cobrar && <em className="aq-pc">PC</em>}
+                            </span>
+                            <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>
+                              {p.estado_sync === "enviado_dt" ? "En DT" : "Pend."}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {pedidosFiltrados.length > 80 && (
+                        <p className="aq-muted" style={{ marginTop: 10 }}>
+                          Mostrando 80 de {pedidosFiltrados.length}. Usa el buscador para acotar.
+                        </p>
+                      )}
                     </div>
                   )}
                 </section>
+
+                {!dash.tieneEstado && (
+                  <p className="aq-muted">
+                    El estado “Entregado” se activará cuando conectemos el retorno de DispatchTrack.
+                  </p>
+                )}
               </>
             )}
           </>
@@ -1224,20 +1326,44 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 .aq-per-label span { display:block; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
 .aq-per-label strong { font-family:'Fraunces',serif; font-size:20px; color:var(--navy); }
 
-/* KPIs */
+/* KPIs (clicables = filtro) */
 .aq-kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
-.aq-kpi { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px; }
-.aq-kpi span { display:block; font-size:12px; color:var(--muted); }
-.aq-kpi strong { font-family:'Fraunces',serif; font-size:26px; color:var(--navy); }
-.aq-kpi-wide { grid-column:span 4; background:var(--navy); border-color:var(--navy); }
-.aq-kpi-wide span { color:#c5d2e8; }
-.aq-kpi-wide strong { color:#fff; }
+.aq-kpi { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px; text-align:left; }
+.aq-kpi span { display:block; font-size:12px; color:var(--muted); margin-bottom:2px; }
+.aq-kpi strong { font-family:'Fraunces',serif; font-size:26px; color:var(--navy); line-height:1; }
+.aq-kpi-btn { cursor:pointer; font:inherit; transition:border-color .12s, box-shadow .12s; }
+.aq-kpi-btn:hover { border-color:var(--blue); }
+.aq-kpi-btn.on { border-color:var(--navy); box-shadow:inset 0 0 0 1px var(--navy); }
+.aq-kpi-btn.on::after { content:""; display:block; height:3px; width:24px; background:var(--navy); border-radius:2px; margin-top:8px; }
+
+/* Tarjetas de monto */
+.aq-money { display:grid; grid-template-columns:2fr 1fr; gap:10px; margin-top:10px; }
+.aq-money-card { border-radius:14px; padding:16px 18px; }
+.aq-money-card span { display:block; font-size:12px; margin-bottom:2px; }
+.aq-money-card strong { font-family:'Fraunces',serif; font-size:28px; line-height:1; }
+.aq-money-card.navy { background:var(--navy); }
+.aq-money-card.navy span { color:#c5d2e8; }
+.aq-money-card.navy strong { color:#fff; }
+.aq-money-card.cobrar { background:#fff7e6; border:1px solid #f0d8a0; }
+.aq-money-card.cobrar span { color:#7a5a00; }
+.aq-money-card.cobrar strong { color:#8a6400; }
+
+/* Buscador de pedidos */
+.aq-buscar-ped { margin-bottom:10px; }
 
 /* Tabla de pedidos */
 .aq-tabla { display:flex; flex-direction:column; }
-.aq-tr { display:grid; grid-template-columns:1fr auto 110px 90px; gap:10px; align-items:center; padding:10px 2px;
+.aq-tr { display:grid; grid-template-columns:1fr auto 110px 70px; gap:10px; align-items:center; padding:11px 4px;
   border-bottom:1px solid var(--line); font-size:14px; }
 .aq-tr:last-child { border-bottom:none; }
+.aq-tr:hover { background:var(--bg); }
+.aq-tr-main { min-width:0; }
+.aq-tr-main strong { display:block; color:var(--ink); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.aq-tr-sub { font-size:12px; color:var(--muted); }
+.aq-tr-fecha { font-size:13px; color:var(--muted); white-space:nowrap; }
+.aq-tr-monto { font-weight:600; text-align:right; white-space:nowrap; }
+.aq-pc { font-style:normal; font-size:10px; font-weight:700; color:#8a6400; background:#fff7e6; border:1px solid #f0d8a0;
+  padding:1px 4px; border-radius:5px; margin-left:5px; }
 .aq-badge { font-size:11px; font-weight:700; text-align:center; padding:3px 8px; border-radius:20px; }
 .aq-badge.ok { background:#e8f5ee; color:var(--ok); }
 .aq-badge.warn { background:#fff7e6; color:#7a5a00; }
@@ -1272,9 +1398,10 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
   .aq-desc { grid-template-columns: 1fr 80px 28px; }
   .aq-desc select { grid-column:1 / -1; }
   .aq-kpis { grid-template-columns:repeat(2,1fr); }
-  .aq-kpi-wide { grid-column:span 2; }
-  .aq-tr { grid-template-columns:1fr auto 80px; }
-  .aq-tr .aq-badge { grid-column:2 / 3; }
+  .aq-money { grid-template-columns:1fr; }
+  .aq-tr { grid-template-columns:1fr 70px 60px; row-gap:2px; }
+  .aq-tr-fecha { display:none; }
+  .aq-tr-monto { grid-column:2 / 3; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
