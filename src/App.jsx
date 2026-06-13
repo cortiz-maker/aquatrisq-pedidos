@@ -87,7 +87,7 @@ export default function App() {
     (async () => {
       try {
         const [c, p, t, d] = await Promise.all([
-          supabase.from("clientes").select("*").eq("activo", true).eq("bloqueado", false).order("nombre"),
+          supabase.from("clientes").select("*").eq("activo", true).order("nombre"),
           supabase.from("productos").select("*").eq("activo", true).order("nombre"),
           supabase.from("precio_tramos").select("*"),
           supabase.from("domicilios").select("id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal").eq("activo", true),
@@ -449,8 +449,9 @@ export default function App() {
                         <li
                           key={r.cliente.id + "|" + (r.dom?.id || "")}
                           onClick={() => elegirCliente(r.cliente, r.dom?.id)}
+                          className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                         >
-                          <strong>{r.cliente.nombre}</strong>
+                          <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
                           <span>
                             {r.dom?.identificador_dt
                               ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
@@ -474,6 +475,14 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            {cliente && cliente.bloqueado && (
+              <div className="aq-alerta-cliente">
+                <strong>⚠ Cliente con alerta</strong>
+                <p>{cliente.motivo_bloqueo || "Cliente marcado para revisión."}</p>
+                <span>Revisa antes de continuar con el pedido.</span>
+              </div>
+            )}
 
             {cliente && (
               <>
@@ -719,6 +728,11 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--blue); outli
 .aq-results li { padding:9px 10px; border-radius:7px; cursor:pointer; display:flex; flex-direction:column; }
 .aq-results li:hover { background:var(--bg); }
 .aq-results li span { font-size:12px; color:var(--muted); }
+.aq-li-alerta strong { color:var(--bad); }
+.aq-alerta-cliente { background:#fdecea; border:1px solid #f3b4ad; border-left:4px solid var(--bad); border-radius:12px; padding:14px 16px; }
+.aq-alerta-cliente strong { color:var(--bad); display:block; font-size:14px; }
+.aq-alerta-cliente p { margin:6px 0 4px; color:var(--ink); font-size:15px; font-weight:600; }
+.aq-alerta-cliente span { font-size:13px; color:var(--muted); }
 .aq-chosen { display:flex; justify-content:space-between; align-items:center; }
 .aq-chosen strong { display:block; }
 .aq-chosen span { font-size:13px; color:var(--muted); }
