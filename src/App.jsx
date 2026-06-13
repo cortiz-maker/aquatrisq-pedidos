@@ -109,6 +109,11 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [logueando, setLogueando] = useState(false);
 
+  // ── Dashboard gerencial (solo lectura, con gráficos) ───────
+  const [ger, setGer] = useState(null);
+  const [cargandoGer, setCargandoGer] = useState(false);
+  const [errorGer, setErrorGer] = useState("");
+
   // Agregar email faltante al cliente desde el formulario
   const [emailNuevo, setEmailNuevo] = useState("");
   const [guardandoEmail, setGuardandoEmail] = useState(false);
@@ -214,6 +219,99 @@ export default function App() {
     if (vista === "inicio") cargarDashboard(periodo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vista, periodo, credsListas, session]);
+
+  // ── Carga del dashboard gerencial (últimos 6 meses) ────────
+  async function cargarGerencial() {
+    if (!credsListas || !session) return;
+    setCargandoGer(true);
+    setErrorGer("");
+    try {
+      const ahora = new Date();
+      const ini = new Date(ahora.getFullYear(), ahora.getMonth() - 5, 1);
+      const desde = ini.toISOString();
+
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("id, created_at, monto_total, por_cobrar, domicilio_id")
+        .gte("created_at", desde)
+        .order("created_at", { ascending: true });
+      if (ePed) throw ePed;
+      const pedidos = peds || [];
+
+      // Ítems de esos pedidos (para el mix de productos)
+      let itemsMix = [];
+      const ids = pedidos.map((p) => p.id);
+      if (ids.length) {
+        const CHUNK = 200;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const lote = ids.slice(i, i + CHUNK);
+          const { data: it, error: eIt } = await supabase
+            .from("pedido_items")
+            .select("nombre, codigo, cantidad, subtotal, pedido_id")
+            .in("pedido_id", lote);
+          if (eIt) throw eIt;
+          itemsMix = itemsMix.concat(it || []);
+        }
+      }
+
+      // 1) Evolución mensual: últimos 6 meses
+      const meses = [];
+      for (let k = 5; k >= 0; k--) {
+        const d = new Date(ahora.getFullYear(), ahora.getMonth() - k, 1);
+        const key = d.toISOString().slice(0, 7);
+        const lab = d.toLocaleDateString("es-CL", { month: "short" });
+        meses.push({ key, label: lab.charAt(0).toUpperCase() + lab.slice(1, 3), count: 0, monto: 0 });
+      }
+      const idxMes = Object.fromEntries(meses.map((m, i) => [m.key, i]));
+      pedidos.forEach((p) => {
+        const key = (p.created_at || "").slice(0, 7);
+        if (key in idxMes) {
+          meses[idxMes[key]].count += 1;
+          meses[idxMes[key]].monto += Number(p.monto_total) || 0;
+        }
+      });
+
+      // 2) Mix de productos (por cantidad y valor)
+      const mapProd = {};
+      itemsMix.forEach((it) => {
+        const nom = it.nombre || it.codigo || "—";
+        if (!mapProd[nom]) mapProd[nom] = { nombre: nom, cantidad: 0, valor: 0 };
+        mapProd[nom].cantidad += Number(it.cantidad) || 0;
+        mapProd[nom].valor += Number(it.subtotal) || 0;
+      });
+      const mix = Object.values(mapProd).sort((a, b) => b.cantidad - a.cantidad).slice(0, 7);
+
+      // 3) Pedidos por comuna (vía domicilio → comuna)
+      const mapCom = {};
+      pedidos.forEach((p) => {
+        const dom = domPorId[p.domicilio_id];
+        const com = (dom && dom.comuna) ? dom.comuna : "Sin comuna";
+        mapCom[com] = (mapCom[com] || 0) + 1;
+      });
+      const comunas = Object.entries(mapCom)
+        .map(([comuna, count]) => ({ comuna, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 8);
+
+      // KPIs del mes actual
+      const mesActual = meses[meses.length - 1] || { count: 0, monto: 0 };
+      const porCobrarMes = pedidos
+        .filter((p) => (p.created_at || "").slice(0, 7) === hoyPeriodo() && p.por_cobrar)
+        .reduce((s, p) => s + (Number(p.monto_total) || 0), 0);
+      const ticket = mesActual.count ? Math.round(mesActual.monto / mesActual.count) : 0;
+
+      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket });
+    } catch (e) {
+      setErrorGer(e.message || "No se pudo cargar el panel gerencial.");
+      setGer(null);
+    } finally {
+      setCargandoGer(false);
+    }
+  }
+  useEffect(() => {
+    if (rol === "gerencial" && vista === "inicio") cargarGerencial();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rol, vista, session, todosDomicilios]);
 
   // ── Sesión: detectar login, cargar rol del perfil ──────────
   useEffect(() => {
@@ -864,7 +962,7 @@ export default function App() {
         {errorCarga && <div className="aq-card aq-error">No se pudieron cargar los datos: {errorCarga}</div>}
 
         {/* ===================== INICIO / DASHBOARD ===================== */}
-        {credsListas && vista === "inicio" && (
+        {credsListas && vista === "inicio" && rol !== "gerencial" && (
           <>
             <section className="aq-card aq-period">
               <button className="aq-per-nav" onClick={() => cambiarPeriodo(-1)} aria-label="Mes anterior">‹</button>
@@ -983,6 +1081,113 @@ export default function App() {
                   </p>
                 )}
               </>
+            )}
+          </>
+        )}
+
+        {/* ===================== DASHBOARD GERENCIAL ===================== */}
+        {credsListas && vista === "inicio" && rol === "gerencial" && (
+          <>
+            {errorGer && <div className="aq-card aq-error">No se pudo cargar el panel: {errorGer}</div>}
+            {cargandoGer && !ger ? (
+              <div className="aq-card">Cargando panel…</div>
+            ) : ger ? (
+              <>
+                <div className="aq-kpis">
+                  <div className="aq-kpi">
+                    <span>Ingresos del mes</span><strong>{CLP(ger.mesActual.monto)}</strong>
+                  </div>
+                  <div className="aq-kpi">
+                    <span>Pedidos del mes</span><strong>{ger.mesActual.count}</strong>
+                  </div>
+                  <div className="aq-kpi">
+                    <span>Ticket promedio</span><strong>{CLP(ger.ticket)}</strong>
+                  </div>
+                  <div className="aq-kpi">
+                    <span>Por cobrar</span><strong>{CLP(ger.porCobrarMes)}</strong>
+                  </div>
+                </div>
+
+                {/* Evolución mensual */}
+                <section className="aq-card">
+                  <h2>Evolución (últimos 6 meses)</h2>
+                  {(() => {
+                    const maxM = Math.max(1, ...ger.meses.map((m) => m.monto));
+                    return (
+                      <div className="aq-bars">
+                        {ger.meses.map((m) => (
+                          <div className="aq-bar-col" key={m.key}>
+                            <div className="aq-bar-val">{m.monto ? CLP(m.monto) : ""}</div>
+                            <div className="aq-bar-track">
+                              <div className="aq-bar-fill" style={{ height: Math.round((m.monto / maxM) * 100) + "%" }} />
+                            </div>
+                            <div className="aq-bar-lab">{m.label}</div>
+                            <div className="aq-bar-sub">{m.count} ped.</div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </section>
+
+                <div className="aq-grid2">
+                  {/* Mix de productos */}
+                  <section className="aq-card">
+                    <h2>Mix de productos</h2>
+                    {ger.mix.length === 0 ? (
+                      <p className="aq-muted">Sin ventas en el período.</p>
+                    ) : (() => {
+                      const maxC = Math.max(1, ...ger.mix.map((p) => p.cantidad));
+                      return (
+                        <div className="aq-hbars">
+                          {ger.mix.map((p) => (
+                            <div className="aq-hbar" key={p.nombre}>
+                              <div className="aq-hbar-head">
+                                <span className="aq-hbar-name">{p.nombre}</span>
+                                <span className="aq-hbar-num">{p.cantidad} un · {CLP(p.valor)}</span>
+                              </div>
+                              <div className="aq-hbar-track">
+                                <div className="aq-hbar-fill" style={{ width: Math.round((p.cantidad / maxC) * 100) + "%" }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </section>
+
+                  {/* Pedidos por comuna */}
+                  <section className="aq-card">
+                    <h2>Pedidos por comuna</h2>
+                    {ger.comunas.length === 0 ? (
+                      <p className="aq-muted">Sin pedidos en el período.</p>
+                    ) : (() => {
+                      const maxK = Math.max(1, ...ger.comunas.map((c) => c.count));
+                      return (
+                        <div className="aq-hbars">
+                          {ger.comunas.map((c) => (
+                            <div className="aq-hbar" key={c.comuna}>
+                              <div className="aq-hbar-head">
+                                <span className="aq-hbar-name">{c.comuna}</span>
+                                <span className="aq-hbar-num">{c.count}</span>
+                              </div>
+                              <div className="aq-hbar-track">
+                                <div className="aq-hbar-fill alt" style={{ width: Math.round((c.count / maxK) * 100) + "%" }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </section>
+                </div>
+
+                <p className="aq-muted">
+                  Datos de los últimos 6 meses. Cumplimiento de entrega y cobranza por antigüedad se sumarán al conectar el retorno de DispatchTrack.
+                </p>
+              </>
+            ) : (
+              <div className="aq-card aq-muted">Sin datos para mostrar todavía.</div>
             )}
           </>
         )}
@@ -1502,6 +1707,24 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 .aq-money-card.cobrar { background:#fff7e6; border:1px solid #f0d8a0; }
 .aq-money-card.cobrar span { color:#7a5a00; }
 .aq-money-card.cobrar strong { color:#8a6400; }
+
+/* Dashboard gerencial: grilla y gráficos de barras */
+.aq-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.aq-bars { display:flex; align-items:flex-end; gap:10px; height:200px; padding-top:8px; }
+.aq-bar-col { flex:1; display:flex; flex-direction:column; align-items:center; height:100%; }
+.aq-bar-val { font-size:11px; color:var(--muted); height:16px; white-space:nowrap; }
+.aq-bar-track { flex:1; width:100%; display:flex; align-items:flex-end; }
+.aq-bar-fill { width:100%; background:var(--navy); border-radius:7px 7px 0 0; min-height:3px; transition:height .3s; }
+.aq-bar-lab { font-size:12px; font-weight:600; color:var(--ink); margin-top:6px; }
+.aq-bar-sub { font-size:11px; color:var(--muted); }
+.aq-hbars { display:flex; flex-direction:column; gap:11px; }
+.aq-hbar-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:4px; }
+.aq-hbar-name { font-size:13px; color:var(--ink); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.aq-hbar-num { font-size:12px; color:var(--muted); white-space:nowrap; }
+.aq-hbar-track { background:var(--bg); border-radius:6px; height:12px; overflow:hidden; }
+.aq-hbar-fill { height:100%; background:var(--blue); border-radius:6px; min-width:3px; transition:width .3s; }
+.aq-hbar-fill.alt { background:#5dbf9e; }
+@media (max-width:700px) { .aq-grid2 { grid-template-columns:1fr; } }
 
 /* Buscador de pedidos */
 .aq-buscar-ped { margin-bottom:10px; }
