@@ -128,20 +128,38 @@ export default function App() {
     }
     (async () => {
       try {
-        const [c, p, t, d] = await Promise.all([
-          supabase.from("clientes").select("*").order("nombre"),
+        // Supabase devuelve máximo 1000 filas por consulta. clientes y
+        // domicilios superan eso, así que los traemos paginando en bloques.
+        const traerTodo = async (tabla, columnas) => {
+          const PAGE = 1000;
+          let desde = 0;
+          let acumulado = [];
+          for (;;) {
+            const { data, error } = await supabase
+              .from(tabla)
+              .select(columnas)
+              .range(desde, desde + PAGE - 1);
+            if (error) throw error;
+            acumulado = acumulado.concat(data || []);
+            if (!data || data.length < PAGE) break;
+            desde += PAGE;
+          }
+          return acumulado;
+        };
+
+        const [cli, dom, p, t] = await Promise.all([
+          traerTodo("clientes", "*"),
+          traerTodo("domicilios", "id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal"),
           supabase.from("productos").select("*").eq("activo", true).order("nombre"),
           supabase.from("precio_tramos").select("*"),
-          supabase.from("domicilios").select("id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal"),
         ]);
-        if (c.error) throw c.error;
         if (p.error) throw p.error;
         if (t.error) throw t.error;
-        if (d.error) throw d.error;
-        setClientes(c.data || []);
+        cli.sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+        setClientes(cli);
         setProductos(p.data || []);
         setTramos(t.data || []);
-        setTodosDomicilios(d.data || []);
+        setTodosDomicilios(dom);
       } catch (e) {
         setErrorCarga(e.message || "No se pudieron cargar los catálogos.");
       } finally {
