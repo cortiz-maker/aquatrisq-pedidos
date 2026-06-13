@@ -47,6 +47,7 @@ export default function App() {
   const [clientes, setClientes] = useState([]);
   const [productos, setProductos] = useState([]);
   const [tramos, setTramos] = useState([]);
+  const [todosDomicilios, setTodosDomicilios] = useState([]); // índice para buscar por identificador_dt (215-1)
   const [cargando, setCargando] = useState(true);
   const [errorCarga, setErrorCarga] = useState("");
 
@@ -85,17 +86,20 @@ export default function App() {
     }
     (async () => {
       try {
-        const [c, p, t] = await Promise.all([
+        const [c, p, t, d] = await Promise.all([
           supabase.from("clientes").select("*").eq("activo", true).eq("bloqueado", false).order("nombre"),
           supabase.from("productos").select("*").eq("activo", true).order("nombre"),
           supabase.from("precio_tramos").select("*"),
+          supabase.from("domicilios").select("id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal").eq("activo", true),
         ]);
         if (c.error) throw c.error;
         if (p.error) throw p.error;
         if (t.error) throw t.error;
+        if (d.error) throw d.error;
         setClientes(c.data || []);
         setProductos(p.data || []);
         setTramos(t.data || []);
+        setTodosDomicilios(d.data || []);
       } catch (e) {
         setErrorCarga(e.message || "No se pudieron cargar los catálogos.");
       } finally {
@@ -105,7 +109,7 @@ export default function App() {
   }, [credsListas]);
 
   // ── Al elegir cliente: domicilios + plan + descuentos ──────
-  async function elegirCliente(c) {
+  async function elegirCliente(c, domPreseleccionarId) {
     setCliente(c);
     setBuscarCliente("");
     setDomicilioId("");
@@ -123,8 +127,13 @@ export default function App() {
 
     const doms = dom.data || [];
     setDomicilios(doms);
-    const principal = doms.find((d) => d.es_principal) || doms[0];
-    if (principal) setDomicilioId(principal.id);
+    // Si se buscó por un identificador de domicilio (215-1), preseleccionar ese;
+    // si no, el principal o el primero.
+    const elegido =
+      (domPreseleccionarId && doms.find((d) => d.id === domPreseleccionarId)) ||
+      doms.find((d) => d.es_principal) ||
+      doms[0];
+    if (elegido) setDomicilioId(elegido.id);
 
     // Plan prepago con saldo disponible
     const conSaldo = (plan.data || []).find((p) => (p.unidades_saldo ?? 0) > 0);
@@ -133,18 +142,36 @@ export default function App() {
     setDescCliente(dc.data || []);
   }
 
-  const clientesFiltrados = useMemo(() => {
+  // Resultados de búsqueda: por datos del cliente (nombre/RUT/código) y
+  // también por el identificador del domicilio (ej. 215-1).
+  const resultadosBusqueda = useMemo(() => {
     const q = buscarCliente.trim().toLowerCase();
     if (!q) return [];
-    return clientes
+    const porCliente = clientes
       .filter(
         (c) =>
           (c.nombre || "").toLowerCase().includes(q) ||
           (c.rut || "").toLowerCase().includes(q) ||
           (c.codigo_cliente || "").toLowerCase().includes(q)
       )
-      .slice(0, 8);
-  }, [buscarCliente, clientes]);
+      .map((c) => ({ cliente: c, dom: null }));
+
+    // Coincidencias por identificador_dt del domicilio (215-1)
+    const porDomicilio = todosDomicilios
+      .filter((d) => (d.identificador_dt || "").toLowerCase().includes(q))
+      .map((d) => ({ cliente: clientes.find((c) => c.id === d.cliente_id), dom: d }))
+      .filter((r) => r.cliente);
+
+    // Unir evitando duplicar el mismo par cliente+domicilio
+    const vistos = new Set();
+    const todo = [...porDomicilio, ...porCliente].filter((r) => {
+      const k = r.cliente.id + "|" + (r.dom?.id || "");
+      if (vistos.has(k)) return false;
+      vistos.add(k);
+      return true;
+    });
+    return todo.slice(0, 8);
+  }, [buscarCliente, clientes, todosDomicilios]);
 
   // ── Líneas de producto ─────────────────────────────────────
   function agregarItem() {
@@ -416,12 +443,20 @@ export default function App() {
                     onChange={(e) => setBuscarCliente(e.target.value)}
                     autoFocus
                   />
-                  {clientesFiltrados.length > 0 && (
+                  {resultadosBusqueda.length > 0 && (
                     <ul className="aq-results">
-                      {clientesFiltrados.map((c) => (
-                        <li key={c.id} onClick={() => elegirCliente(c)}>
-                          <strong>{c.nombre}</strong>
-                          <span>{c.rut || c.codigo_cliente}{c.es_empresa ? " · empresa" : ""}</span>
+                      {resultadosBusqueda.map((r) => (
+                        <li
+                          key={r.cliente.id + "|" + (r.dom?.id || "")}
+                          onClick={() => elegirCliente(r.cliente, r.dom?.id)}
+                        >
+                          <strong>{r.cliente.nombre}</strong>
+                          <span>
+                            {r.dom?.identificador_dt
+                              ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
+                              : (r.cliente.rut || r.cliente.codigo_cliente)}
+                            {r.cliente.es_empresa ? " · empresa" : ""}
+                          </span>
                         </li>
                       ))}
                     </ul>
