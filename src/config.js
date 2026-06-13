@@ -8,10 +8,10 @@
 // ============================================================
 
 export const SUPABASE_URL =
-  import.meta.env.VITE_SUPABASE_URL || "PEGA_TU_SUPABASE_URL";
+  import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL || https://yzjnmnzbkykkqhefqekp.supabase.co/rest/v1/;;
 
 export const SUPABASE_ANON_KEY =
-  import.meta.env.VITE_SUPABASE_ANON_KEY || "PEGA_TU_ANON_KEY";
+  import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY || "eyJhbGc...tu-llave-larga";;
 
 export const PUENTE_URL =
   import.meta.env.VITE_PUENTE_URL ||
