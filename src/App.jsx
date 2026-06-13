@@ -12,6 +12,23 @@ const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 const CLP = (n) =>
   "$" + (Number(n) || 0).toLocaleString("es-CL", { maximumFractionDigits: 0 });
 
+// Mensaje que ve el operador y que se envía por correo al cliente.
+function mensajeConfirmacion(guia) {
+  return [
+    `Hola! Tu Pedido Nº ${guia} ya fue ingresado a la agenda para ser despachado.`,
+    `-`,
+    `Síguenos en nuestro instagram y no olvides subirnos *@aquatrisq y déjanos tu opinión* 💦💙`,
+    `-`,
+    `🟡*Importante:*🟡`,
+    `- Si estas *agendando recargas* recuerda que debes entregar *la misma cantidad de bidones*.`,
+    `- Los despachos podrían sufrir modificaciones con respecto al día de entrega, de ser el caso *será avisado mediante este mismo medio*, y confirmado por este medio.`,
+  ].join("\n");
+}
+
+// Email válido (mismo criterio que la normalización de la base).
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/;
+const emailValido = (e) => !!e && EMAIL_RE.test(String(e).trim());
+
 // Precio sugerido de un producto según su modo de descuento por volumen.
 function precioSugerido(prod, cantidad, tramos) {
   if (!prod) return 0;
@@ -78,6 +95,30 @@ export default function App() {
   const [guardando, setGuardando] = useState(false);
   const [resultado, setResultado] = useState(null); // { ok, guia, sync, msg }
 
+  // Navegación entre vistas: inicio (dashboard) | nuevo | mantenedor | confirmacion
+  const [vista, setVista] = useState("inicio");
+  const [confirma, setConfirma] = useState(null); // { guia, mensaje, emailEnviado, emailDestino, sync }
+
+  // Agregar email faltante al cliente desde el formulario
+  const [emailNuevo, setEmailNuevo] = useState("");
+  const [guardandoEmail, setGuardandoEmail] = useState(false);
+
+  // Dashboard por mes calendario
+  const hoyPeriodo = () => new Date().toISOString().slice(0, 7); // YYYY-MM
+  const [periodo, setPeriodo] = useState(hoyPeriodo());
+  const [pedidosMes, setPedidosMes] = useState([]);
+  const [cargandoDash, setCargandoDash] = useState(false);
+  const [errorDash, setErrorDash] = useState("");
+
+  // Mantenedor de bloqueo
+  const [buscarMant, setBuscarMant] = useState("");
+  const [clienteMant, setClienteMant] = useState(null);
+  const [bloqMant, setBloqMant] = useState(false);
+  const [motivoMant, setMotivoMant] = useState("");
+  const [operadorMant, setOperadorMant] = useState("");
+  const [guardandoMant, setGuardandoMant] = useState(false);
+  const [okMant, setOkMant] = useState("");
+
   // ── Carga inicial de catálogos ─────────────────────────────
   useEffect(() => {
     if (!credsListas) {
@@ -107,6 +148,109 @@ export default function App() {
       }
     })();
   }, [credsListas]);
+
+  // ── Dashboard: pedidos del mes calendario seleccionado ─────
+  async function cargarDashboard(per) {
+    if (!credsListas) return;
+    setCargandoDash(true);
+    setErrorDash("");
+    try {
+      const [y, m] = per.split("-").map(Number);
+      const desde = new Date(y, m - 1, 1).toISOString();
+      const hasta = new Date(y, m, 1).toISOString();
+      const { data, error } = await supabase
+        .from("pedidos")
+        .select("*")
+        .gte("created_at", desde)
+        .lt("created_at", hasta)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      setPedidosMes(data || []);
+    } catch (e) {
+      setErrorDash(e.message || "No se pudo cargar el período.");
+      setPedidosMes([]);
+    } finally {
+      setCargandoDash(false);
+    }
+  }
+  useEffect(() => {
+    if (vista === "inicio") cargarDashboard(periodo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vista, periodo, credsListas]);
+
+  // Mantener emailNuevo sincronizado con el cliente elegido
+  useEffect(() => {
+    setEmailNuevo(cliente?.email || "");
+  }, [cliente]);
+
+  // Guardar email que el operador agrega a un cliente sin correo
+  async function guardarEmailCliente() {
+    if (!cliente) return;
+    const e = emailNuevo.trim();
+    if (!emailValido(e)) return;
+    setGuardandoEmail(true);
+    try {
+      const { error } = await supabase
+        .from("clientes")
+        .update({ email: e, email_status: "ok", email_original: cliente.email_original || null })
+        .eq("id", cliente.id);
+      if (error) throw error;
+      const actualizado = { ...cliente, email: e, email_status: "ok" };
+      setCliente(actualizado);
+      setClientes((prev) => prev.map((c) => (c.id === cliente.id ? actualizado : c)));
+    } catch (err) {
+      setResultado({ ok: false, msg: "No se pudo guardar el email: " + (err.message || err) });
+    } finally {
+      setGuardandoEmail(false);
+    }
+  }
+
+  // ── Mantenedor de bloqueo ──────────────────────────────────
+  const resultadosMant = useMemo(() => {
+    const q = buscarMant.trim().toLowerCase();
+    if (!q) return [];
+    return clientes
+      .filter(
+        (c) =>
+          (c.nombre || "").toLowerCase().includes(q) ||
+          (c.rut || "").toLowerCase().includes(q) ||
+          (c.codigo_cliente || "").toLowerCase().includes(q)
+      )
+      .slice(0, 8);
+  }, [buscarMant, clientes]);
+
+  function elegirMant(c) {
+    setClienteMant(c);
+    setBuscarMant("");
+    setBloqMant(!!c.bloqueado);
+    setMotivoMant(c.motivo_bloqueo || "");
+    setOkMant("");
+  }
+
+  async function guardarBloqueo() {
+    if (!clienteMant) return;
+    setGuardandoMant(true);
+    setOkMant("");
+    try {
+      const patch = {
+        bloqueado: bloqMant,
+        motivo_bloqueo: bloqMant ? motivoMant.trim() || "Bloqueado (sin motivo)" : null,
+        bloqueado_por: bloqMant ? operadorMant.trim() || null : null,
+        bloqueado_at: bloqMant ? new Date().toISOString() : null,
+      };
+      const { error } = await supabase.from("clientes").update(patch).eq("id", clienteMant.id);
+      if (error) throw error;
+      const actualizado = { ...clienteMant, ...patch };
+      setClienteMant(actualizado);
+      setClientes((prev) => prev.map((c) => (c.id === clienteMant.id ? actualizado : c)));
+      if (cliente && cliente.id === clienteMant.id) setCliente(actualizado);
+      setOkMant(bloqMant ? "Cliente bloqueado." : "Cliente desbloqueado.");
+    } catch (err) {
+      setOkMant("Error: " + (err.message || err));
+    } finally {
+      setGuardandoMant(false);
+    }
+  }
 
   // ── Al elegir cliente: domicilios + plan + descuentos ──────
   async function elegirCliente(c, domPreseleccionarId) {
@@ -262,6 +406,8 @@ export default function App() {
   // ── Validación ─────────────────────────────────────────────
   function validar() {
     if (!cliente) return "Elige un cliente.";
+    if (cliente.bloqueado)
+      return "Cliente bloqueado" + (cliente.motivo_bloqueo ? ": " + cliente.motivo_bloqueo : "") + ". No se puede generar el pedido.";
     if (!domicilioId) return "Elige un domicilio de entrega.";
     if (items.length === 0) return "Agrega al menos un producto.";
     if (items.some((it) => !it.producto_id || Number(it.cantidad) <= 0)) return "Revisa cantidades y productos de las líneas.";
@@ -384,24 +530,76 @@ export default function App() {
         /* el puente puede no tener aún el mapeo; el pedido queda guardado igual */
       }
 
-      setResultado({
-        ok: true,
-        guia: pedido.numero_guia,
-        sync,
-        msg: `Pedido ${pedido.numero_guia} guardado. ${avisoSync}${avisoPlan}`,
-      });
+      // 6) Mensaje de confirmación + correo al cliente (best-effort)
+      const guia = pedido.numero_guia;
+      const mensaje = mensajeConfirmacion(guia);
+      const emailDestino = emailValido(cliente?.email) ? cliente.email.trim() : null;
 
-      // Reset de la parte transaccional, conservando al cliente.
+      const detalle = lineas
+        .map((l) => `${l.cantidad} x ${l.nombre}${l.codigo ? " (" + l.codigo + ")" : ""} — ${CLP((Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0))}`)
+        .join("\n");
+
+      let emailEnviado = false;
+      if (emailDestino) {
+        try {
+          const re = await fetch(`${PUENTE_URL}/api/notificar`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              to: emailDestino,
+              cliente: cliente?.nombre || "",
+              guia,
+              mensaje,
+              detalle,
+              total: montoTotal,
+            }),
+          });
+          emailEnviado = re.ok;
+        } catch {
+          /* el endpoint de correo puede no estar aún en el puente */
+        }
+      }
+
+      setConfirma({ guia, mensaje, emailEnviado, emailDestino, sync });
+      setVista("confirmacion");
+
+      // Reset completo: volvemos al inicio en una pantalla limpia.
       setItems([]);
       setDescuentos([]);
       setObservacion("");
-      // refrescar saldo del plan
-      if (cliente) elegirCliente(cliente);
+      setCliente(null);
+      setDomicilioId("");
+      setPlanPrepago(null);
+      setConsumePlan(false);
+      setResultado(null);
     } catch (e) {
       setResultado({ ok: false, msg: "No se pudo guardar: " + (e.message || e) });
     } finally {
       setGuardando(false);
     }
+  }
+
+  // ── Métricas del dashboard (mes seleccionado) ──────────────
+  const dash = (() => {
+    const ped = pedidosMes;
+    const est = (p) => String(p.estado_entrega || p.estado || "").toLowerCase();
+    return {
+      ingresados: ped.length,
+      enviados: ped.filter((p) => p.estado_sync === "enviado_dt").length,
+      pendientes: ped.filter((p) => p.estado_sync !== "enviado_dt").length,
+      entregados: ped.filter((p) => est(p).includes("entreg")).length,
+      monto: ped.reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
+      tieneEstado: ped.some((p) => p.estado_entrega != null || p.estado != null),
+    };
+  })();
+  const periodoLabel = (() => {
+    const [y, m] = periodo.split("-").map(Number);
+    const s = new Date(y, m - 1, 1).toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  })();
+  function cambiarPeriodo(delta) {
+    const [y, m] = periodo.split("-").map(Number);
+    setPeriodo(new Date(y, m - 1 + delta, 1).toISOString().slice(0, 7));
   }
 
   // ── Render ─────────────────────────────────────────────────
@@ -411,12 +609,19 @@ export default function App() {
 
       <header className="aq-header">
         <div className="aq-brand">
-          <span className="aq-mark" aria-hidden>≋</span>
+          <img src="/logo-aquatrisq.png" className="aq-logo" alt="Aquatrisq" />
           <div>
             <h1>Aquatrisq</h1>
-            <p>Crear pedido</p>
+            <p>Gestión de pedidos</p>
           </div>
         </div>
+        {credsListas && (
+          <nav className="aq-nav">
+            <button className={vista === "inicio" ? "on" : ""} onClick={() => setVista("inicio")}>Inicio</button>
+            <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
+            <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>Clientes</button>
+          </nav>
+        )}
       </header>
 
       <main className="aq-main">
@@ -430,7 +635,157 @@ export default function App() {
         {credsListas && cargando && <div className="aq-card">Cargando catálogos…</div>}
         {errorCarga && <div className="aq-card aq-error">No se pudieron cargar los datos: {errorCarga}</div>}
 
-        {credsListas && !cargando && !errorCarga && (
+        {/* ===================== INICIO / DASHBOARD ===================== */}
+        {credsListas && vista === "inicio" && (
+          <>
+            <section className="aq-card aq-period">
+              <button className="aq-per-nav" onClick={() => cambiarPeriodo(-1)} aria-label="Mes anterior">‹</button>
+              <div className="aq-per-label">
+                <span>Período</span>
+                <strong>{periodoLabel}</strong>
+              </div>
+              <button
+                className="aq-per-nav"
+                onClick={() => cambiarPeriodo(1)}
+                aria-label="Mes siguiente"
+                disabled={periodo >= hoyPeriodo()}
+              >›</button>
+            </section>
+
+            {errorDash && <div className="aq-card aq-error">No se pudo cargar el período: {errorDash}</div>}
+            {cargandoDash ? (
+              <div className="aq-card">Cargando período…</div>
+            ) : (
+              <>
+                <div className="aq-kpis">
+                  <div className="aq-kpi"><span>Ingresados</span><strong>{dash.ingresados}</strong></div>
+                  <div className="aq-kpi"><span>Enviados a DT</span><strong>{dash.enviados}</strong></div>
+                  <div className="aq-kpi"><span>Pendientes de envío</span><strong>{dash.pendientes}</strong></div>
+                  <div className="aq-kpi">
+                    <span>Entregados</span>
+                    <strong>{dash.tieneEstado ? dash.entregados : "—"}</strong>
+                  </div>
+                  <div className="aq-kpi aq-kpi-wide"><span>Monto del mes</span><strong>{CLP(dash.monto)}</strong></div>
+                </div>
+                {!dash.tieneEstado && (
+                  <p className="aq-muted" style={{ marginTop: 0 }}>
+                    El estado “Entregado” se activará cuando conectemos el retorno de DispatchTrack (webhook).
+                  </p>
+                )}
+
+                <section className="aq-card">
+                  <div className="aq-row-head">
+                    <h2>Pedidos del período</h2>
+                    <button className="aq-btn-sec" onClick={() => setVista("nuevo")}>+ Nuevo pedido</button>
+                  </div>
+                  {pedidosMes.length === 0 ? (
+                    <p className="aq-muted">Sin pedidos en {periodoLabel}.</p>
+                  ) : (
+                    <div className="aq-tabla">
+                      {pedidosMes.slice(0, 60).map((p) => (
+                        <div className="aq-tr" key={p.id}>
+                          <strong>{p.numero_guia || "—"}</strong>
+                          <span className="aq-muted">
+                            {p.created_at ? new Date(p.created_at).toLocaleDateString("es-CL") : ""}
+                          </span>
+                          <span>{CLP(p.monto_total)}</span>
+                          <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>
+                            {p.estado_sync === "enviado_dt" ? "En DT" : "Pendiente"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+          </>
+        )}
+
+        {/* ===================== CONFIRMACIÓN ===================== */}
+        {credsListas && vista === "confirmacion" && confirma && (
+          <section className="aq-card aq-confirm">
+            <div className="aq-confirm-head">
+              <span className="aq-check-ico" aria-hidden>✓</span>
+              <h2>Pedido {confirma.guia} ingresado</h2>
+            </div>
+            <pre className="aq-confirm-msg">{confirma.mensaje}</pre>
+            <div className={"aq-email-line " + (confirma.emailEnviado ? "ok" : confirma.emailDestino ? "warn" : "muted")}>
+              {confirma.emailEnviado
+                ? `Correo enviado a ${confirma.emailDestino}.`
+                : confirma.emailDestino
+                ? `No se pudo enviar el correo a ${confirma.emailDestino} (revisar el puente). El pedido quedó guardado igual.`
+                : "El cliente no tiene email registrado, no se envió correo."}
+            </div>
+            {confirma.sync !== "enviado_dt" && (
+              <p className="aq-muted">Envío a DispatchTrack pendiente; el pedido quedó guardado.</p>
+            )}
+            <div className="aq-confirm-acts">
+              <button className="aq-btn" onClick={() => { setConfirma(null); setVista("inicio"); }}>Volver al inicio</button>
+              <button className="aq-btn-sec" onClick={() => { setConfirma(null); setVista("nuevo"); }}>Otro pedido</button>
+            </div>
+          </section>
+        )}
+
+        {/* ===================== MANTENEDOR DE CLIENTES ===================== */}
+        {credsListas && !cargando && !errorCarga && vista === "mantenedor" && (
+          <section className="aq-card">
+            <h2>Bloquear / desbloquear cliente</h2>
+            {!clienteMant ? (
+              <div className="aq-search">
+                <input
+                  placeholder="Buscar por nombre, RUT o código"
+                  value={buscarMant}
+                  onChange={(e) => setBuscarMant(e.target.value)}
+                  autoFocus
+                />
+                {resultadosMant.length > 0 && (
+                  <ul className="aq-results">
+                    {resultadosMant.map((c) => (
+                      <li key={c.id} onClick={() => elegirMant(c)} className={c.bloqueado ? "aq-li-alerta" : ""}>
+                        <strong>{c.bloqueado ? "⚠ " : ""}{c.nombre}</strong>
+                        <span>{c.codigo_cliente || c.rut || ""}{c.bloqueado ? " · bloqueado" : ""}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : (
+              <div className="aq-mant">
+                <div className="aq-chosen">
+                  <div>
+                    <strong>{clienteMant.nombre}</strong>
+                    <span>{clienteMant.codigo_cliente || clienteMant.rut || ""}</span>
+                  </div>
+                  <button className="aq-link" onClick={() => { setClienteMant(null); setOkMant(""); }}>Cambiar</button>
+                </div>
+                <label className="aq-check" style={{ marginTop: 14 }}>
+                  <input type="checkbox" checked={bloqMant} onChange={(e) => setBloqMant(e.target.checked)} />
+                  Cliente bloqueado para comprar
+                </label>
+                {bloqMant && (
+                  <>
+                    <label className="aq-full">
+                      Motivo del bloqueo
+                      <textarea rows="2" value={motivoMant} onChange={(e) => setMotivoMant(e.target.value)} placeholder="Ej: Bloqueo por no pago" />
+                    </label>
+                    <label className="aq-full">
+                      Operador
+                      <input value={operadorMant} onChange={(e) => setOperadorMant(e.target.value)} placeholder="Tu nombre" />
+                    </label>
+                  </>
+                )}
+                <button className="aq-btn" disabled={guardandoMant} onClick={guardarBloqueo} style={{ marginTop: 14 }}>
+                  {guardandoMant ? "Guardando…" : "Guardar"}
+                </button>
+                {okMant && <div className={"aq-result " + (okMant.startsWith("Error") ? "bad" : "ok")}>{okMant}</div>}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ===================== NUEVO PEDIDO ===================== */}
+        {credsListas && !cargando && !errorCarga && vista === "nuevo" && (
           <>
             {/* Cliente */}
             <section className="aq-card">
@@ -464,15 +819,34 @@ export default function App() {
                   )}
                 </div>
               ) : (
-                <div className="aq-chosen">
-                  <div>
-                    <strong>{cliente.nombre}</strong>
-                    <span>{cliente.rut || cliente.codigo_cliente}{cliente.es_empresa ? " · empresa" : ""}</span>
+                <>
+                  <div className="aq-chosen">
+                    <div>
+                      <strong>{cliente.nombre}</strong>
+                      <span>{cliente.rut || cliente.codigo_cliente}{cliente.es_empresa ? " · empresa" : ""}</span>
+                    </div>
+                    <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); }}>
+                      Cambiar
+                    </button>
                   </div>
-                  <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); }}>
-                    Cambiar
-                  </button>
-                </div>
+                  {!emailValido(cliente.email) && (
+                    <div className="aq-email-alert">
+                      <strong>⚠ Sin email registrado</strong>
+                      <p>Agrega un correo para enviarle la confirmación del pedido.</p>
+                      <div className="aq-email-add">
+                        <input
+                          type="email"
+                          placeholder="correo@cliente.cl"
+                          value={emailNuevo}
+                          onChange={(e) => setEmailNuevo(e.target.value)}
+                        />
+                        <button className="aq-btn-sec" disabled={!emailValido(emailNuevo) || guardandoEmail} onClick={guardarEmailCliente}>
+                          {guardandoEmail ? "…" : "Guardar email"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </section>
 
@@ -773,12 +1147,76 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--blue); outli
 .aq-warn { background:#fff7e6; border-color:#f0d8a0; color:#7a5a00; }
 .aq-error { background:#fdecea; border-color:#f3c4bf; color:var(--bad); }
 code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
+
+/* Logo + navegación */
+.aq-logo { width:42px; height:42px; border-radius:10px; background:#fff; object-fit:contain; padding:3px; }
+.aq-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+.aq-nav { display:flex; gap:6px; max-width:760px; }
+.aq-nav button { background:rgba(255,255,255,.12); color:#dce6f6; border:none; font:inherit; font-weight:600; font-size:13px;
+  padding:7px 13px; border-radius:9px; cursor:pointer; }
+.aq-nav button:hover { background:rgba(255,255,255,.2); }
+.aq-nav button.on { background:#fff; color:var(--navy); }
+
+/* Período */
+.aq-period { display:flex; align-items:center; justify-content:space-between; }
+.aq-per-nav { width:38px; height:38px; border-radius:9px; border:1px solid var(--line); background:#fff; color:var(--navy);
+  font-size:22px; line-height:1; cursor:pointer; }
+.aq-per-nav:disabled { opacity:.4; cursor:not-allowed; }
+.aq-per-label { text-align:center; }
+.aq-per-label span { display:block; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+.aq-per-label strong { font-family:'Fraunces',serif; font-size:20px; color:var(--navy); }
+
+/* KPIs */
+.aq-kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+.aq-kpi { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px; }
+.aq-kpi span { display:block; font-size:12px; color:var(--muted); }
+.aq-kpi strong { font-family:'Fraunces',serif; font-size:26px; color:var(--navy); }
+.aq-kpi-wide { grid-column:span 4; background:var(--navy); border-color:var(--navy); }
+.aq-kpi-wide span { color:#c5d2e8; }
+.aq-kpi-wide strong { color:#fff; }
+
+/* Tabla de pedidos */
+.aq-tabla { display:flex; flex-direction:column; }
+.aq-tr { display:grid; grid-template-columns:1fr auto 110px 90px; gap:10px; align-items:center; padding:10px 2px;
+  border-bottom:1px solid var(--line); font-size:14px; }
+.aq-tr:last-child { border-bottom:none; }
+.aq-badge { font-size:11px; font-weight:700; text-align:center; padding:3px 8px; border-radius:20px; }
+.aq-badge.ok { background:#e8f5ee; color:var(--ok); }
+.aq-badge.warn { background:#fff7e6; color:#7a5a00; }
+
+/* Confirmación */
+.aq-confirm-head { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+.aq-check-ico { width:34px; height:34px; border-radius:50%; background:var(--ok); color:#fff; display:flex; align-items:center;
+  justify-content:center; font-size:18px; font-weight:700; }
+.aq-confirm h2 { margin:0; color:var(--navy); font-size:18px; text-transform:none; letter-spacing:0; }
+.aq-confirm-msg { font-family:inherit; font-size:14px; line-height:1.5; white-space:pre-wrap; background:#f3f8fc;
+  border:1px solid var(--line); border-radius:11px; padding:14px; color:var(--ink); margin:0; }
+.aq-email-line { margin-top:12px; font-size:14px; padding:9px 12px; border-radius:9px; }
+.aq-email-line.ok { background:#e8f5ee; color:var(--ok); }
+.aq-email-line.warn { background:#fff7e6; color:#7a5a00; }
+.aq-email-line.muted { background:var(--bg); color:var(--muted); }
+.aq-confirm-acts { display:flex; gap:10px; margin-top:16px; }
+.aq-confirm-acts .aq-btn { width:auto; flex:1; margin-top:0; }
+.aq-confirm-acts .aq-btn-sec { flex:1; }
+
+/* Alerta de email faltante */
+.aq-email-alert { margin-top:12px; background:#fff7e6; border:1px solid #f0d8a0; border-left:4px solid #e0a300; border-radius:11px; padding:12px 14px; }
+.aq-email-alert strong { color:#7a5a00; display:block; font-size:14px; }
+.aq-email-alert p { margin:4px 0 10px; font-size:13px; color:#7a5a00; }
+.aq-email-add { display:flex; gap:8px; }
+.aq-email-add input { flex:1; }
+.aq-email-add .aq-btn-sec { white-space:nowrap; }
+
 @media (max-width:560px) {
   .aq-grid { grid-template-columns:1fr; }
   .aq-item { grid-template-columns: 1fr 56px 80px 28px; }
   .aq-item .aq-sub { display:none; }
   .aq-desc { grid-template-columns: 1fr 80px 28px; }
   .aq-desc select { grid-column:1 / -1; }
+  .aq-kpis { grid-template-columns:repeat(2,1fr); }
+  .aq-kpi-wide { grid-column:span 2; }
+  .aq-tr { grid-template-columns:1fr auto 80px; }
+  .aq-tr .aq-badge { grid-column:2 / 3; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
