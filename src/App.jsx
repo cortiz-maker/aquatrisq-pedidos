@@ -138,6 +138,12 @@ export default function App() {
       setCargando(false);
       return;
     }
+    if (!session) {
+      // Con RLS activo, los datos se leen autenticado: esperamos al login.
+      setCargando(false);
+      return;
+    }
+    setCargando(true);
     (async () => {
       try {
         // Supabase devuelve máximo 1000 filas por consulta. clientes y
@@ -178,11 +184,11 @@ export default function App() {
         setCargando(false);
       }
     })();
-  }, [credsListas]);
+  }, [credsListas, session]);
 
   // ── Dashboard: pedidos del mes calendario seleccionado ─────
   async function cargarDashboard(per) {
-    if (!credsListas) return;
+    if (!credsListas || !session) return;
     setCargandoDash(true);
     setErrorDash("");
     try {
@@ -207,7 +213,7 @@ export default function App() {
   useEffect(() => {
     if (vista === "inicio") cargarDashboard(periodo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vista, periodo, credsListas]);
+  }, [vista, periodo, credsListas, session]);
 
   // ── Sesión: detectar login, cargar rol del perfil ──────────
   useEffect(() => {
