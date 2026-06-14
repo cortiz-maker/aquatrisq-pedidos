@@ -216,6 +216,7 @@ export default function App() {
   const [filtroCob, setFiltroCob] = useState("pendientes"); // pendientes | gestionados | todos
   const [guardandoCob, setGuardandoCob] = useState("");  // id del pedido en proceso
   const [avisoDeuda, setAvisoDeuda] = useState(null);    // { guias:[], monto } alerta en Nuevo pedido
+  const [cobExpand, setCobExpand] = useState({});        // cliente_id -> grupo expandido en Cobranzas
 
   // Mantenedor de productos (admin)
   const [productosAll, setProductosAll] = useState([]);
@@ -416,7 +417,35 @@ export default function App() {
         .reduce((s, p) => s + (Number(p.monto_total) || 0), 0);
       const ticket = mesActual.count ? Math.round(mesActual.monto / mesActual.count) : 0;
 
-      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket });
+      // Deuda vencida +30 días (histórico): entregas Pago=No no cobradas, gestionadas hace +30 días
+      let venc30 = { monto: 0, count: 0 };
+      try {
+        const { data: ents } = await supabase
+          .from("dt_entregas").select("*")
+          .not("gestionado_en", "is", null)
+          .order("gestionado_en", { ascending: false })
+          .limit(1000);
+        const pagoNo = (ents || []).filter((e) => esPagoNo(e));
+        const guias = [...new Set(pagoNo.map((e) => e.guide).filter(Boolean))];
+        const entByGuide = {};
+        pagoNo.forEach((e) => { if (e.guide) entByGuide[e.guide] = e; });
+        let pp = [];
+        for (let i = 0; i < guias.length; i += 200) {
+          const lote = guias.slice(i, i + 200);
+          if (!lote.length) break;
+          const { data } = await supabase.from("pedidos").select("numero_guia, monto_total, cobro_cobrado").in("numero_guia", lote);
+          pp = pp.concat(data || []);
+        }
+        const ahora = Date.now();
+        pp.forEach((p) => {
+          if (p.cobro_cobrado) return;
+          const e = entByGuide[p.numero_guia];
+          const g = e?.gestionado_en ? new Date(e.gestionado_en).getTime() : null;
+          if (g && (ahora - g) > 30 * 86400000) { venc30.monto += Number(p.monto_total) || 0; venc30.count += 1; }
+        });
+      } catch { /* si falla, dejamos venc30 en cero */ }
+
+      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30 });
     } catch (e) {
       setErrorGer(e.message || "No se pudo cargar el panel gerencial.");
       setGer(null);
@@ -1495,6 +1524,54 @@ export default function App() {
     return { label: "Deuda", cls: "bad" };
   };
 
+  // Resumen e índices de la ventana Cobranzas (histórico completo).
+  const DIA_MS = 86400000;
+  const montoCob = (o) => Number(o.pedido.monto_total) || montoEntrega(o.entrega) || 0;
+  const diasDesdeEntrega = (o) => {
+    const g = o.entrega?.gestionado_en ? new Date(o.entrega.gestionado_en).getTime() : null;
+    return g ? Math.floor((Date.now() - g) / DIA_MS) : null;
+  };
+
+  const cobResumen = useMemo(() => {
+    const items = cobranzas || [];
+    let generada = 0, cobrado = 0, pend = 0, pendCount = 0, venc = 0, vencCount = 0, recCount = 0;
+    items.forEach((o) => {
+      const m = montoCob(o);
+      generada += m;
+      if (o.pedido.cobro_cobrado) cobrado += m;
+      else {
+        pend += m; pendCount++;
+        const d = diasDesdeEntrega(o);
+        if (d != null && d > 30) { venc += m; vencCount++; }
+      }
+      if (o.pedido.cobro_recuperado) recCount++;
+    });
+    return { generada, cobrado, pend, pendCount, venc, vencCount, recCount, total: items.length };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cobranzas]);
+
+  const cobGrupos = useMemo(() => {
+    const items = (cobranzas || []).filter((x) => {
+      if (filtroCob === "pendientes") return !x.pedido.cobro_cobrado;
+      if (filtroCob === "gestionados") return !!x.pedido.cobro_cobrado;
+      return true;
+    });
+    const map = {};
+    items.forEach((o) => {
+      const cid = o.pedido.cliente_id || "—";
+      if (!map[cid]) map[cid] = { clienteId: cid, orders: [] };
+      map[cid].orders.push(o);
+    });
+    return Object.values(map)
+      .map((g) => {
+        const deuda = g.orders.filter((o) => !o.pedido.cobro_cobrado).reduce((s, o) => s + montoCob(o), 0);
+        const diasMax = g.orders.filter((o) => !o.pedido.cobro_cobrado).reduce((mx, o) => { const d = diasDesdeEntrega(o); return d != null && d > mx ? d : mx; }, 0);
+        return { ...g, deuda, count: g.orders.length, diasMax };
+      })
+      .sort((a, b) => b.deuda - a.deuda);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cobranzas, filtroCob]);
+
   const pedidosFiltrados = useMemo(() => {
     const q = buscarPedido.trim().toLowerCase();
     return pedidosMes.filter((p) => {
@@ -1671,14 +1748,10 @@ export default function App() {
                     <span>Monto del mes</span>
                     <strong>{CLP(dash.monto)}</strong>
                   </div>
-                  <div className="aq-money-card cobrar">
-                    <span>Por cobrar</span>
-                    <strong>{CLP(dash.porCobrar)}</strong>
-                  </div>
                   <button className="aq-money-card deuda" onClick={abrirCobranzas} title="Abrir gestión de cobro">
-                    <span>Deuda por cobrar (gestión)</span>
+                    <span>Deuda por cobrar del mes</span>
                     <strong>{CLP(dash.deudaMonto)}</strong>
-                    <em className="aq-money-sub">{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados}</em>
+                    <em className="aq-money-sub">{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados} · histórico en Cobranzas</em>
                   </button>
                 </div>
 
@@ -1770,6 +1843,9 @@ export default function App() {
                   </div>
                   <div className="aq-kpi">
                     <span>Por cobrar</span><strong>{CLP(ger.porCobrarMes)}</strong>
+                  </div>
+                  <div className={"aq-kpi" + (ger.venc30 && ger.venc30.monto > 0 ? " aq-kpi-venc" : "")}>
+                    <span>Deuda +30 días</span><strong>{CLP(ger.venc30 ? ger.venc30.monto : 0)}</strong>
                   </div>
                 </div>
 
@@ -2249,56 +2325,102 @@ export default function App() {
             {errorCob && <div className="aq-result bad" style={{ marginTop: 10 }}>{errorCob}</div>}
             {okCob && <div className="aq-result ok" style={{ marginTop: 10 }}>{okCob}</div>}
 
+            {!cargandoCob && (cobranzas || []).length > 0 && (
+              <div className="aq-cob-resumen">
+                <div className="aq-cob-rcard">
+                  <span>Deuda generada</span>
+                  <strong>{CLP(cobResumen.generada)}</strong>
+                  <em>{cobResumen.total} pedido(s) impagos</em>
+                </div>
+                <div className="aq-cob-rcard ok">
+                  <span>Recuperado (cobrado)</span>
+                  <strong>{CLP(cobResumen.cobrado)}</strong>
+                  <em>{cobResumen.recCount} con bidón recuperado</em>
+                </div>
+                <div className="aq-cob-rcard pend">
+                  <span>Pendiente</span>
+                  <strong>{CLP(cobResumen.pend)}</strong>
+                  <em>{cobResumen.pendCount} pedido(s)</em>
+                </div>
+                <div className={"aq-cob-rcard" + (cobResumen.venc > 0 ? " venc" : "")}>
+                  <span>Deuda +30 días</span>
+                  <strong>{CLP(cobResumen.venc)}</strong>
+                  <em>{cobResumen.vencCount} pedido(s) vencidos</em>
+                </div>
+              </div>
+            )}
+
             {cargandoCob ? (
               <p className="aq-muted" style={{ marginTop: 12 }}>Cargando…</p>
             ) : (cobranzas || []).length === 0 ? (
               <p className="aq-muted" style={{ marginTop: 12 }}>No hay entregas con Pago = No.</p>
+            ) : cobGrupos.length === 0 ? (
+              <p className="aq-muted" style={{ marginTop: 12 }}>Nada en este filtro.</p>
             ) : (
               <div className="aq-tabla" style={{ marginTop: 6 }}>
-                {(cobranzas || [])
-                  .filter((x) => {
-                    if (filtroCob === "pendientes") return !x.pedido.cobro_cobrado;
-                    if (filtroCob === "gestionados") return !!x.pedido.cobro_cobrado;
-                    return true;
-                  })
-                  .map(({ pedido: p, entrega: e }) => {
-                    const cli = clientePorId[p.cliente_id];
-                    const dom = domPorId[p.domicilio_id];
-                    const intentos = Number(p.cobro_intentos) || 0;
-                    const enProceso = guardandoCob === p.id;
-                    return (
-                      <div className="aq-cob" key={p.id}>
-                        <div className="aq-cob-head">
-                          <div className="aq-cob-main">
-                            <strong>{cli?.nombre || "Cliente"}{cli?.bloqueado ? " · ⚠ bloqueado" : ""}</strong>
-                            <span className="aq-tr-sub">
-                              {p.numero_guia || "—"}
-                              {(dom?.comuna || e?.contact_name) ? " · " + (dom?.comuna || e?.contact_name) : ""}
-                              {e?.gestionado_en ? " · " + new Date(e.gestionado_en).toLocaleDateString("es-CL", { day: "2-digit", month: "short" }) : ""}
-                            </span>
-                          </div>
-                          <span className="aq-tr-monto">{CLP(p.monto_total || montoEntrega(e))}</span>
+                {cobGrupos.map((g) => {
+                  const cli = clientePorId[g.clienteId];
+                  const abierto = !!cobExpand[g.clienteId];
+                  const vencido = g.diasMax > 30;
+                  return (
+                    <div className="aq-cob-grupo" key={g.clienteId}>
+                      <div className="aq-cob-grow" onClick={() => setCobExpand((prev) => ({ ...prev, [g.clienteId]: !prev[g.clienteId] }))}>
+                        <div className="aq-cob-main">
+                          <strong>{cli?.nombre || "Cliente"}{cli?.bloqueado ? " · ⚠ bloqueado" : ""}</strong>
+                          <span className="aq-tr-sub">
+                            {g.count} pedido(s) impago(s)
+                            {g.diasMax > 0 ? " · más antiguo " + g.diasMax + " días" : ""}
+                          </span>
                         </div>
-                        <div className="aq-cob-badges">
-                          <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
-                          <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
-                          <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
-                        </div>
-                        <div className="aq-cob-acts">
-                          <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
-                            {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
-                          </button>
-                          <button className={"aq-btn-sec" + (p.cobro_recuperado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_recuperado")}>
-                            {p.cobro_recuperado ? "✓ Recuperado" : "Marcar recuperado"}
-                          </button>
-                          <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado} onClick={() => registrarIntento(p)}>
-                            + Intento de cobro
-                          </button>
-                          <button className="aq-link" onClick={() => abrirPedidoModal(p)}>Ver detalle</button>
-                        </div>
+                        <span className="aq-tr-monto">{CLP(g.deuda)}</span>
+                        {vencido && <span className="aq-badge bad">+30 días</span>}
+                        <span className="aq-hist-caret">{abierto ? "▾" : "▸"}</span>
                       </div>
-                    );
-                  })}
+                      {abierto && (
+                        <div className="aq-cob-orders">
+                          {g.orders.map(({ pedido: p, entrega: e }) => {
+                            const dom = domPorId[p.domicilio_id];
+                            const intentos = Number(p.cobro_intentos) || 0;
+                            const enProceso = guardandoCob === p.id;
+                            const dias = e?.gestionado_en ? Math.floor((Date.now() - new Date(e.gestionado_en).getTime()) / 86400000) : null;
+                            return (
+                              <div className="aq-cob" key={p.id}>
+                                <div className="aq-cob-head">
+                                  <div className="aq-cob-main">
+                                    <strong>{p.numero_guia || "—"}</strong>
+                                    <span className="aq-tr-sub">
+                                      {(dom?.comuna || e?.contact_name) ? (dom?.comuna || e?.contact_name) : ""}
+                                      {e?.gestionado_en ? " · " + new Date(e.gestionado_en).toLocaleDateString("es-CL", { day: "2-digit", month: "short" }) : ""}
+                                      {dias != null ? " · " + dias + " días" : ""}
+                                    </span>
+                                  </div>
+                                  <span className="aq-tr-monto">{CLP(p.monto_total || montoEntrega(e))}</span>
+                                </div>
+                                <div className="aq-cob-badges">
+                                  <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
+                                  <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
+                                  <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
+                                </div>
+                                <div className="aq-cob-acts">
+                                  <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
+                                    {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
+                                  </button>
+                                  <button className={"aq-btn-sec" + (p.cobro_recuperado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_recuperado")}>
+                                    {p.cobro_recuperado ? "✓ Recuperado" : "Marcar recuperado"}
+                                  </button>
+                                  <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado} onClick={() => registrarIntento(p)}>
+                                    + Intento de cobro
+                                  </button>
+                                  <button className="aq-link" onClick={() => abrirPedidoModal(p)}>Ver detalle</button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>
@@ -2946,6 +3068,29 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-modal-head strong { display:block; font-size:17px; color:var(--navy); }
 .aq-modal-cobro { margin-top:14px; background:#fff7e6; border:1px solid #f0d8a0; border-radius:12px; padding:12px 14px; }
 .aq-modal-cobro > strong { color:#8a6400; }
+
+/* Resumen de cobranzas */
+.aq-cob-resumen { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:14px 0 8px; }
+.aq-cob-rcard { background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:12px 14px; display:flex; flex-direction:column; gap:2px; }
+.aq-cob-rcard span { font-size:12px; color:var(--muted); }
+.aq-cob-rcard strong { font-size:20px; color:var(--navy); }
+.aq-cob-rcard em { font-style:normal; font-size:11px; color:var(--muted); }
+.aq-cob-rcard.ok strong { color:#1a7a45; }
+.aq-cob-rcard.pend strong { color:#8a6400; }
+.aq-cob-rcard.venc { background:#fdecea; border-color:#f3b4ad; }
+.aq-cob-rcard.venc strong, .aq-cob-rcard.venc span { color:var(--bad); }
+
+/* Grupos por cliente en cobranzas */
+.aq-cob-grupo { border:1px solid var(--line); border-radius:12px; margin-bottom:10px; overflow:hidden; }
+.aq-cob-grow { display:grid; grid-template-columns:1fr auto auto auto; gap:10px; align-items:center; padding:12px 14px; cursor:pointer; background:#fff; }
+.aq-cob-grow:hover { background:var(--bg); }
+.aq-cob-grow .aq-tr-monto { font-size:16px; color:var(--bad); }
+.aq-cob-orders { background:var(--bg); padding:4px 12px 8px; }
+.aq-cob-orders .aq-cob { border-bottom:1px solid var(--line); }
+.aq-cob-orders .aq-cob:last-child { border-bottom:none; }
+
+.aq-kpi-venc { border-color:#f3b4ad !important; background:#fdecea; }
+.aq-kpi-venc strong { color:var(--bad); }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
