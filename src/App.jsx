@@ -681,7 +681,7 @@ export default function App() {
     try {
       const { data: pp } = await supabase
         .from("pedidos")
-        .select("numero_guia, cobro_cobrado")
+        .select("numero_guia, cobro_cobrado, cobro_at")
         .eq("cliente_id", c.id);
       const guias = (pp || []).map((x) => x.numero_guia).filter(Boolean);
       if (!guias.length) return;
@@ -690,18 +690,35 @@ export default function App() {
       (ents || []).forEach((e) => { if (e.guide && esPagoNo(e)) pagoNoMap[e.guide] = e; });
       const conNoPago = (pp || []).filter((x) => pagoNoMap[x.numero_guia]);
       if (!conNoPago.length) return; // nunca entró en no-pago → sin semáforo
-      let diasMax = 0;
+      // Días que tardó/lleva en pagar: si está cobrado, entrega→cobro; si no, entrega→hoy.
+      let diasMax = 0, hayDeuda = false;
       conNoPago.forEach((x) => {
-        if (x.cobro_cobrado) return;
         const e = pagoNoMap[x.numero_guia];
         const g = e?.gestionado_en ? new Date(e.gestionado_en).getTime() : null;
-        if (g) { const d = Math.floor((Date.now() - g) / 86400000); if (d > diasMax) diasMax = d; }
+        if (!g) return;
+        let d;
+        if (x.cobro_cobrado) {
+          const fin = x.cobro_at ? new Date(x.cobro_at).getTime() : g;
+          d = Math.max(0, Math.floor((fin - g) / 86400000));
+        } else {
+          hayDeuda = true;
+          d = Math.floor((Date.now() - g) / 86400000);
+        }
+        if (d > diasMax) diasMax = d;
       });
-      let cls, label;
-      if (diasMax >= 16) { cls = "rojo"; label = `Moroso · ${diasMax} días sin pagar`; }
-      else if (diasMax >= 6) { cls = "amarillo"; label = `Pago lento · ${diasMax} días`; }
-      else { cls = "verde"; label = diasMax > 0 ? `Al día · ${diasMax} días` : "Al día"; }
-      setSemaforoCli({ cls, dias: diasMax, label });
+      let cls;
+      if (diasMax >= 16) cls = "rojo"; else if (diasMax >= 6) cls = "amarillo"; else cls = "verde";
+      let label;
+      if (hayDeuda) {
+        label = cls === "rojo" ? `Moroso · ${diasMax} días sin pagar`
+              : cls === "amarillo" ? `Pago lento · ${diasMax} días sin pagar`
+              : `Al día · ${diasMax} días`;
+      } else {
+        label = cls === "rojo" ? `Historial moroso · pagó hasta en ${diasMax} días`
+              : cls === "amarillo" ? `Pago lento · pagó hasta en ${diasMax} días`
+              : `Buen pagador · pagó en ${diasMax} día(s)`;
+      }
+      setSemaforoCli({ cls, dias: diasMax, label, moroso: cls === "rojo", hayDeuda });
     } catch { /* sin semáforo si falla */ }
   }
 
@@ -2059,6 +2076,11 @@ export default function App() {
                         Comportamiento de pago: {semaforoCli.label}
                       </div>
                     )}
+                    {!cliEdit._nuevo && semaforoCli && semaforoCli.moroso && (
+                      <p className="aq-mini" style={{ color: "#b42318", fontWeight: 600, margin: "-6px 0 10px" }}>
+                        Cliente moroso: exigir pago anticipado en próximos pedidos.
+                      </p>
+                    )}
                     <div className="aq-grid">
                       <label>Nombre<input value={cliEdit.nombre || ""} onChange={(e) => setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
                       <label>RUT<input value={cliEdit.rut || ""} onChange={(e) => setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
@@ -2178,6 +2200,18 @@ export default function App() {
                                               ))}
                                             </div>
                                           )}
+                                        </div>
+                                      )}
+                                      {(p.cobro_cobrado || p.cobro_recuperado || (Number(p.cobro_intentos) || 0) > 0 || esPagoNo(entrega)) && (
+                                        <div className="aq-hist-pago">
+                                          <strong>Cobro</strong>
+                                          {p.cobro_cobrado ? (
+                                            <div>✓ Pagado{p.cobro_at ? " el " + new Date(p.cobro_at).toLocaleDateString("es-CL") : ""}{p.cobro_por ? " · " + p.cobro_por : ""} · {CLP(p.monto_total)}</div>
+                                          ) : esPagoNo(entrega) ? (
+                                            <div>Pendiente de cobro · {CLP(p.monto_total)}</div>
+                                          ) : null}
+                                          {p.cobro_recuperado && <div>✓ Bidón recuperado</div>}
+                                          {(Number(p.cobro_intentos) || 0) > 0 && <div>Intentos de cobro: {p.cobro_intentos}</div>}
                                         </div>
                                       )}
                                     </div>
@@ -2551,6 +2585,13 @@ export default function App() {
               <div className={"aq-semaforo " + semaforoCli.cls} style={{ marginBottom: 14 }}>
                 <span className="aq-sem-dot" />
                 Comportamiento de pago: {semaforoCli.label}
+              </div>
+            )}
+
+            {cliente && semaforoCli && semaforoCli.moroso && (
+              <div className="aq-alerta-cliente" style={{ marginTop: -4 }}>
+                <strong>⚠ Cliente moroso — exigir pago anticipado</strong>
+                <p>Este cliente tiene historial de mora (más de 15 días en pagar). Se recomienda cobrar por adelantado antes de despachar.</p>
               </div>
             )}
 
@@ -3147,6 +3188,10 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-semaforo.amarillo .aq-sem-dot { background:#e0a400; }
 .aq-semaforo.rojo { background:#fdecea; border-color:#f3b4ad; color:#b42318; }
 .aq-semaforo.rojo .aq-sem-dot { background:#d92d20; }
+
+.aq-hist-pago { margin-top:8px; background:#e7f6ee; border:1px solid #9bd5b4; border-radius:10px; padding:8px 12px; font-size:13px; color:#1a5a36; }
+.aq-hist-pago strong { display:block; color:#1a7a45; margin-bottom:3px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+.aq-hist-pago > div { margin:2px 0; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
