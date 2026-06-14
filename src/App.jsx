@@ -56,19 +56,42 @@ function precioSugerido(prod, cantidad, tramos) {
   return base;
 }
 
-// Estado de entrega legible. Usa las columnas del retorno de DispatchTrack si
-// existen (estado_entrega / entregado_at); si todavía no, cae al estado de sync.
-function estadoEntregaInfo(p) {
-  const ee = (p.estado_entrega || "").toString().toLowerCase();
-  if (ee) {
-    if (ee.includes("entreg") && !ee.includes("no")) return { label: "Entregado", cls: "ok" };
-    if (ee.includes("no_") || ee.includes("fallid") || ee.includes("no entreg") || ee.includes("rechaz")) return { label: "No entregado", cls: "bad" };
-    if (ee.includes("devol")) return { label: "Devolución", cls: "warn" };
-    if (ee.includes("ruta") || ee.includes("transit")) return { label: "En ruta", cls: "warn" };
-    return { label: p.estado_entrega, cls: "warn" };
+// Estado de entrega legible a partir del retorno de DispatchTrack (fila dt_entregas).
+// status: 1 = pendiente/en ruta, 2 = gestionado. El substatus indica el resultado
+// (p.ej. "Venta" = entregado con venta, o un motivo de no entrega). Si no hay fila
+// de entrega, caemos al estado de sincronización del pedido.
+function estadoEntregaDT(entrega, pedido) {
+  if (entrega) {
+    const sub = (entrega.substatus || "").toString();
+    const gestionado = !!entrega.gestionado_en || Number(entrega.status) >= 2;
+    if (gestionado) {
+      const noEntrega = /no entreg|fallid|rechaz|sin morador|sin moradores|error|ausente|fuera horario/i.test(sub);
+      if (noEntrega) return { label: "No entregado" + (sub ? " · " + sub : ""), cls: "bad" };
+      return { label: "Entregado" + (sub ? " · " + sub : ""), cls: "ok" };
+    }
+    return { label: "En ruta / pendiente", cls: "warn" };
   }
-  if (p.estado_sync === "enviado_dt") return { label: "En DT", cls: "warn" };
+  if (pedido && pedido.estado_sync === "enviado_dt") return { label: "En DT", cls: "warn" };
   return { label: "Pendiente", cls: "warn" };
+}
+
+// Respuestas del formulario del chofer, extraídas del payload crudo (raw.evaluation_answers
+// o raw.form_answers). Defensivo ante el nombre de la llave del valor.
+function answersFromRaw(entrega) {
+  if (!entrega || !entrega.raw) return [];
+  const raw = entrega.raw;
+  const arr = raw.evaluation_answers || raw.form_answers || raw.end_form_answers || [];
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((a) => {
+      const name = a.name || a.question || a.label || "";
+      let val = a.value;
+      if (val === undefined || val === null || val === "") val = a.answer ?? a.text ?? a.option ?? a.selected ?? a.url ?? "";
+      if (Array.isArray(val)) val = val.join(", ");
+      if (val && typeof val === "object") val = val.url || val.name || JSON.stringify(val);
+      return { name, val: val == null ? "" : String(val) };
+    })
+    .filter((x) => x.name && x.val !== "");
 }
 
 export default function App() {
@@ -165,6 +188,7 @@ export default function App() {
   const [errorHist, setErrorHist] = useState("");
   const [histItems, setHistItems] = useState({});       // pedido_id -> items[]
   const [histAbierto, setHistAbierto] = useState(null);  // pedido_id expandido
+  const [histEntregas, setHistEntregas] = useState({});  // numero_guia -> fila dt_entregas (retorno DispatchTrack)
 
   // Mantenedor de productos (admin)
   const [productosAll, setProductosAll] = useState([]);
@@ -573,6 +597,7 @@ export default function App() {
     setHistPedidos(null);
     setHistAbierto(null);
     setHistItems({});
+    setHistEntregas({});
     setCliEdit({ ...c, _nuevo: false });
   }
 
@@ -582,6 +607,7 @@ export default function App() {
     setCargandoHist(true);
     setErrorHist("");
     setHistAbierto(null);
+    setHistEntregas({});
     try {
       const { data, error } = await supabase
         .from("pedidos")
@@ -590,7 +616,23 @@ export default function App() {
         .order("created_at", { ascending: false })
         .limit(50);
       if (error) throw error;
-      setHistPedidos(data || []);
+      const peds = data || [];
+      setHistPedidos(peds);
+
+      // Retorno de DispatchTrack: cruzamos dt_entregas por guide = numero_guia
+      const guias = peds.map((p) => p.numero_guia).filter(Boolean);
+      if (guias.length) {
+        const { data: ents, error: eEnt } = await supabase
+          .from("dt_entregas")
+          .select("*")
+          .in("guide", guias);
+        if (!eEnt && ents) {
+          const mapa = {};
+          ents.forEach((e) => { if (e.guide) mapa[e.guide] = e; });
+          setHistEntregas(mapa);
+        }
+        // Si eEnt existe (p.ej. RLS), no rompemos el historial: solo no se muestra el estado de entrega.
+      }
     } catch (e) {
       setErrorHist(e.message || "No se pudo cargar el historial.");
       setHistPedidos([]);
@@ -1749,10 +1791,12 @@ export default function App() {
                         ) : (
                           <div className="aq-tabla">
                             {histPedidos.map((p) => {
-                              const ent = estadoEntregaInfo(p);
+                              const entrega = p.numero_guia ? histEntregas[p.numero_guia] : null;
+                              const ent = estadoEntregaDT(entrega, p);
                               const dom = domPorId[p.domicilio_id];
                               const abierto = histAbierto === p.id;
                               const its = histItems[p.id] || [];
+                              const answers = answersFromRaw(entrega);
                               return (
                                 <div key={p.id} className="aq-hist-ped">
                                   <div className="aq-hist-row" onClick={() => toggleHistItems(p.id)}>
@@ -1782,18 +1826,23 @@ export default function App() {
                                           ))}
                                         </ul>
                                       )}
-                                      {/* Datos del retorno de DispatchTrack (cuando estén conectados) */}
-                                      {(p.entregado_at || p.receptor_nombre || p.motivo_no_entrega || p.pod_foto_url || p.datos_entrega) && (
+                                      {/* Retorno de DispatchTrack (entrega del chofer) */}
+                                      {entrega && (
                                         <div className="aq-hist-pod">
                                           <strong>Entrega (DispatchTrack)</strong>
-                                          {p.entregado_at && <div>Fecha entrega: {new Date(p.entregado_at).toLocaleString("es-CL")}</div>}
-                                          {p.receptor_nombre && <div>Recibe: {p.receptor_nombre}</div>}
-                                          {p.motivo_no_entrega && <div>Motivo no entrega: {p.motivo_no_entrega}</div>}
-                                          {p.pod_foto_url && <div><a className="aq-link" href={p.pod_foto_url} target="_blank" rel="noreferrer">Ver foto / firma</a></div>}
-                                          {p.datos_entrega && typeof p.datos_entrega === "object" && (
+                                          {entrega.gestionado_en && <div>Gestionado: {new Date(entrega.gestionado_en).toLocaleString("es-CL")}</div>}
+                                          {entrega.contact_name && <div>Recibe / domicilio: {entrega.contact_name}</div>}
+                                          {entrega.substatus && <div>Resultado: {entrega.substatus}</div>}
+                                          {(entrega.bidon_pendiente !== null && entrega.bidon_pendiente !== undefined) && <div>Bidón pendiente: {entrega.bidon_pendiente}</div>}
+                                          {entrega.chofer && <div>Chofer: {entrega.chofer}</div>}
+                                          {entrega.ruta && <div>Ruta: {entrega.ruta}</div>}
+                                          {(entrega.latitude && entrega.longitude) && (
+                                            <div><a className="aq-link" href={`https://maps.google.com/?q=${entrega.latitude},${entrega.longitude}`} target="_blank" rel="noreferrer">Ver ubicación de entrega</a></div>
+                                          )}
+                                          {answers.length > 0 && (
                                             <div className="aq-hist-form">
-                                              {Object.entries(p.datos_entrega).map(([k, v]) => (
-                                                <div key={k}><em>{k}:</em> {String(v)}</div>
+                                              {answers.map((a, idx) => (
+                                                <div key={idx}><em>{a.name}:</em> {/^https?:\/\//.test(a.val) ? <a className="aq-link" href={a.val} target="_blank" rel="noreferrer">ver archivo</a> : a.val}</div>
                                               ))}
                                             </div>
                                           )}
