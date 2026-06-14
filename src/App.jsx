@@ -137,6 +137,35 @@ export default function App() {
   const [guardandoMant, setGuardandoMant] = useState(false);
   const [okMant, setOkMant] = useState("");
 
+  // ── Bloque 4: mantenedores (sub-pestañas) ──────────────────
+  const [mantTab, setMantTab] = useState("clientes"); // clientes | productos | perfiles
+
+  // Mantenedor de clientes (alta / edición)
+  const [cliEdit, setCliEdit] = useState(null);   // objeto cliente en edición (null = ninguno)
+  const [guardandoCli, setGuardandoCli] = useState(false);
+  const [okCli, setOkCli] = useState("");
+
+  // Mantenedor de productos (admin)
+  const [productosAll, setProductosAll] = useState([]);
+  const [cargandoProd, setCargandoProd] = useState(false);
+  const [errorProd, setErrorProd] = useState("");
+  const [buscarProd, setBuscarProd] = useState("");
+  const [prodEdit, setProdEdit] = useState(null); // producto en edición (con _nuevo:true si es alta)
+  const [guardandoProd, setGuardandoProd] = useState(false);
+  const [okProd, setOkProd] = useState("");
+
+  // Mantenedor de perfiles (admin)
+  const [perfiles, setPerfiles] = useState([]);
+  const [cargandoPerf, setCargandoPerf] = useState(false);
+  const [errorPerf, setErrorPerf] = useState("");
+  const [perfEdit, setPerfEdit] = useState(null); // perfil en edición
+  const [guardandoPerf, setGuardandoPerf] = useState(false);
+  const [okPerf, setOkPerf] = useState("");
+
+  // ── Bloque 5: repetir última compra ────────────────────────
+  const [repitiendo, setRepitiendo] = useState(false);
+  const [avisoRepetir, setAvisoRepetir] = useState("");
+
   // ── Carga inicial de catálogos ─────────────────────────────
   useEffect(() => {
     if (!credsListas) {
@@ -313,6 +342,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rol, vista, session, todosDomicilios]);
 
+  // ── Bloque 4: cargar datos del mantenedor según sub-pestaña ─
+  useEffect(() => {
+    if (vista !== "mantenedor" || !session) return;
+    if (mantTab === "productos" && rol === "admin") cargarProductosAll();
+    if (mantTab === "perfiles" && rol === "admin") cargarPerfiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vista, mantTab, rol, session]);
+
+  // El operador no tiene mantenedores de productos ni perfiles.
+  useEffect(() => {
+    if (rol !== "admin" && (mantTab === "productos" || mantTab === "perfiles")) setMantTab("clientes");
+  }, [rol, mantTab]);
+
   // ── Sesión: detectar login, cargar rol del perfil ──────────
   useEffect(() => {
     if (!credsListas) { setAuthReady(true); return; }
@@ -473,6 +515,224 @@ export default function App() {
     }
   }
 
+  // ── Bloque 4: recargar el catálogo activo (Nuevo pedido) ───
+  // Tras pausar/activar/editar productos refrescamos lo que ve Nuevo pedido.
+  async function recargarProductosActivos() {
+    const { data } = await supabase.from("productos").select("*").eq("activo", true).order("nombre");
+    setProductos(data || []);
+  }
+
+  // ── Mantenedor de clientes: alta / edición ─────────────────
+  function nuevoCliente() {
+    setOkCli("");
+    setCliEdit({
+      _nuevo: true,
+      nombre: "", rut: "", codigo_cliente: "", telefono: "", email: "",
+      es_empresa: false, razon_social: "", giro: "", marca: "", notas: "",
+      activo: true, bloqueado: false, motivo_bloqueo: "",
+    });
+  }
+  function editarCliente(c) {
+    setOkCli("");
+    setCliEdit({ ...c, _nuevo: false });
+  }
+  async function guardarCliente() {
+    if (!cliEdit) return;
+    const nombre = (cliEdit.nombre || "").trim();
+    if (!nombre) { setOkCli("Error: el nombre es obligatorio."); return; }
+    const email = (cliEdit.email || "").trim();
+    if (email && !emailValido(email)) { setOkCli("Error: el email no tiene un formato válido."); return; }
+    setGuardandoCli(true);
+    setOkCli("");
+    try {
+      const patch = {
+        nombre,
+        rut: (cliEdit.rut || "").trim() || null,
+        codigo_cliente: (cliEdit.codigo_cliente || "").trim() || null,
+        telefono: (cliEdit.telefono || "").trim() || null,
+        email: email || null,
+        email_status: email ? "ok" : (cliEdit.email_status || null),
+        es_empresa: !!cliEdit.es_empresa,
+        razon_social: cliEdit.es_empresa ? ((cliEdit.razon_social || "").trim() || null) : null,
+        giro: cliEdit.es_empresa ? ((cliEdit.giro || "").trim() || null) : null,
+        marca: (cliEdit.marca || "").trim() || null,
+        notas: (cliEdit.notas || "").trim() || null,
+        bloqueado: !!cliEdit.bloqueado,
+        motivo_bloqueo: cliEdit.bloqueado ? ((cliEdit.motivo_bloqueo || "").trim() || "Bloqueado (sin motivo)") : null,
+        bloqueado_por: cliEdit.bloqueado ? ((cliEdit.bloqueado_por || perfilNombre || "").trim() || null) : null,
+        bloqueado_at: cliEdit.bloqueado ? (cliEdit.bloqueado_at || new Date().toISOString()) : null,
+      };
+
+      let guardado;
+      if (cliEdit._nuevo) {
+        const { data, error } = await supabase
+          .from("clientes")
+          .insert({ ...patch, activo: true })
+          .select()
+          .single();
+        if (error) throw error;
+        guardado = data;
+        setClientes((prev) => [...prev, guardado].sort((a, b) => (a.nombre || "").localeCompare(b.nombre || "")));
+      } else {
+        const { error } = await supabase.from("clientes").update(patch).eq("id", cliEdit.id);
+        if (error) throw error;
+        guardado = { ...cliEdit, ...patch };
+        delete guardado._nuevo;
+        setClientes((prev) => prev.map((c) => (c.id === guardado.id ? guardado : c)));
+        if (cliente && cliente.id === guardado.id) setCliente(guardado);
+      }
+      setCliEdit(null);
+      setOkCli(cliEdit._nuevo ? "Cliente creado." : "Cambios guardados.");
+    } catch (err) {
+      setOkCli("Error: " + (err.message || err));
+    } finally {
+      setGuardandoCli(false);
+    }
+  }
+  // Desactivar = baja lógica (no borrado físico, para no romper pedidos/domicilios).
+  async function desactivarCliente(c) {
+    if (!c) return;
+    if (!window.confirm(`¿Desactivar a "${c.nombre}"? Dejará de aparecer en búsquedas de Nuevo pedido. Sus pedidos históricos se conservan.`)) return;
+    try {
+      const { error } = await supabase.from("clientes").update({ activo: false }).eq("id", c.id);
+      if (error) throw error;
+      const actualizado = { ...c, activo: false };
+      setClientes((prev) => prev.map((x) => (x.id === c.id ? actualizado : x)));
+      setCliEdit(null);
+      setOkCli("Cliente desactivado.");
+    } catch (err) {
+      setOkCli("Error: " + (err.message || err));
+    }
+  }
+
+  // ── Mantenedor de productos (admin) ────────────────────────
+  async function cargarProductosAll() {
+    setCargandoProd(true);
+    setErrorProd("");
+    try {
+      const { data, error } = await supabase.from("productos").select("*").order("nombre");
+      if (error) throw error;
+      setProductosAll(data || []);
+    } catch (e) {
+      setErrorProd(e.message || "No se pudieron cargar los productos.");
+    } finally {
+      setCargandoProd(false);
+    }
+  }
+  function nuevoProducto() {
+    setOkProd("");
+    setProdEdit({
+      _nuevo: true,
+      codigo: "", nombre: "", familia: "", descripcion: "",
+      precio_lista: 0, activo: true, precio_variable: false, requiere_factura: false,
+      modo_descuento_volumen: "ninguno", desc_volumen_umbral: null, desc_volumen_pct: null,
+    });
+  }
+  function editarProducto(p) {
+    setOkProd("");
+    setProdEdit({ ...p, _nuevo: false });
+  }
+  async function guardarProducto() {
+    if (!prodEdit) return;
+    const nombre = (prodEdit.nombre || "").trim();
+    const codigo = (prodEdit.codigo || "").trim();
+    if (!nombre) { setOkProd("Error: el nombre es obligatorio."); return; }
+    if (!codigo) { setOkProd("Error: el código (SKU) es obligatorio."); return; }
+    setGuardandoProd(true);
+    setOkProd("");
+    try {
+      const modo = prodEdit.modo_descuento_volumen || "ninguno";
+      const patch = {
+        codigo,
+        nombre,
+        familia: (prodEdit.familia || "").trim() || null,
+        descripcion: (prodEdit.descripcion || "").trim() || null,
+        precio_lista: Number(prodEdit.precio_lista) || 0,
+        activo: !!prodEdit.activo,
+        precio_variable: !!prodEdit.precio_variable,
+        requiere_factura: !!prodEdit.requiere_factura,
+        modo_descuento_volumen: modo,
+        desc_volumen_umbral: modo === "porcentaje" ? (Number(prodEdit.desc_volumen_umbral) || null) : null,
+        desc_volumen_pct: modo === "porcentaje" ? (Number(prodEdit.desc_volumen_pct) || null) : null,
+      };
+      if (prodEdit._nuevo) {
+        const { error } = await supabase.from("productos").insert(patch);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("productos").update(patch).eq("id", prodEdit.id);
+        if (error) throw error;
+      }
+      await cargarProductosAll();
+      await recargarProductosActivos();
+      setProdEdit(null);
+      setOkProd(prodEdit._nuevo ? "Producto creado." : "Cambios guardados.");
+    } catch (err) {
+      setOkProd("Error: " + (err.message || err));
+    } finally {
+      setGuardandoProd(false);
+    }
+  }
+  // Pausar / activar SKU: pausado (activo=false) deja de aparecer en Nuevo pedido.
+  async function togglePausaProducto(p) {
+    setOkProd("");
+    try {
+      const nuevo = !p.activo;
+      const { error } = await supabase.from("productos").update({ activo: nuevo }).eq("id", p.id);
+      if (error) throw error;
+      setProductosAll((prev) => prev.map((x) => (x.id === p.id ? { ...x, activo: nuevo } : x)));
+      await recargarProductosActivos();
+      setOkProd(nuevo ? `"${p.nombre}" reactivado.` : `"${p.nombre}" pausado (no aparece en Nuevo pedido).`);
+    } catch (err) {
+      setOkProd("Error: " + (err.message || err));
+    }
+  }
+
+  // ── Mantenedor de perfiles (admin) ─────────────────────────
+  async function cargarPerfiles() {
+    setCargandoPerf(true);
+    setErrorPerf("");
+    try {
+      const { data, error } = await supabase.from("perfiles").select("*").order("nombre");
+      if (error) throw error;
+      setPerfiles(data || []);
+    } catch (e) {
+      setErrorPerf(e.message || "No se pudieron cargar los perfiles.");
+    } finally {
+      setCargandoPerf(false);
+    }
+  }
+  function editarPerfil(p) {
+    setOkPerf("");
+    setPerfEdit({ ...p });
+  }
+  async function guardarPerfil() {
+    if (!perfEdit) return;
+    const esYo = session && perfEdit.id === session.user.id;
+    // Salvaguarda: no permitir que el admin se quite a sí mismo el rol o se desactive (evita quedar sin acceso).
+    if (esYo && (perfEdit.rol !== "admin" || !perfEdit.activo)) {
+      setOkPerf("Error: no puedes quitarte tu propio rol admin ni desactivarte (evita bloqueo de acceso).");
+      return;
+    }
+    setGuardandoPerf(true);
+    setOkPerf("");
+    try {
+      const patch = {
+        nombre: (perfEdit.nombre || "").trim() || null,
+        rol: perfEdit.rol,
+        activo: !!perfEdit.activo,
+      };
+      const { error } = await supabase.from("perfiles").update(patch).eq("id", perfEdit.id);
+      if (error) throw error;
+      setPerfiles((prev) => prev.map((x) => (x.id === perfEdit.id ? { ...x, ...patch } : x)));
+      setPerfEdit(null);
+      setOkPerf("Perfil actualizado.");
+    } catch (err) {
+      setOkPerf("Error: " + (err.message || err));
+    } finally {
+      setGuardandoPerf(false);
+    }
+  }
+
   // ── Al elegir cliente: domicilios + plan + descuentos ──────
   async function elegirCliente(c, domPreseleccionarId) {
     setCliente(c);
@@ -480,6 +740,7 @@ export default function App() {
     setDomicilioId("");
     setPlanPrepago(null);
     setConsumePlan(false);
+    setAvisoRepetir("");
     setMarca(c.marca || "");
     setRutFactura(c.rut || "");
     setTipoDocumento(c.es_empresa ? "factura" : "boleta");
@@ -507,6 +768,80 @@ export default function App() {
     setDescCliente(dc.data || []);
   }
 
+  // ── Bloque 5: repetir última compra ────────────────────────
+  // Precarga productos, cantidades, domicilio y forma de pago del último
+  // pedido del cliente. El operador revisa y confirma. Los precios se
+  // recalculan a la lista vigente (un pedido nuevo se cobra a precio de hoy).
+  async function repetirUltimaCompra() {
+    if (!cliente) return;
+    setRepitiendo(true);
+    setAvisoRepetir("");
+    setResultado(null);
+    try {
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("*")
+        .eq("cliente_id", cliente.id)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (ePed) throw ePed;
+      const ult = (peds || [])[0];
+      if (!ult) { setAvisoRepetir("Este cliente no tiene pedidos anteriores."); return; }
+
+      const { data: lineas, error: eIt } = await supabase
+        .from("pedido_items")
+        .select("*")
+        .eq("pedido_id", ult.id);
+      if (eIt) throw eIt;
+
+      // Mapear líneas a productos ACTIVOS. Los pausados/eliminados se omiten.
+      const nuevas = [];
+      const omitidos = [];
+      (lineas || []).forEach((l) => {
+        const prod = productos.find((p) => p.id === l.producto_id);
+        if (!prod) {
+          omitidos.push(l.nombre || l.codigo || "producto");
+          return;
+        }
+        const cantidad = Number(l.cantidad) || 1;
+        nuevas.push({
+          key: crypto.randomUUID(),
+          producto_id: prod.id,
+          cantidad,
+          precio_unit: precioSugerido(prod, cantidad, tramos),
+          precio_editado: false,
+        });
+      });
+
+      if (nuevas.length === 0) {
+        setAvisoRepetir("La última compra no tiene productos disponibles hoy (todos pausados o eliminados).");
+        return;
+      }
+
+      setItems(nuevas);
+      setDescuentos([]); // los descuentos no se arrastran: se re-evalúan en el pedido nuevo
+
+      // Domicilio del último pedido, si todavía existe entre los del cliente
+      if (ult.domicilio_id && domicilios.some((d) => d.id === ult.domicilio_id)) {
+        setDomicilioId(ult.domicilio_id);
+      }
+      // Documento y forma de pago del último pedido
+      if (ult.tipo_documento && TIPOS_DOC.includes(ult.tipo_documento)) setTipoDocumento(ult.tipo_documento);
+      if (ult.tipo_pago && TIPOS_PAGO.includes(ult.tipo_pago) && ult.tipo_pago !== "Plan PrePago") {
+        setTipoPago(ult.tipo_pago);
+      }
+
+      const fecha = ult.created_at ? new Date(ult.created_at).toLocaleDateString("es-CL", { day: "2-digit", month: "short" }) : "";
+      let msg = `Cargada la última compra${ult.numero_guia ? " (guía " + ult.numero_guia + ")" : ""}${fecha ? " del " + fecha : ""}: ${nuevas.length} línea(s). Precios actualizados a lista vigente. Revisa y confirma.`;
+      if (omitidos.length) msg += ` ⚠ No se cargaron (pausados/sin stock): ${omitidos.join(", ")}.`;
+      setAvisoRepetir(msg);
+    } catch (e) {
+      setAvisoRepetir("Error al repetir la compra: " + (e.message || e));
+    } finally {
+      setRepitiendo(false);
+    }
+  }
+
   // Resultados de búsqueda: por datos del cliente (nombre/RUT/código) y
   // también por el identificador del domicilio (ej. 215-1).
   const resultadosBusqueda = useMemo(() => {
@@ -515,9 +850,10 @@ export default function App() {
     const porCliente = clientes
       .filter(
         (c) =>
-          (c.nombre || "").toLowerCase().includes(q) ||
+          c.activo !== false &&
+          ((c.nombre || "").toLowerCase().includes(q) ||
           (c.rut || "").toLowerCase().includes(q) ||
-          (c.codigo_cliente || "").toLowerCase().includes(q)
+          (c.codigo_cliente || "").toLowerCase().includes(q))
       )
       .map((c) => ({ cliente: c, dom: null }));
 
@@ -525,7 +861,7 @@ export default function App() {
     const porDomicilio = todosDomicilios
       .filter((d) => (d.identificador_dt || "").toLowerCase().includes(q))
       .map((d) => ({ cliente: clientes.find((c) => c.id === d.cliente_id), dom: d }))
-      .filter((r) => r.cliente);
+      .filter((r) => r.cliente && r.cliente.activo !== false);
 
     // Unir evitando duplicar el mismo par cliente+domicilio
     const vistos = new Set();
@@ -940,7 +1276,7 @@ export default function App() {
               <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
             )}
             {rol !== "gerencial" && (
-              <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>Clientes</button>
+              <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>{rol === "admin" ? "Mantenedores" : "Clientes"}</button>
             )}
             <span className="aq-user" title={rol}>
               {perfilNombre} · {rol}
@@ -1217,77 +1553,265 @@ export default function App() {
           </section>
         )}
 
-        {/* ===================== MANTENEDOR DE CLIENTES ===================== */}
+        {/* ===================== MANTENEDORES (Bloque 4) ===================== */}
         {credsListas && !cargando && !errorCarga && vista === "mantenedor" && (
-          <section className="aq-card">
-            <h2>Bloquear / desbloquear cliente</h2>
-            {!clienteMant ? (
-              <div className="aq-search">
-                <input
-                  placeholder="Buscar por identificador (0004-1), nombre, dirección o RUT"
-                  value={buscarMant}
-                  onChange={(e) => setBuscarMant(e.target.value)}
-                  autoFocus
-                />
-                {resultadosMant.length > 0 && (
-                  <ul className="aq-results">
-                    {resultadosMant.map((r) => (
-                      <li
-                        key={r.cliente.id + "|" + (r.dom?.id || "")}
-                        onClick={() => elegirMant(r)}
-                        className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
-                      >
-                        <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
-                        <span>
-                          {r.dom?.identificador_dt
-                            ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
-                            : (r.cliente.codigo_cliente || r.cliente.rut || "")}
-                          {r.cliente.bloqueado ? " · bloqueado" : ""}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ) : (
-              <div className="aq-mant">
-                <div className="aq-chosen">
-                  <div>
-                    <strong>{clienteMant.nombre}</strong>
-                    <span>
-                      {domMant?.identificador_dt
-                        ? domMant.identificador_dt + " · " + (domMant.direccion || "")
-                        : (clienteMant.codigo_cliente || clienteMant.rut || "")}
-                    </span>
-                  </div>
-                  <button className="aq-link" onClick={() => { setClienteMant(null); setDomMant(null); setOkMant(""); }}>Cambiar</button>
-                </div>
-                <p className="aq-muted" style={{ marginTop: 6 }}>
-                  El bloqueo aplica a todo el cliente y sus domicilios.
-                </p>
-                <label className="aq-check" style={{ marginTop: 14 }}>
-                  <input type="checkbox" checked={bloqMant} onChange={(e) => setBloqMant(e.target.checked)} />
-                  Cliente bloqueado para comprar
-                </label>
-                {bloqMant && (
+          <>
+            {/* Sub-pestañas */}
+            <div className="aq-subtabs">
+              <button className={mantTab === "clientes" ? "on" : ""} onClick={() => { setMantTab("clientes"); setCliEdit(null); setOkCli(""); }}>Clientes</button>
+              {rol === "admin" && (
+                <button className={mantTab === "productos" ? "on" : ""} onClick={() => { setMantTab("productos"); setProdEdit(null); setOkProd(""); }}>Productos</button>
+              )}
+              {rol === "admin" && (
+                <button className={mantTab === "perfiles" ? "on" : ""} onClick={() => { setMantTab("perfiles"); setPerfEdit(null); setOkPerf(""); }}>Perfiles</button>
+              )}
+            </div>
+
+            {/* ---------- CLIENTES (operador agrega/edita · admin full) ---------- */}
+            {mantTab === "clientes" && (
+              <section className="aq-card">
+                {!cliEdit ? (
                   <>
-                    <label className="aq-full">
-                      Motivo del bloqueo
-                      <textarea rows="2" value={motivoMant} onChange={(e) => setMotivoMant(e.target.value)} placeholder="Ej: Bloqueo por no pago" />
+                    <div className="aq-row-head">
+                      <h2>Clientes</h2>
+                      <button className="aq-btn-sec" onClick={nuevoCliente}>+ Nuevo cliente</button>
+                    </div>
+                    <div className="aq-search">
+                      <input
+                        placeholder="Buscar por nombre, RUT, código o domicilio (0004-1)"
+                        value={buscarMant}
+                        onChange={(e) => setBuscarMant(e.target.value)}
+                        autoFocus
+                      />
+                      {resultadosMant.length > 0 && (
+                        <ul className="aq-results">
+                          {resultadosMant.map((r) => (
+                            <li
+                              key={r.cliente.id + "|" + (r.dom?.id || "")}
+                              onClick={() => { editarCliente(r.cliente); setBuscarMant(""); }}
+                              className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
+                            >
+                              <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
+                              <span>
+                                {r.dom?.identificador_dt
+                                  ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
+                                  : (r.cliente.codigo_cliente || r.cliente.rut || "")}
+                                {r.cliente.bloqueado ? " · bloqueado" : ""}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    {okCli && <div className={"aq-result " + (okCli.startsWith("Error") ? "bad" : "ok")}>{okCli}</div>}
+                    <p className="aq-muted">
+                      Busca un cliente para editarlo o crea uno nuevo.
+                      {rol === "operador" ? " Como operador puedes crear y editar; la baja la realiza un administrador." : ""}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="aq-row-head">
+                      <h2>{cliEdit._nuevo ? "Nuevo cliente" : "Editar cliente"}</h2>
+                      <button className="aq-link" onClick={() => { setCliEdit(null); setOkCli(""); }}>Volver</button>
+                    </div>
+                    <div className="aq-grid">
+                      <label>Nombre<input value={cliEdit.nombre || ""} onChange={(e) => setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
+                      <label>RUT<input value={cliEdit.rut || ""} onChange={(e) => setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
+                      <label>Código cliente<input value={cliEdit.codigo_cliente || ""} onChange={(e) => setCliEdit({ ...cliEdit, codigo_cliente: e.target.value })} /></label>
+                      <label>Teléfono<input value={cliEdit.telefono || ""} onChange={(e) => setCliEdit({ ...cliEdit, telefono: e.target.value })} /></label>
+                      <label>Email<input type="email" value={cliEdit.email || ""} onChange={(e) => setCliEdit({ ...cliEdit, email: e.target.value })} placeholder="correo@cliente.cl" /></label>
+                      <label>Marca
+                        <select value={cliEdit.marca || ""} onChange={(e) => setCliEdit({ ...cliEdit, marca: e.target.value })}>
+                          <option value="">—</option>
+                          {MARCAS.map((m) => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <label className="aq-check" style={{ marginTop: 14 }}>
+                      <input type="checkbox" checked={!!cliEdit.es_empresa} onChange={(e) => setCliEdit({ ...cliEdit, es_empresa: e.target.checked })} />
+                      Es empresa (factura)
                     </label>
-                    <label className="aq-full">
-                      Operador
-                      <input value={operadorMant} onChange={(e) => setOperadorMant(e.target.value)} placeholder="Tu nombre" />
+                    {cliEdit.es_empresa && (
+                      <div className="aq-grid" style={{ marginTop: 10 }}>
+                        <label>Razón social<input value={cliEdit.razon_social || ""} onChange={(e) => setCliEdit({ ...cliEdit, razon_social: e.target.value })} /></label>
+                        <label>Giro<input value={cliEdit.giro || ""} onChange={(e) => setCliEdit({ ...cliEdit, giro: e.target.value })} /></label>
+                      </div>
+                    )}
+                    <label className="aq-full">Notas<textarea rows="2" value={cliEdit.notas || ""} onChange={(e) => setCliEdit({ ...cliEdit, notas: e.target.value })} /></label>
+                    <label className="aq-check" style={{ marginTop: 12 }}>
+                      <input type="checkbox" checked={!!cliEdit.bloqueado} onChange={(e) => setCliEdit({ ...cliEdit, bloqueado: e.target.checked })} />
+                      Cliente bloqueado para comprar
                     </label>
+                    {cliEdit.bloqueado && (
+                      <label className="aq-full">Motivo del bloqueo
+                        <textarea rows="2" value={cliEdit.motivo_bloqueo || ""} onChange={(e) => setCliEdit({ ...cliEdit, motivo_bloqueo: e.target.value })} placeholder="Ej: Bloqueo por no pago" />
+                      </label>
+                    )}
+                    <div className="aq-mant-acts">
+                      <button className="aq-btn" disabled={guardandoCli} onClick={guardarCliente}>
+                        {guardandoCli ? "Guardando…" : (cliEdit._nuevo ? "Crear cliente" : "Guardar cambios")}
+                      </button>
+                      {rol === "admin" && !cliEdit._nuevo && cliEdit.activo !== false && (
+                        <button className="aq-btn-danger" onClick={() => desactivarCliente(cliEdit)}>Desactivar</button>
+                      )}
+                    </div>
+                    {okCli && <div className={"aq-result " + (okCli.startsWith("Error") ? "bad" : "ok")}>{okCli}</div>}
                   </>
                 )}
-                <button className="aq-btn" disabled={guardandoMant} onClick={guardarBloqueo} style={{ marginTop: 14 }}>
-                  {guardandoMant ? "Guardando…" : "Guardar"}
-                </button>
-                {okMant && <div className={"aq-result " + (okMant.startsWith("Error") ? "bad" : "ok")}>{okMant}</div>}
-              </div>
+              </section>
             )}
-          </section>
+
+            {/* ---------- PRODUCTOS (admin · pausar SKU) ---------- */}
+            {mantTab === "productos" && rol === "admin" && (
+              <section className="aq-card">
+                {!prodEdit ? (
+                  <>
+                    <div className="aq-row-head">
+                      <h2>Productos</h2>
+                      <button className="aq-btn-sec" onClick={nuevoProducto}>+ Nuevo producto</button>
+                    </div>
+                    <input
+                      className="aq-buscar-ped"
+                      placeholder="Buscar por nombre o código (SKU)"
+                      value={buscarProd}
+                      onChange={(e) => setBuscarProd(e.target.value)}
+                    />
+                    {errorProd && <div className="aq-result bad">{errorProd}</div>}
+                    {okProd && <div className={"aq-result " + (okProd.startsWith("Error") ? "bad" : "ok")}>{okProd}</div>}
+                    {cargandoProd ? (
+                      <p className="aq-muted">Cargando productos…</p>
+                    ) : (
+                      <div className="aq-list">
+                        {productosAll
+                          .filter((p) => {
+                            const q = buscarProd.trim().toLowerCase();
+                            return !q || (p.nombre || "").toLowerCase().includes(q) || (p.codigo || "").toLowerCase().includes(q);
+                          })
+                          .map((p) => (
+                            <div className={"aq-list-row" + (p.activo ? "" : " off")} key={p.id}>
+                              <div className="aq-list-main">
+                                <strong>{p.nombre}</strong>
+                                <span>{p.codigo}{p.familia ? " · " + p.familia : ""} · {CLP(p.precio_lista)}{p.precio_variable ? " · variable" : ""}</span>
+                              </div>
+                              <span className={"aq-badge " + (p.activo ? "ok" : "warn")}>{p.activo ? "Activo" : "Pausado"}</span>
+                              <button className="aq-btn-sec" onClick={() => togglePausaProducto(p)}>{p.activo ? "Pausar" : "Activar"}</button>
+                              <button className="aq-btn-sec" onClick={() => editarProducto(p)}>Editar</button>
+                            </div>
+                          ))}
+                        {productosAll.length === 0 && <p className="aq-muted">Sin productos.</p>}
+                      </div>
+                    )}
+                    <p className="aq-muted">Pausar un SKU lo deja fuera de “Nuevo pedido” sin borrarlo. Reactívalo cuando vuelva a haber stock.</p>
+                  </>
+                ) : (
+                  <>
+                    <div className="aq-row-head">
+                      <h2>{prodEdit._nuevo ? "Nuevo producto" : "Editar producto"}</h2>
+                      <button className="aq-link" onClick={() => { setProdEdit(null); setOkProd(""); }}>Volver</button>
+                    </div>
+                    <div className="aq-grid">
+                      <label>Código (SKU)<input value={prodEdit.codigo || ""} onChange={(e) => setProdEdit({ ...prodEdit, codigo: e.target.value })} /></label>
+                      <label>Nombre<input value={prodEdit.nombre || ""} onChange={(e) => setProdEdit({ ...prodEdit, nombre: e.target.value })} /></label>
+                      <label>Familia<input value={prodEdit.familia || ""} onChange={(e) => setProdEdit({ ...prodEdit, familia: e.target.value })} /></label>
+                      <label>Precio lista<input type="number" min="0" value={prodEdit.precio_lista ?? 0} onChange={(e) => setProdEdit({ ...prodEdit, precio_lista: Number(e.target.value) })} /></label>
+                    </div>
+                    <label className="aq-full">Descripción<textarea rows="2" value={prodEdit.descripcion || ""} onChange={(e) => setProdEdit({ ...prodEdit, descripcion: e.target.value })} /></label>
+                    <div className="aq-checks">
+                      <label className="aq-check"><input type="checkbox" checked={!!prodEdit.activo} onChange={(e) => setProdEdit({ ...prodEdit, activo: e.target.checked })} /> Activo (aparece en Nuevo pedido)</label>
+                      <label className="aq-check"><input type="checkbox" checked={!!prodEdit.precio_variable} onChange={(e) => setProdEdit({ ...prodEdit, precio_variable: e.target.checked })} /> Precio variable</label>
+                      <label className="aq-check"><input type="checkbox" checked={!!prodEdit.requiere_factura} onChange={(e) => setProdEdit({ ...prodEdit, requiere_factura: e.target.checked })} /> Requiere factura</label>
+                    </div>
+                    <div className="aq-grid" style={{ marginTop: 10 }}>
+                      <label>Descuento por volumen
+                        <select value={prodEdit.modo_descuento_volumen || "ninguno"} onChange={(e) => setProdEdit({ ...prodEdit, modo_descuento_volumen: e.target.value })}>
+                          <option value="ninguno">Ninguno</option>
+                          <option value="porcentaje">Porcentaje</option>
+                          <option value="tramos">Tramos (se gestionan aparte)</option>
+                        </select>
+                      </label>
+                      {prodEdit.modo_descuento_volumen === "porcentaje" && (
+                        <>
+                          <label>Umbral (cant.)<input type="number" min="0" value={prodEdit.desc_volumen_umbral ?? ""} onChange={(e) => setProdEdit({ ...prodEdit, desc_volumen_umbral: e.target.value })} /></label>
+                          <label>% descuento<input type="number" min="0" max="100" value={prodEdit.desc_volumen_pct ?? ""} onChange={(e) => setProdEdit({ ...prodEdit, desc_volumen_pct: e.target.value })} /></label>
+                        </>
+                      )}
+                    </div>
+                    {prodEdit.modo_descuento_volumen === "tramos" && (
+                      <p className="aq-muted">Los tramos de precio se cargan en la tabla <code>precio_tramos</code> (no editable en este mantenedor todavía).</p>
+                    )}
+                    <button className="aq-btn" disabled={guardandoProd} onClick={guardarProducto}>
+                      {guardandoProd ? "Guardando…" : (prodEdit._nuevo ? "Crear producto" : "Guardar cambios")}
+                    </button>
+                    {okProd && <div className={"aq-result " + (okProd.startsWith("Error") ? "bad" : "ok")}>{okProd}</div>}
+                  </>
+                )}
+              </section>
+            )}
+
+            {/* ---------- PERFILES (admin) ---------- */}
+            {mantTab === "perfiles" && rol === "admin" && (
+              <section className="aq-card">
+                {!perfEdit ? (
+                  <>
+                    <div className="aq-row-head"><h2>Perfiles de acceso</h2></div>
+                    {errorPerf && <div className="aq-result bad">{errorPerf}</div>}
+                    {okPerf && <div className={"aq-result " + (okPerf.startsWith("Error") ? "bad" : "ok")}>{okPerf}</div>}
+                    {cargandoPerf ? (
+                      <p className="aq-muted">Cargando perfiles…</p>
+                    ) : (
+                      <div className="aq-list">
+                        {perfiles.map((p) => (
+                          <div className={"aq-list-row" + (p.activo ? "" : " off")} key={p.id}>
+                            <div className="aq-list-main">
+                              <strong>{p.nombre || "(sin nombre)"}{session && p.id === session.user.id ? " · tú" : ""}</strong>
+                              <span>rol: {p.rol}{p.activo ? "" : " · inactivo"}</span>
+                            </div>
+                            <span className={"aq-badge " + (p.activo ? "ok" : "warn")}>{p.activo ? "Activo" : "Inactivo"}</span>
+                            <button className="aq-btn-sec" onClick={() => editarPerfil(p)}>Editar</button>
+                          </div>
+                        ))}
+                        {perfiles.length === 0 && (
+                          <p className="aq-muted">No se ven perfiles. Si esperabas ver más, falta la política RLS de lectura de admin en <code>perfiles</code> (te dejo el SQL en el chat).</p>
+                        )}
+                      </div>
+                    )}
+                    <p className="aq-muted">
+                      Para <strong>crear</strong> un acceso nuevo: primero crea el usuario en Supabase (Authentication → Add user) y luego asígnale rol aquí. La creación de logins no se hace desde la app por seguridad.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="aq-row-head">
+                      <h2>Editar perfil</h2>
+                      <button className="aq-link" onClick={() => { setPerfEdit(null); setOkPerf(""); }}>Volver</button>
+                    </div>
+                    <div className="aq-grid">
+                      <label>Nombre<input value={perfEdit.nombre || ""} onChange={(e) => setPerfEdit({ ...perfEdit, nombre: e.target.value })} /></label>
+                      <label>Rol
+                        <select value={perfEdit.rol} onChange={(e) => setPerfEdit({ ...perfEdit, rol: e.target.value })}>
+                          <option value="admin">admin</option>
+                          <option value="operador">operador</option>
+                          <option value="gerencial">gerencial</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="aq-check" style={{ marginTop: 12 }}>
+                      <input type="checkbox" checked={!!perfEdit.activo} onChange={(e) => setPerfEdit({ ...perfEdit, activo: e.target.checked })} />
+                      Perfil activo
+                    </label>
+                    {session && perfEdit.id === session.user.id && (
+                      <p className="aq-muted">Es tu propio usuario: no puedes quitarte el rol admin ni desactivarte.</p>
+                    )}
+                    <button className="aq-btn" disabled={guardandoPerf} onClick={guardarPerfil}>
+                      {guardandoPerf ? "Guardando…" : "Guardar cambios"}
+                    </button>
+                    {okPerf && <div className={"aq-result " + (okPerf.startsWith("Error") ? "bad" : "ok")}>{okPerf}</div>}
+                  </>
+                )}
+              </section>
+            )}
+          </>
         )}
 
         {/* ===================== NUEVO PEDIDO ===================== */}
@@ -1331,7 +1855,7 @@ export default function App() {
                       <strong>{cliente.nombre}</strong>
                       <span>{cliente.rut || cliente.codigo_cliente}{cliente.es_empresa ? " · empresa" : ""}</span>
                     </div>
-                    <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); }}>
+                    <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); }}>
                       Cambiar
                     </button>
                   </div>
@@ -1366,6 +1890,24 @@ export default function App() {
 
             {cliente && (
               <>
+                {/* Repetir última compra (Bloque 5) */}
+                <section className="aq-card aq-repetir">
+                  <div className="aq-repetir-row">
+                    <div>
+                      <strong>Repetir última compra</strong>
+                      <p className="aq-muted">Carga productos, cantidades, domicilio y forma de pago del último pedido de este cliente.</p>
+                    </div>
+                    <button className="aq-btn-sec" disabled={repitiendo} onClick={repetirUltimaCompra}>
+                      {repitiendo ? "Cargando…" : "↻ Repetir"}
+                    </button>
+                  </div>
+                  {avisoRepetir && (
+                    <div className={"aq-result " + (avisoRepetir.startsWith("Error") ? "bad" : "ok")} style={{ marginTop: 10 }}>
+                      {avisoRepetir}
+                    </div>
+                  )}
+                </section>
+
                 {/* Domicilio */}
                 <section className="aq-card">
                   <h2>Domicilio de entrega</h2>
@@ -1780,6 +2322,41 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
   .aq-tr { grid-template-columns:1fr 70px 60px; row-gap:2px; }
   .aq-tr-fecha { display:none; }
   .aq-tr-monto { grid-column:2 / 3; }
+}
+/* Mantenedores (Bloque 4) */
+.aq-subtabs { display:flex; gap:6px; flex-wrap:wrap; }
+.aq-subtabs button { background:#fff; border:1px solid var(--line); color:var(--muted); font:inherit; font-weight:600; font-size:13px;
+  padding:8px 16px; border-radius:10px; cursor:pointer; }
+.aq-subtabs button:hover { border-color:var(--blue); color:var(--navy); }
+.aq-subtabs button.on { background:var(--navy); color:#fff; border-color:var(--navy); }
+.aq-list { display:flex; flex-direction:column; margin-top:4px; }
+.aq-list-row { display:grid; grid-template-columns:1fr auto auto auto; gap:10px; align-items:center; padding:11px 4px;
+  border-bottom:1px solid var(--line); }
+.aq-list-row:last-child { border-bottom:none; }
+.aq-list-row.off { opacity:.62; }
+.aq-list-main { min-width:0; }
+.aq-list-main strong { display:block; color:var(--ink); font-weight:600; }
+.aq-list-main span { font-size:12px; color:var(--muted); }
+.aq-list-row .aq-btn-sec { padding:6px 11px; }
+.aq-mant-acts { display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+.aq-mant-acts .aq-btn { width:auto; flex:1; min-width:180px; margin-top:0; }
+.aq-btn-danger { background:#fff; border:1px solid #f3b4ad; color:var(--bad); font:inherit; font-weight:600; font-size:14px;
+  padding:13px 18px; border-radius:11px; cursor:pointer; }
+.aq-btn-danger:hover { background:#fdecea; }
+.aq-checks { display:flex; flex-wrap:wrap; gap:18px; margin-top:12px; }
+
+/* Repetir última compra (Bloque 5) */
+.aq-repetir { border-color:var(--blue); background:#f3f8fc; }
+.aq-repetir-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.aq-repetir-row strong { color:var(--navy); }
+.aq-repetir-row p { margin:2px 0 0; }
+.aq-repetir-row .aq-btn-sec { white-space:nowrap; }
+
+@media (max-width:560px) {
+  .aq-list-row { grid-template-columns:1fr auto; row-gap:8px; }
+  .aq-list-row .aq-badge { grid-column:2; }
+  .aq-list-row .aq-btn-sec { grid-column:span 1; }
+  .aq-repetir-row { flex-direction:column; align-items:stretch; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
