@@ -2081,6 +2081,24 @@ export default function App() {
                         Cliente moroso: exigir pago anticipado en próximos pedidos.
                       </p>
                     )}
+                    {!cliEdit._nuevo && (() => {
+                      const doms = todosDomicilios.filter((d) => d.cliente_id === cliEdit.id);
+                      if (doms.length === 0) return null;
+                      return (
+                        <div className="aq-contactos">
+                          <strong>Contactos / domicilios de este código ({doms.length})</strong>
+                          <ul>
+                            {doms.map((d) => (
+                              <li key={d.id}>
+                                <span className="aq-cont-nom">{d.etiqueta || "(sin nombre de contacto)"}</span>
+                                <span className="aq-cont-sub">{d.identificador_dt}{d.direccion ? " · " + d.direccion : ""}{d.comuna ? ", " + d.comuna : ""}{d.es_principal ? " · principal" : ""}</span>
+                              </li>
+                            ))}
+                          </ul>
+                          <span className="aq-mini">Un mismo código agrupa varias personas (titular, familiares). En Nuevo pedido eliges a quién va el despacho.</span>
+                        </div>
+                      );
+                    })()}
                     <div className="aq-grid">
                       <label>Nombre<input value={cliEdit.nombre || ""} onChange={(e) => setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
                       <label>RUT<input value={cliEdit.rut || ""} onChange={(e) => setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
@@ -3192,6 +3210,14 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-hist-pago { margin-top:8px; background:#e7f6ee; border:1px solid #9bd5b4; border-radius:10px; padding:8px 12px; font-size:13px; color:#1a5a36; }
 .aq-hist-pago strong { display:block; color:#1a7a45; margin-bottom:3px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
 .aq-hist-pago > div { margin:2px 0; }
+
+.aq-contactos { background:#f3f8fc; border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:14px; }
+.aq-contactos > strong { display:block; color:var(--navy); font-size:13px; margin-bottom:8px; }
+.aq-contactos ul { list-style:none; margin:0 0 6px; padding:0; }
+.aq-contactos li { padding:6px 0; border-bottom:1px solid var(--line); }
+.aq-contactos li:last-child { border-bottom:none; }
+.aq-cont-nom { display:block; font-weight:600; color:var(--ink); }
+.aq-cont-sub { display:block; font-size:12px; color:var(--muted); }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
