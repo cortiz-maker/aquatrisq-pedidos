@@ -56,6 +56,21 @@ function precioSugerido(prod, cantidad, tramos) {
   return base;
 }
 
+// Estado de entrega legible. Usa las columnas del retorno de DispatchTrack si
+// existen (estado_entrega / entregado_at); si todavía no, cae al estado de sync.
+function estadoEntregaInfo(p) {
+  const ee = (p.estado_entrega || "").toString().toLowerCase();
+  if (ee) {
+    if (ee.includes("entreg") && !ee.includes("no")) return { label: "Entregado", cls: "ok" };
+    if (ee.includes("no_") || ee.includes("fallid") || ee.includes("no entreg") || ee.includes("rechaz")) return { label: "No entregado", cls: "bad" };
+    if (ee.includes("devol")) return { label: "Devolución", cls: "warn" };
+    if (ee.includes("ruta") || ee.includes("transit")) return { label: "En ruta", cls: "warn" };
+    return { label: p.estado_entrega, cls: "warn" };
+  }
+  if (p.estado_sync === "enviado_dt") return { label: "En DT", cls: "warn" };
+  return { label: "Pendiente", cls: "warn" };
+}
+
 export default function App() {
   const credsListas =
     SUPABASE_URL && !SUPABASE_URL.startsWith("PEGA_");
@@ -144,6 +159,12 @@ export default function App() {
   const [cliEdit, setCliEdit] = useState(null);   // objeto cliente en edición (null = ninguno)
   const [guardandoCli, setGuardandoCli] = useState(false);
   const [okCli, setOkCli] = useState("");
+  // Historial de pedidos del cliente
+  const [histPedidos, setHistPedidos] = useState(null); // null = no cargado
+  const [cargandoHist, setCargandoHist] = useState(false);
+  const [errorHist, setErrorHist] = useState("");
+  const [histItems, setHistItems] = useState({});       // pedido_id -> items[]
+  const [histAbierto, setHistAbierto] = useState(null);  // pedido_id expandido
 
   // Mantenedor de productos (admin)
   const [productosAll, setProductosAll] = useState([]);
@@ -523,18 +544,67 @@ export default function App() {
   }
 
   // ── Mantenedor de clientes: alta / edición ─────────────────
+  // Código de cliente correlativo: NNNN-1 (el "-1" es fijo). Arranca en 2212-1.
+  function siguienteCodigoCliente() {
+    let max = 2211; // de modo que el primero generado sea 2212
+    clientes.forEach((c) => {
+      const m = String(c.codigo_cliente || "").match(/^0*(\d+)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+    });
+    return String(max + 1) + "-1";
+  }
+
   function nuevoCliente() {
     setOkCli("");
+    setHistPedidos(null);
+    setHistAbierto(null);
     setCliEdit({
       _nuevo: true,
-      nombre: "", rut: "", codigo_cliente: "", telefono: "", email: "",
+      nombre: "", rut: "", codigo_cliente: siguienteCodigoCliente(), telefono: "", email: "",
       es_empresa: false, razon_social: "", giro: "", marca: "", notas: "",
       activo: true, bloqueado: false, motivo_bloqueo: "",
     });
   }
   function editarCliente(c) {
     setOkCli("");
+    setHistPedidos(null);
+    setHistAbierto(null);
+    setHistItems({});
     setCliEdit({ ...c, _nuevo: false });
+  }
+
+  // Historial de pedidos del cliente en edición
+  async function verHistorial(c) {
+    if (!c) return;
+    setCargandoHist(true);
+    setErrorHist("");
+    setHistAbierto(null);
+    try {
+      const { data, error } = await supabase
+        .from("pedidos")
+        .select("*")
+        .eq("cliente_id", c.id)
+        .order("created_at", { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      setHistPedidos(data || []);
+    } catch (e) {
+      setErrorHist(e.message || "No se pudo cargar el historial.");
+      setHistPedidos([]);
+    } finally {
+      setCargandoHist(false);
+    }
+  }
+  async function toggleHistItems(pedidoId) {
+    if (histAbierto === pedidoId) { setHistAbierto(null); return; }
+    setHistAbierto(pedidoId);
+    if (!histItems[pedidoId]) {
+      const { data } = await supabase.from("pedido_items").select("*").eq("pedido_id", pedidoId);
+      setHistItems((prev) => ({ ...prev, [pedidoId]: data || [] }));
+    }
   }
   async function guardarCliente() {
     if (!cliEdit) return;
@@ -1618,7 +1688,10 @@ export default function App() {
                     <div className="aq-grid">
                       <label>Nombre<input value={cliEdit.nombre || ""} onChange={(e) => setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
                       <label>RUT<input value={cliEdit.rut || ""} onChange={(e) => setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
-                      <label>Código cliente<input value={cliEdit.codigo_cliente || ""} onChange={(e) => setCliEdit({ ...cliEdit, codigo_cliente: e.target.value })} /></label>
+                      <label>Código cliente
+                        <input value={cliEdit.codigo_cliente || ""} disabled readOnly title="Código correlativo, no editable" />
+                        <span className="aq-mini">{cliEdit._nuevo ? "Se genera automático (formato 2212-1)" : "Correlativo, no editable"}</span>
+                      </label>
                       <label>Teléfono<input value={cliEdit.telefono || ""} onChange={(e) => setCliEdit({ ...cliEdit, telefono: e.target.value })} /></label>
                       <label>Email<input type="email" value={cliEdit.email || ""} onChange={(e) => setCliEdit({ ...cliEdit, email: e.target.value })} placeholder="correo@cliente.cl" /></label>
                       <label>Marca
@@ -1652,11 +1725,89 @@ export default function App() {
                       <button className="aq-btn" disabled={guardandoCli} onClick={guardarCliente}>
                         {guardandoCli ? "Guardando…" : (cliEdit._nuevo ? "Crear cliente" : "Guardar cambios")}
                       </button>
+                      {!cliEdit._nuevo && (
+                        <button className="aq-btn-sec" disabled={cargandoHist} onClick={() => verHistorial(cliEdit)}>
+                          {cargandoHist ? "Cargando…" : "Ver pedidos"}
+                        </button>
+                      )}
                       {rol === "admin" && !cliEdit._nuevo && cliEdit.activo !== false && (
                         <button className="aq-btn-danger" onClick={() => desactivarCliente(cliEdit)}>Desactivar</button>
                       )}
                     </div>
                     {okCli && <div className={"aq-result " + (okCli.startsWith("Error") ? "bad" : "ok")}>{okCli}</div>}
+
+                    {/* Historial de pedidos del cliente */}
+                    {errorHist && <div className="aq-result bad" style={{ marginTop: 12 }}>{errorHist}</div>}
+                    {histPedidos !== null && (
+                      <div className="aq-hist">
+                        <div className="aq-hist-head">
+                          <h3>Historial de pedidos {histPedidos.length ? `(${histPedidos.length})` : ""}</h3>
+                          <button className="aq-link" onClick={() => { setHistPedidos(null); setHistAbierto(null); }}>Ocultar</button>
+                        </div>
+                        {histPedidos.length === 0 ? (
+                          <p className="aq-muted">Este cliente no tiene pedidos registrados.</p>
+                        ) : (
+                          <div className="aq-tabla">
+                            {histPedidos.map((p) => {
+                              const ent = estadoEntregaInfo(p);
+                              const dom = domPorId[p.domicilio_id];
+                              const abierto = histAbierto === p.id;
+                              const its = histItems[p.id] || [];
+                              return (
+                                <div key={p.id} className="aq-hist-ped">
+                                  <div className="aq-hist-row" onClick={() => toggleHistItems(p.id)}>
+                                    <div className="aq-hist-main">
+                                      <strong>{p.numero_guia || "—"}</strong>
+                                      <span className="aq-tr-sub">
+                                        {(p.created_at ? new Date(p.created_at).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "2-digit" }) : "")}
+                                        {dom?.comuna ? " · " + dom.comuna : ""}
+                                        {p.tipo_pago ? " · " + p.tipo_pago : ""}
+                                      </span>
+                                    </div>
+                                    <span className="aq-tr-monto">{CLP(p.monto_total)}{p.por_cobrar && <em className="aq-pc">PC</em>}</span>
+                                    <span className={"aq-badge " + ent.cls}>{ent.label}</span>
+                                    <span className="aq-hist-caret">{abierto ? "▾" : "▸"}</span>
+                                  </div>
+                                  {abierto && (
+                                    <div className="aq-hist-det">
+                                      {its.length === 0 ? (
+                                        <p className="aq-muted">Cargando detalle…</p>
+                                      ) : (
+                                        <ul className="aq-hist-items">
+                                          {its.map((l) => (
+                                            <li key={l.id}>
+                                              <span>{l.cantidad} × {l.nombre}{l.codigo ? " (" + l.codigo + ")" : ""}</span>
+                                              <span>{CLP((Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0))}</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                      {/* Datos del retorno de DispatchTrack (cuando estén conectados) */}
+                                      {(p.entregado_at || p.receptor_nombre || p.motivo_no_entrega || p.pod_foto_url || p.datos_entrega) && (
+                                        <div className="aq-hist-pod">
+                                          <strong>Entrega (DispatchTrack)</strong>
+                                          {p.entregado_at && <div>Fecha entrega: {new Date(p.entregado_at).toLocaleString("es-CL")}</div>}
+                                          {p.receptor_nombre && <div>Recibe: {p.receptor_nombre}</div>}
+                                          {p.motivo_no_entrega && <div>Motivo no entrega: {p.motivo_no_entrega}</div>}
+                                          {p.pod_foto_url && <div><a className="aq-link" href={p.pod_foto_url} target="_blank" rel="noreferrer">Ver foto / firma</a></div>}
+                                          {p.datos_entrega && typeof p.datos_entrega === "object" && (
+                                            <div className="aq-hist-form">
+                                              {Object.entries(p.datos_entrega).map(([k, v]) => (
+                                                <div key={k}><em>{k}:</em> {String(v)}</div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </>
                 )}
               </section>
@@ -2358,5 +2509,31 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
   .aq-list-row .aq-btn-sec { grid-column:span 1; }
   .aq-repetir-row { flex-direction:column; align-items:stretch; }
 }
+.aq-mini { font-size:11px; color:var(--muted); font-weight:500; margin-top:3px; }
+.aq-badge.bad { background:#fdecea; color:var(--bad); }
+input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
+
+/* Historial de pedidos del cliente */
+.aq-hist { margin-top:16px; border-top:1px solid var(--line); padding-top:14px; }
+.aq-hist-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.aq-hist-head h3 { margin:0; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--navy); font-weight:700; }
+.aq-hist-ped { border-bottom:1px solid var(--line); }
+.aq-hist-ped:last-child { border-bottom:none; }
+.aq-hist-row { display:grid; grid-template-columns:1fr auto 92px 18px; gap:10px; align-items:center; padding:11px 4px; cursor:pointer; }
+.aq-hist-row:hover { background:var(--bg); }
+.aq-hist-main { min-width:0; }
+.aq-hist-main strong { display:block; color:var(--ink); }
+.aq-hist-caret { color:var(--muted); font-size:12px; text-align:center; }
+.aq-hist-det { padding:4px 6px 14px; }
+.aq-hist-items { list-style:none; margin:0 0 8px; padding:0; }
+.aq-hist-items li { display:flex; justify-content:space-between; gap:10px; font-size:14px; padding:4px 0; border-bottom:1px dashed var(--line); }
+.aq-hist-items li:last-child { border-bottom:none; }
+.aq-hist-pod { background:#f3f8fc; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:13px; color:var(--ink); }
+.aq-hist-pod strong { display:block; color:var(--navy); margin-bottom:4px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+.aq-hist-pod > div { margin:2px 0; }
+.aq-hist-form { margin-top:6px; }
+.aq-hist-form em { color:var(--muted); font-style:normal; }
+@media (max-width:560px) { .aq-hist-row { grid-template-columns:1fr auto 18px; } .aq-hist-row .aq-badge { display:none; } }
+
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
