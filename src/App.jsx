@@ -1086,6 +1086,7 @@ export default function App() {
     setConsumePlan(false);
     setAvisoRepetir("");
     setAvisoDeuda(null);
+    setSemaforoCli(null);
     setMarca(c.marca || "");
     setRutFactura(c.rut || "");
     setTipoDocumento(c.es_empresa ? "factura" : "boleta");
@@ -1130,6 +1131,8 @@ export default function App() {
         }
       }
     } catch { /* si falla (RLS), no bloqueamos el flujo */ }
+
+    calcSemaforo(c);
   }
 
   // ── Bloque 5: repetir última compra ────────────────────────
@@ -2503,7 +2506,7 @@ export default function App() {
                       <strong>{cliente.nombre}</strong>
                       <span>{cliente.rut || cliente.codigo_cliente}{cliente.es_empresa ? " · empresa" : ""}</span>
                     </div>
-                    <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); }}>
+                    <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); setAvisoDeuda(null); setSemaforoCli(null); }}>
                       Cambiar
                     </button>
                   </div>
@@ -2541,6 +2544,13 @@ export default function App() {
                 <strong>⚠ Deuda pendiente</strong>
                 <p>Este cliente tiene {avisoDeuda.guias.length} entrega(s) sin pagar por {CLP(avisoDeuda.monto)} (guía(s): {avisoDeuda.guias.join(", ")}).</p>
                 <span>Puedes continuar, pero conviene gestionarlo en Cobranzas.</span>
+              </div>
+            )}
+
+            {cliente && semaforoCli && (
+              <div className={"aq-semaforo " + semaforoCli.cls} style={{ marginBottom: 14 }}>
+                <span className="aq-sem-dot" />
+                Comportamiento de pago: {semaforoCli.label}
               </div>
             )}
 
