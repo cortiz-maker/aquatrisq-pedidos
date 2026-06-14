@@ -198,6 +198,7 @@ export default function App() {
   const [cliEdit, setCliEdit] = useState(null);   // objeto cliente en edición (null = ninguno)
   const [guardandoCli, setGuardandoCli] = useState(false);
   const [okCli, setOkCli] = useState("");
+  const [semaforoCli, setSemaforoCli] = useState(null); // { cls, dias, label } o null
   // Historial de pedidos del cliente
   const [histPedidos, setHistPedidos] = useState(null); // null = no cargado
   const [cargandoHist, setCargandoHist] = useState(false);
@@ -669,7 +670,39 @@ export default function App() {
     setHistAbierto(null);
     setHistItems({});
     setHistEntregas({});
+    setSemaforoCli(null);
     setCliEdit({ ...c, _nuevo: false });
+    calcSemaforo(c);
+  }
+
+  // Semáforo de pago: solo si el cliente alguna vez entró en no-pago (Pago = No).
+  // Color por la antigüedad de su deuda actual sin cobrar (días desde la entrega).
+  async function calcSemaforo(c) {
+    try {
+      const { data: pp } = await supabase
+        .from("pedidos")
+        .select("numero_guia, cobro_cobrado")
+        .eq("cliente_id", c.id);
+      const guias = (pp || []).map((x) => x.numero_guia).filter(Boolean);
+      if (!guias.length) return;
+      const { data: ents } = await supabase.from("dt_entregas").select("*").in("guide", guias);
+      const pagoNoMap = {};
+      (ents || []).forEach((e) => { if (e.guide && esPagoNo(e)) pagoNoMap[e.guide] = e; });
+      const conNoPago = (pp || []).filter((x) => pagoNoMap[x.numero_guia]);
+      if (!conNoPago.length) return; // nunca entró en no-pago → sin semáforo
+      let diasMax = 0;
+      conNoPago.forEach((x) => {
+        if (x.cobro_cobrado) return;
+        const e = pagoNoMap[x.numero_guia];
+        const g = e?.gestionado_en ? new Date(e.gestionado_en).getTime() : null;
+        if (g) { const d = Math.floor((Date.now() - g) / 86400000); if (d > diasMax) diasMax = d; }
+      });
+      let cls, label;
+      if (diasMax >= 16) { cls = "rojo"; label = `Moroso · ${diasMax} días sin pagar`; }
+      else if (diasMax >= 6) { cls = "amarillo"; label = `Pago lento · ${diasMax} días`; }
+      else { cls = "verde"; label = diasMax > 0 ? `Al día · ${diasMax} días` : "Al día"; }
+      setSemaforoCli({ cls, dias: diasMax, label });
+    } catch { /* sin semáforo si falla */ }
   }
 
   // Historial de pedidos del cliente en edición
@@ -1841,9 +1874,6 @@ export default function App() {
                   <div className="aq-kpi">
                     <span>Ticket promedio</span><strong>{CLP(ger.ticket)}</strong>
                   </div>
-                  <div className="aq-kpi">
-                    <span>Por cobrar</span><strong>{CLP(ger.porCobrarMes)}</strong>
-                  </div>
                   <div className={"aq-kpi" + (ger.venc30 && ger.venc30.monto > 0 ? " aq-kpi-venc" : "")}>
                     <span>Deuda +30 días</span><strong>{CLP(ger.venc30 ? ger.venc30.monto : 0)}</strong>
                   </div>
@@ -2020,6 +2050,12 @@ export default function App() {
                       <h2>{cliEdit._nuevo ? "Nuevo cliente" : "Editar cliente"}</h2>
                       <button className="aq-link" onClick={() => { setCliEdit(null); setOkCli(""); }}>Volver</button>
                     </div>
+                    {!cliEdit._nuevo && semaforoCli && (
+                      <div className={"aq-semaforo " + semaforoCli.cls}>
+                        <span className="aq-sem-dot" />
+                        Comportamiento de pago: {semaforoCli.label}
+                      </div>
+                    )}
                     <div className="aq-grid">
                       <label>Nombre<input value={cliEdit.nombre || ""} onChange={(e) => setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
                       <label>RUT<input value={cliEdit.rut || ""} onChange={(e) => setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
@@ -3091,6 +3127,16 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 
 .aq-kpi-venc { border-color:#f3b4ad !important; background:#fdecea; }
 .aq-kpi-venc strong { color:var(--bad); }
+
+/* Semáforo de pago del cliente */
+.aq-semaforo { display:inline-flex; align-items:center; gap:8px; font-size:13px; font-weight:600; padding:7px 12px; border-radius:10px; margin-bottom:12px; border:1px solid; }
+.aq-semaforo .aq-sem-dot { width:11px; height:11px; border-radius:50%; flex:none; }
+.aq-semaforo.verde { background:#e7f6ee; border-color:#9bd5b4; color:#1a7a45; }
+.aq-semaforo.verde .aq-sem-dot { background:#1a9a52; }
+.aq-semaforo.amarillo { background:#fff7e6; border-color:#f0d8a0; color:#8a6400; }
+.aq-semaforo.amarillo .aq-sem-dot { background:#e0a400; }
+.aq-semaforo.rojo { background:#fdecea; border-color:#f3b4ad; color:#b42318; }
+.aq-semaforo.rojo .aq-sem-dot { background:#d92d20; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
