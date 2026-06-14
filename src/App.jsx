@@ -2046,10 +2046,10 @@ export default function App() {
                               onClick={() => { editarCliente(r.cliente); setBuscarMant(""); }}
                               className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                             >
-                              <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
+                              <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.dom?.etiqueta || r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
                               <span>
                                 {r.dom?.identificador_dt
-                                  ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
+                                  ? r.dom.identificador_dt + " · " + (r.dom.direccion || "") + (r.dom.etiqueta ? " · titular: " + r.cliente.nombre : "")
                                   : (r.cliente.codigo_cliente || r.cliente.rut || "")}
                                 {r.cliente.bloqueado ? " · bloqueado" : ""}
                               </span>
@@ -2521,10 +2521,10 @@ export default function App() {
                           onClick={() => elegirCliente(r.cliente, r.dom?.id)}
                           className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                         >
-                          <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
+                          <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.dom?.etiqueta || r.cliente.nombre}</strong>
                           <span>
                             {r.dom?.identificador_dt
-                              ? r.dom.identificador_dt + " · " + (r.dom.direccion || "")
+                              ? r.dom.identificador_dt + " · " + (r.dom.direccion || "") + (r.dom.etiqueta ? " · titular: " + r.cliente.nombre : "")
                               : (r.cliente.rut || r.cliente.codigo_cliente)}
                             {r.cliente.es_empresa ? " · empresa" : ""}
                           </span>
@@ -2624,7 +2624,7 @@ export default function App() {
                     <select value={domicilioId} onChange={(e) => setDomicilioId(e.target.value)}>
                       {domicilios.map((d) => (
                         <option key={d.id} value={d.id}>
-                          {(d.etiqueta ? d.etiqueta + " · " : "") + d.direccion + (d.comuna ? ", " + d.comuna : "")}
+                          {(d.etiqueta ? d.etiqueta + " · " : "") + (d.identificador_dt ? d.identificador_dt + " · " : "") + d.direccion + (d.comuna ? ", " + d.comuna : "")}
                           {d.es_principal ? " (principal)" : ""}
                         </option>
                       ))}
