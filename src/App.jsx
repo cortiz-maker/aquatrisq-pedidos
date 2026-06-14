@@ -94,6 +94,22 @@ function answersFromRaw(entrega) {
     .filter((x) => x.name && x.val !== "");
 }
 
+// ¿El chofer marcó "Pago = No" en el formulario de entrega? (= entregado sin pagar)
+function respPago(entrega) {
+  const a = answersFromRaw(entrega).find((x) => x.name.trim().toLowerCase() === "pago");
+  return a ? a.val : null;
+}
+function esPagoNo(entrega) {
+  const v = respPago(entrega);
+  return v != null && /^\s*no\s*$/i.test(String(v));
+}
+function montoEntrega(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /monto/i.test(x.name));
+  if (!a) return 0;
+  const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function App() {
   const credsListas =
     SUPABASE_URL && !SUPABASE_URL.startsWith("PEGA_");
@@ -190,6 +206,17 @@ export default function App() {
   const [histAbierto, setHistAbierto] = useState(null);  // pedido_id expandido
   const [histEntregas, setHistEntregas] = useState({});  // numero_guia -> fila dt_entregas (retorno DispatchTrack)
 
+  // ── Cobranza / gestión de cobro (Pago = No en el formulario de entrega) ──
+  const [entregasMap, setEntregasMap] = useState({});   // guide -> dt_entregas (pedidos del dashboard)
+  const [pedidoModal, setPedidoModal] = useState(null);  // { pedido, entrega } para el popup de detalle
+  const [cobranzas, setCobranzas] = useState(null);      // lista de gestión de cobro (null = no cargado)
+  const [cargandoCob, setCargandoCob] = useState(false);
+  const [errorCob, setErrorCob] = useState("");
+  const [okCob, setOkCob] = useState("");
+  const [filtroCob, setFiltroCob] = useState("pendientes"); // pendientes | gestionados | todos
+  const [guardandoCob, setGuardandoCob] = useState("");  // id del pedido en proceso
+  const [avisoDeuda, setAvisoDeuda] = useState(null);    // { guias:[], monto } alerta en Nuevo pedido
+
   // Mantenedor de productos (admin)
   const [productosAll, setProductosAll] = useState([]);
   const [cargandoProd, setCargandoProd] = useState(false);
@@ -281,7 +308,22 @@ export default function App() {
         .lt("created_at", hasta)
         .order("created_at", { ascending: false });
       if (error) throw error;
-      setPedidosMes(data || []);
+      const peds = data || [];
+      setPedidosMes(peds);
+      // Entregas DT del período (para el popup y el estado de cobro en el listado)
+      const guias = peds.map((p) => p.numero_guia).filter(Boolean);
+      if (guias.length) {
+        const mapa = {};
+        const CH = 200;
+        for (let i = 0; i < guias.length; i += CH) {
+          const lote = guias.slice(i, i + CH);
+          const { data: ents } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+          (ents || []).forEach((e) => { if (e.guide) mapa[e.guide] = e; });
+        }
+        setEntregasMap(mapa);
+      } else {
+        setEntregasMap({});
+      }
     } catch (e) {
       setErrorDash(e.message || "No se pudo cargar el período.");
       setPedidosMes([]);
@@ -458,7 +500,7 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -648,6 +690,134 @@ export default function App() {
       setHistItems((prev) => ({ ...prev, [pedidoId]: data || [] }));
     }
   }
+  // ── Cobranza / gestión de cobro ────────────────────────────
+  function abrirPedidoModal(p) {
+    setPedidoModal({ pedido: p, entrega: p.numero_guia ? entregasMap[p.numero_guia] : null });
+  }
+
+  async function abrirCobranzas() {
+    setVista("cobranzas");
+    setCargandoCob(true);
+    setErrorCob("");
+    setOkCob("");
+    try {
+      // Entregas gestionadas (traen formulario) → filtramos las de Pago = No
+      const { data: ents, error: eEnt } = await supabase
+        .from("dt_entregas")
+        .select("*")
+        .not("gestionado_en", "is", null)
+        .order("gestionado_en", { ascending: false })
+        .limit(1000);
+      if (eEnt) throw eEnt;
+      const pagoNo = (ents || []).filter((e) => esPagoNo(e));
+      const guias = [...new Set(pagoNo.map((e) => e.guide).filter(Boolean))];
+      let peds = [];
+      if (guias.length) {
+        const CH = 200;
+        for (let i = 0; i < guias.length; i += CH) {
+          const lote = guias.slice(i, i + CH);
+          const { data: pp } = await supabase.from("pedidos").select("*").in("numero_guia", lote);
+          peds = peds.concat(pp || []);
+        }
+      }
+      const mapEnt = {};
+      pagoNo.forEach((e) => { if (e.guide) mapEnt[e.guide] = e; });
+      const lista = peds
+        .map((p) => ({ pedido: p, entrega: mapEnt[p.numero_guia] || null }))
+        .sort((a, b) => new Date(b.entrega?.gestionado_en || 0) - new Date(a.entrega?.gestionado_en || 0));
+      setCobranzas(lista);
+    } catch (e) {
+      setErrorCob(e.message || "No se pudo cargar la gestión de cobro.");
+      setCobranzas([]);
+    } finally {
+      setCargandoCob(false);
+    }
+  }
+
+  function actualizarCobranzaLocal(id, patch) {
+    setCobranzas((prev) => (prev ? prev.map((x) => (x.pedido.id === id ? { ...x, pedido: { ...x.pedido, ...patch } } : x)) : prev));
+    setPedidosMes((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    setPedidoModal((prev) => (prev && prev.pedido.id === id ? { ...prev, pedido: { ...prev.pedido, ...patch } } : prev));
+  }
+
+  // Marca/desmarca Cobrado o Recuperado (estados independientes).
+  async function marcarCobroCampo(pedido, campo) {
+    setGuardandoCob(pedido.id);
+    setErrorCob("");
+    setOkCob("");
+    try {
+      const nuevo = !pedido[campo];
+      const patch = { [campo]: nuevo, cobro_at: new Date().toISOString(), cobro_por: perfilNombre || null };
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
+      if (error) throw error;
+      actualizarCobranzaLocal(pedido.id, patch);
+      setOkCob(`${pedido.numero_guia || ""}: ${campo === "cobro_cobrado" ? "Cobrado" : "Recuperado"} ${nuevo ? "marcado" : "desmarcado"}.`);
+    } catch (e) {
+      setErrorCob(e.message || "No se pudo actualizar.");
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+
+  // Registra un intento de cobro. Más de 3 intentos sin cobrar → bloquea al cliente.
+  async function registrarIntento(pedido) {
+    setGuardandoCob(pedido.id);
+    setErrorCob("");
+    setOkCob("");
+    try {
+      const intentos = (Number(pedido.cobro_intentos) || 0) + 1;
+      const patch = { cobro_intentos: intentos, cobro_at: new Date().toISOString(), cobro_por: perfilNombre || null };
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
+      if (error) throw error;
+      actualizarCobranzaLocal(pedido.id, patch);
+      setOkCob(`${pedido.numero_guia || ""}: intento de cobro registrado (${intentos}).`);
+
+      if (intentos > 3 && !pedido.cobro_cobrado) {
+        const cli = clientePorId[pedido.cliente_id];
+        if (cli && !cli.bloqueado) {
+          const motivo = `Deuda pendiente: ${intentos} intentos de cobro sin éxito (guía ${pedido.numero_guia || ""})`;
+          const bpatch = { bloqueado: true, motivo_bloqueo: motivo, bloqueado_por: perfilNombre || null, bloqueado_at: new Date().toISOString() };
+          const { error: eCli } = await supabase.from("clientes").update(bpatch).eq("id", cli.id);
+          if (!eCli) {
+            setClientes((prev) => prev.map((c) => (c.id === cli.id ? { ...c, ...bpatch } : c)));
+            setOkCob(`⚠ ${cli.nombre} fue bloqueado automáticamente por ${intentos} intentos de cobro sin éxito.`);
+          }
+        }
+      }
+    } catch (e) {
+      setErrorCob(e.message || "No se pudo registrar el intento.");
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+
+  // Bloque de detalle de entrega (reutilizado en popup). Devuelve JSX o null.
+  function renderEntregaDT(entrega) {
+    if (!entrega) return <p className="aq-muted">Este pedido aún no tiene retorno de DispatchTrack (no gestionado).</p>;
+    const answers = answersFromRaw(entrega);
+    const ent = estadoEntregaDT(entrega, null);
+    return (
+      <div className="aq-hist-pod" style={{ marginTop: 0 }}>
+        <strong>Entrega (DispatchTrack)</strong>
+        <div>Estado: {ent.label}</div>
+        {entrega.gestionado_en && <div>Gestionado: {new Date(entrega.gestionado_en).toLocaleString("es-CL")}</div>}
+        {entrega.contact_name && <div>Recibe / domicilio: {entrega.contact_name}</div>}
+        {(entrega.bidon_pendiente !== null && entrega.bidon_pendiente !== undefined) && <div>Bidón pendiente: {entrega.bidon_pendiente}</div>}
+        {entrega.ruta && <div>Ruta: {entrega.ruta}</div>}
+        {(entrega.latitude && entrega.longitude) && (
+          <div><a className="aq-link" href={`https://maps.google.com/?q=${entrega.latitude},${entrega.longitude}`} target="_blank" rel="noreferrer">Ver ubicación de entrega</a></div>
+        )}
+        {answers.length > 0 && (
+          <div className="aq-hist-form">
+            {answers.map((a, idx) => (
+              <div key={idx}><em>{a.name}:</em> {/^https?:\/\//.test(a.val) ? <a className="aq-link" href={a.val} target="_blank" rel="noreferrer">ver archivo</a> : a.val}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   async function guardarCliente() {
     if (!cliEdit) return;
     const nombre = (cliEdit.nombre || "").trim();
@@ -853,6 +1023,7 @@ export default function App() {
     setPlanPrepago(null);
     setConsumePlan(false);
     setAvisoRepetir("");
+    setAvisoDeuda(null);
     setMarca(c.marca || "");
     setRutFactura(c.rut || "");
     setTipoDocumento(c.es_empresa ? "factura" : "boleta");
@@ -878,6 +1049,25 @@ export default function App() {
     setPlanPrepago(conSaldo || null);
 
     setDescCliente(dc.data || []);
+
+    // Alerta de deuda: entregas con Pago=No que aún no están cobradas
+    try {
+      const { data: pp } = await supabase
+        .from("pedidos")
+        .select("numero_guia, monto_total, cobro_cobrado")
+        .eq("cliente_id", c.id);
+      const guias = (pp || []).filter((x) => x.numero_guia && !x.cobro_cobrado).map((x) => x.numero_guia);
+      if (guias.length) {
+        const { data: ents } = await supabase.from("dt_entregas").select("*").in("guide", guias);
+        const deudaGuias = (ents || []).filter((e) => esPagoNo(e)).map((e) => e.guide);
+        if (deudaGuias.length) {
+          const monto = (pp || [])
+            .filter((x) => deudaGuias.includes(x.numero_guia))
+            .reduce((s, x) => s + (Number(x.monto_total) || 0), 0);
+          setAvisoDeuda({ guias: deudaGuias, monto });
+        }
+      }
+    } catch { /* si falla (RLS), no bloqueamos el flujo */ }
   }
 
   // ── Bloque 5: repetir última compra ────────────────────────
@@ -1275,6 +1465,11 @@ export default function App() {
     const ped = pedidosMes;
     const est = (p) => String(p.estado_entrega || p.estado || "").toLowerCase();
     const hoy = new Date().toISOString().slice(0, 10);
+    // Cobro: deuda real = entrega con Pago=No y aún no cobrado (en el período)
+    const conDeuda = ped.filter((p) => {
+      const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
+      return e && esPagoNo(e) && !p.cobro_cobrado;
+    });
     return {
       ingresados: ped.length,
       enviados: ped.filter((p) => p.estado_sync === "enviado_dt").length,
@@ -1284,8 +1479,21 @@ export default function App() {
       monto: ped.reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
       porCobrar: ped.filter((p) => p.por_cobrar).reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
       tieneEstado: ped.some((p) => p.estado_entrega != null || p.estado != null),
+      // Gestión de cobro
+      deudaCount: conDeuda.length,
+      deudaMonto: conDeuda.reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
+      cobrados: ped.filter((p) => p.cobro_cobrado).length,
+      recuperados: ped.filter((p) => p.cobro_recuperado).length,
     };
   })();
+
+  // Estado de cobro de un pedido (para badge en el listado).
+  const cobroDePedido = (p) => {
+    const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
+    if (!e || !esPagoNo(e)) return null;
+    if (p.cobro_cobrado) return { label: "Cobrado", cls: "ok" };
+    return { label: "Deuda", cls: "bad" };
+  };
 
   const pedidosFiltrados = useMemo(() => {
     const q = buscarPedido.trim().toLowerCase();
@@ -1390,6 +1598,9 @@ export default function App() {
             {rol !== "gerencial" && (
               <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>{rol === "admin" ? "Mantenedores" : "Clientes"}</button>
             )}
+            {rol !== "gerencial" && (
+              <button className={vista === "cobranzas" ? "on" : ""} onClick={abrirCobranzas}>Cobranzas</button>
+            )}
             <span className="aq-user" title={rol}>
               {perfilNombre} · {rol}
               <button className="aq-logout" onClick={cerrarSesion} aria-label="Cerrar sesión">Salir</button>
@@ -1464,6 +1675,11 @@ export default function App() {
                     <span>Por cobrar</span>
                     <strong>{CLP(dash.porCobrar)}</strong>
                   </div>
+                  <button className="aq-money-card deuda" onClick={abrirCobranzas} title="Abrir gestión de cobro">
+                    <span>Deuda por cobrar (gestión)</span>
+                    <strong>{CLP(dash.deudaMonto)}</strong>
+                    <em className="aq-money-sub">{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados}</em>
+                  </button>
                 </div>
 
                 <section className="aq-card">
@@ -1489,8 +1705,9 @@ export default function App() {
                     <div className="aq-tabla">
                       {pedidosFiltrados.slice(0, 80).map((p) => {
                         const i = infoPedido(p);
+                        const cobro = cobroDePedido(p);
                         return (
-                          <div className="aq-tr" key={p.id}>
+                          <div className="aq-tr aq-tr-click" key={p.id} onClick={() => abrirPedidoModal(p)} title="Ver detalle de entrega">
                             <div className="aq-tr-main">
                               <strong>{i.nombre}</strong>
                               <span className="aq-tr-sub">
@@ -1506,11 +1723,11 @@ export default function App() {
                             </span>
                             <span className="aq-tr-monto">
                               {CLP(p.monto_total)}
-                              {p.por_cobrar && <em className="aq-pc">PC</em>}
+                              {p.por_cobrar && <em className="aq-pc" onClick={(e) => { e.stopPropagation(); abrirPedidoModal(p); }} title="Ver formulario de entrega / cobro">PC</em>}
                             </span>
-                            <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>
-                              {p.estado_sync === "enviado_dt" ? "En DT" : "Pend."}
-                            </span>
+                            {cobro
+                              ? <span className={"aq-badge " + cobro.cls}>{cobro.label}</span>
+                              : <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>{p.estado_sync === "enviado_dt" ? "En DT" : "Pend."}</span>}
                           </div>
                         );
                       })}
@@ -2014,6 +2231,79 @@ export default function App() {
           </>
         )}
 
+        {/* ===================== COBRANZAS (gestión de cobro) ===================== */}
+        {credsListas && vista === "cobranzas" && rol !== "gerencial" && (
+          <section className="aq-card">
+            <div className="aq-row-head">
+              <h2>Gestión de cobro</h2>
+              <button className="aq-link" onClick={() => setVista("inicio")}>Volver</button>
+            </div>
+            <p className="aq-muted">Pedidos entregados con <strong>Pago = No</strong> en el formulario del chofer. Marca Cobrado y/o Recuperado, o registra un intento. Más de 3 intentos sin cobrar bloquea al cliente.</p>
+
+            <div className="aq-subtabs" style={{ marginTop: 4 }}>
+              <button className={filtroCob === "pendientes" ? "on" : ""} onClick={() => setFiltroCob("pendientes")}>Pendientes</button>
+              <button className={filtroCob === "gestionados" ? "on" : ""} onClick={() => setFiltroCob("gestionados")}>Cobrados</button>
+              <button className={filtroCob === "todos" ? "on" : ""} onClick={() => setFiltroCob("todos")}>Todos</button>
+            </div>
+
+            {errorCob && <div className="aq-result bad" style={{ marginTop: 10 }}>{errorCob}</div>}
+            {okCob && <div className="aq-result ok" style={{ marginTop: 10 }}>{okCob}</div>}
+
+            {cargandoCob ? (
+              <p className="aq-muted" style={{ marginTop: 12 }}>Cargando…</p>
+            ) : (cobranzas || []).length === 0 ? (
+              <p className="aq-muted" style={{ marginTop: 12 }}>No hay entregas con Pago = No.</p>
+            ) : (
+              <div className="aq-tabla" style={{ marginTop: 6 }}>
+                {(cobranzas || [])
+                  .filter((x) => {
+                    if (filtroCob === "pendientes") return !x.pedido.cobro_cobrado;
+                    if (filtroCob === "gestionados") return !!x.pedido.cobro_cobrado;
+                    return true;
+                  })
+                  .map(({ pedido: p, entrega: e }) => {
+                    const cli = clientePorId[p.cliente_id];
+                    const dom = domPorId[p.domicilio_id];
+                    const intentos = Number(p.cobro_intentos) || 0;
+                    const enProceso = guardandoCob === p.id;
+                    return (
+                      <div className="aq-cob" key={p.id}>
+                        <div className="aq-cob-head">
+                          <div className="aq-cob-main">
+                            <strong>{cli?.nombre || "Cliente"}{cli?.bloqueado ? " · ⚠ bloqueado" : ""}</strong>
+                            <span className="aq-tr-sub">
+                              {p.numero_guia || "—"}
+                              {(dom?.comuna || e?.contact_name) ? " · " + (dom?.comuna || e?.contact_name) : ""}
+                              {e?.gestionado_en ? " · " + new Date(e.gestionado_en).toLocaleDateString("es-CL", { day: "2-digit", month: "short" }) : ""}
+                            </span>
+                          </div>
+                          <span className="aq-tr-monto">{CLP(p.monto_total || montoEntrega(e))}</span>
+                        </div>
+                        <div className="aq-cob-badges">
+                          <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
+                          <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
+                          <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
+                        </div>
+                        <div className="aq-cob-acts">
+                          <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
+                            {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
+                          </button>
+                          <button className={"aq-btn-sec" + (p.cobro_recuperado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_recuperado")}>
+                            {p.cobro_recuperado ? "✓ Recuperado" : "Marcar recuperado"}
+                          </button>
+                          <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado} onClick={() => registrarIntento(p)}>
+                            + Intento de cobro
+                          </button>
+                          <button className="aq-link" onClick={() => abrirPedidoModal(p)}>Ver detalle</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </section>
+        )}
+
         {/* ===================== NUEVO PEDIDO ===================== */}
         {credsListas && !cargando && !errorCarga && vista === "nuevo" && (
           <>
@@ -2085,6 +2375,14 @@ export default function App() {
                 <strong>⚠ Cliente con alerta</strong>
                 <p>{cliente.motivo_bloqueo || "Cliente marcado para revisión."}</p>
                 <span>Revisa antes de continuar con el pedido.</span>
+              </div>
+            )}
+
+            {cliente && !cliente.bloqueado && avisoDeuda && (
+              <div className="aq-alerta-deuda">
+                <strong>⚠ Deuda pendiente</strong>
+                <p>Este cliente tiene {avisoDeuda.guias.length} entrega(s) sin pagar por {CLP(avisoDeuda.monto)} (guía(s): {avisoDeuda.guias.join(", ")}).</p>
+                <span>Puedes continuar, pero conviene gestionarlo en Cobranzas.</span>
               </div>
             )}
 
@@ -2319,6 +2617,40 @@ export default function App() {
               </>
             )}
           </>
+        )}
+        {/* ===================== POPUP DETALLE DE ENTREGA ===================== */}
+        {pedidoModal && (
+          <div className="aq-modal-ov" onClick={() => setPedidoModal(null)}>
+            <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="aq-modal-head">
+                <div>
+                  <strong>{pedidoModal.pedido.numero_guia || "Pedido"}</strong>
+                  <span className="aq-tr-sub">
+                    {(clientePorId[pedidoModal.pedido.cliente_id]?.nombre || "")}
+                    {" · "}{CLP(pedidoModal.pedido.monto_total)}
+                    {pedidoModal.pedido.por_cobrar ? " · Por cobrar" : ""}
+                  </span>
+                </div>
+                <button className="aq-link" onClick={() => setPedidoModal(null)}>Cerrar ✕</button>
+              </div>
+
+              {renderEntregaDT(pedidoModal.entrega)}
+
+              {esPagoNo(pedidoModal.entrega) && (
+                <div className="aq-modal-cobro">
+                  <strong>{pedidoModal.pedido.cobro_cobrado ? "✓ Deuda cobrada" : "⚠ Entregado sin pago — por cobrar"}</strong>
+                  <div className="aq-cob-badges" style={{ marginTop: 6 }}>
+                    <span className={"aq-badge " + (pedidoModal.pedido.cobro_cobrado ? "ok" : "warn")}>{pedidoModal.pedido.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
+                    <span className={"aq-badge " + (pedidoModal.pedido.cobro_recuperado ? "ok" : "warn")}>{pedidoModal.pedido.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
+                    <span className="aq-badge">Intentos: {Number(pedidoModal.pedido.cobro_intentos) || 0}</span>
+                  </div>
+                  <button className="aq-btn-sec" style={{ marginTop: 10 }} onClick={() => { setPedidoModal(null); abrirCobranzas(); }}>
+                    Ir a gestión de cobro →
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </main>
     </div>
@@ -2583,6 +2915,37 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-hist-form { margin-top:6px; }
 .aq-hist-form em { color:var(--muted); font-style:normal; }
 @media (max-width:560px) { .aq-hist-row { grid-template-columns:1fr auto 18px; } .aq-hist-row .aq-badge { display:none; } }
+
+/* Cobranza / gestión de cobro */
+.aq-money-card.deuda { background:#fff7e6; border:1px solid #f0d8a0; color:#8a6400; text-align:left; cursor:pointer; font:inherit; display:flex; flex-direction:column; gap:2px; }
+.aq-money-card.deuda:hover { background:#fdeecb; }
+.aq-money-card.deuda strong { color:#8a6400; }
+.aq-money-sub { font-style:normal; font-size:11px; color:#a07a2a; font-weight:500; }
+.aq-tr-click { cursor:pointer; }
+.aq-tr-click:hover { background:var(--bg); }
+.aq-pc { cursor:pointer; }
+.aq-cob { border-bottom:1px solid var(--line); padding:12px 4px; }
+.aq-cob:last-child { border-bottom:none; }
+.aq-cob-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+.aq-cob-main strong { display:block; color:var(--ink); }
+.aq-cob-badges { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.aq-cob-acts { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; align-items:center; }
+.aq-cob-acts .aq-btn-sec { padding:7px 12px; font-size:13px; }
+.aq-btn-sec.on { background:#e7f6ee; border-color:#9bd5b4; color:#1a7a45; }
+
+/* Alerta de deuda en Nuevo pedido */
+.aq-alerta-deuda { background:#fff7e6; border:1px solid #f0d8a0; border-radius:12px; padding:14px 16px; margin-bottom:14px; }
+.aq-alerta-deuda strong { color:#8a6400; display:block; }
+.aq-alerta-deuda p { margin:4px 0; color:var(--ink); }
+.aq-alerta-deuda span { font-size:13px; color:#a07a2a; }
+
+/* Popup detalle de entrega */
+.aq-modal-ov { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:18px; z-index:50; }
+.aq-modal { background:#fff; border-radius:16px; max-width:560px; width:100%; max-height:86vh; overflow:auto; padding:18px 20px; box-shadow:0 18px 50px rgba(0,0,0,.25); }
+.aq-modal-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:14px; }
+.aq-modal-head strong { display:block; font-size:17px; color:var(--navy); }
+.aq-modal-cobro { margin-top:14px; background:#fff7e6; border:1px solid #f0d8a0; border-radius:12px; padding:12px 14px; }
+.aq-modal-cobro > strong { color:#8a6400; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
