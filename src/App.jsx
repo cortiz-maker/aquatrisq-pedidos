@@ -5,7 +5,7 @@ import { PUENTE_URL, SUPABASE_URL } from "./config.js";
 // ── Valores de enums (tal cual están en Postgres) ────────────
 const TIPOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta", "Debito", "Plan PrePago", "Por Cobrar"];
 const TIPOS_DOC = ["boleta", "factura", "sin_documento"];
-const MARCAS = ["TrisQ", "Positive", "AguaFine"];
+const MARCAS = ["TrisQ"];
 // Origen de un descuento manual en pedido_descuentos (texto libre, pero acotamos).
 const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 
@@ -179,9 +179,15 @@ export default function App() {
   const [tipoDocumento, setTipoDocumento] = useState("boleta");
   const [tipoPago, setTipoPago] = useState("Por Cobrar");
   const [rutFactura, setRutFactura] = useState("");
-  const [marca, setMarca] = useState("");
-  const [fechaMin, setFechaMin] = useState("");
-  const [fechaMax, setFechaMax] = useState("");
+  const [marca, setMarca] = useState("TrisQ");
+  // Fecha de entrega: mañana 09:00 → 17:00 por defecto
+  function fechaManana(hora) {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${hora}`;
+  }
+  const [fechaMin, setFechaMin] = useState(() => fechaManana("09:00"));
+  const [fechaMax, setFechaMax] = useState(() => fechaManana("17:00"));
   const [observacion, setObservacion] = useState("");
   const [creadoPor, setCreadoPor] = useState("");
 
@@ -1188,7 +1194,7 @@ export default function App() {
     setAvisoRepetir("");
     setAvisoDeuda(null);
     setSemaforoCli(null);
-    setMarca(c.marca || "");
+    setMarca(c.marca || "TrisQ");
     setRutFactura(c.rut || "");
     setTipoDocumento(c.es_empresa ? "factura" : "boleta");
 
@@ -1493,8 +1499,7 @@ export default function App() {
           codigo: prod ? prod.codigo : null,
           cantidad: cant,
           precio_unit: pu,
-          // 'subtotal' es columna generada en la base (cantidad * precio_unit);
-          // Postgres la calcula sola, por eso no la enviamos.
+          subtotal_dt: Math.round(cant * pu), // totaliza para DispatchTrack (qty × precio)
         };
       });
       const { error: eItems } = await supabase.from("pedido_items").insert(lineas);
@@ -2200,10 +2205,10 @@ export default function App() {
                               onClick={() => { editarCliente(r.cliente); setBuscarMant(""); }}
                               className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                             >
-                              <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.dom?.etiqueta || r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
+                              <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
                               <span>
                                 {r.dom?.identificador_dt
-                                  ? r.dom.identificador_dt + " · " + (r.dom.direccion || "") + (r.dom.etiqueta ? " · titular: " + r.cliente.nombre : "")
+                                  ? r.dom.identificador_dt + " · " + (r.dom.etiqueta || r.dom.direccion || "")
                                   : (r.cliente.codigo_cliente || r.cliente.rut || "")}
                                 {r.cliente.bloqueado ? " · bloqueado" : ""}
                               </span>
@@ -2754,10 +2759,10 @@ export default function App() {
                           onClick={() => elegirCliente(r.cliente, r.dom?.id)}
                           className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                         >
-                          <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.dom?.etiqueta || r.cliente.nombre}</strong>
+                          <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
                           <span>
                             {r.dom?.identificador_dt
-                              ? r.dom.identificador_dt + " · " + (r.dom.direccion || "") + (r.dom.etiqueta ? " · titular: " + r.cliente.nombre : "")
+                              ? r.dom.identificador_dt + " · " + (r.dom.etiqueta || r.dom.direccion || "")
                               : (r.cliente.rut || r.cliente.codigo_cliente)}
                             {r.cliente.es_empresa ? " · empresa" : ""}
                           </span>
