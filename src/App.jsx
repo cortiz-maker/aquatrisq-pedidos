@@ -277,6 +277,11 @@ export default function App() {
   // ── Cobranza / gestión de cobro (Pago = No en el formulario de entrega) ──
   const [entregasMap, setEntregasMap] = useState({});   // guide -> dt_entregas (pedidos del dashboard)
   const [pedidoModal, setPedidoModal] = useState(null);  // { pedido, entrega } para el popup de detalle
+  const [pedidoEdit, setPedidoEdit] = useState(null);    // campos editables del pedido en el modal
+  const [guardandoPed, setGuardandoPed] = useState(false);
+  const [okPed, setOkPed] = useState("");
+  const [errPed, setErrPed] = useState("");
+  const [enviandoDT, setEnviandoDT] = useState(false);
   const [cobranzas, setCobranzas] = useState(null);      // lista de gestión de cobro (null = no cargado)
   const [cargandoCob, setCargandoCob] = useState(false);
   const [errorCob, setErrorCob] = useState("");
@@ -841,7 +846,74 @@ export default function App() {
   }
   // ── Cobranza / gestión de cobro ────────────────────────────
   function abrirPedidoModal(p) {
-    setPedidoModal({ pedido: p, entrega: p.numero_guia ? entregasMap[p.numero_guia] : null });
+    const entrega = p.numero_guia ? entregasMap[p.numero_guia] : null;
+    setPedidoModal({ pedido: p, entrega });
+    setPedidoEdit({
+      tipo_pago:      p.tipo_pago || "Transferencia",
+      por_cobrar:     !!p.por_cobrar,
+      tipo_documento: p.tipo_documento || "boleta",
+      observacion:    p.observacion || "",
+    });
+    setOkPed(""); setErrPed("");
+  }
+
+  async function guardarPedidoEdit() {
+    if (!pedidoModal || !pedidoEdit) return;
+    setGuardandoPed(true); setErrPed(""); setOkPed("");
+    try {
+      const patch = {
+        tipo_pago:      pedidoEdit.tipo_pago,
+        por_cobrar:     pedidoEdit.por_cobrar,
+        tipo_documento: pedidoEdit.tipo_documento,
+        observacion:    pedidoEdit.observacion || null,
+      };
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", pedidoModal.pedido.id);
+      if (error) throw error;
+      const pedActualizado = { ...pedidoModal.pedido, ...patch };
+      setPedidoModal((prev) => ({ ...prev, pedido: pedActualizado }));
+      setPedidosMes((prev) => prev.map((p) => p.id === pedActualizado.id ? pedActualizado : p));
+      setOkPed("Pedido actualizado.");
+    } catch (e) {
+      setErrPed(e.message || "No se pudo guardar.");
+    } finally {
+      setGuardandoPed(false);
+    }
+  }
+
+  async function forzarEnvioDT() {
+    if (!pedidoModal) return;
+    setEnviandoDT(true); setErrPed(""); setOkPed("");
+    try {
+      const p = pedidoModal.pedido;
+      // Traer items del pedido para reenviar
+      const { data: itemsRaw } = await supabase
+        .from("pedido_items").select("*").eq("pedido_id", p.id);
+      const lineas = (itemsRaw || []).map((l) => ({
+        ...l,
+        subtotal_dt: Math.round((Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0)),
+      }));
+      const r = await fetch(`${PUENTE_URL}/api/dispatches`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pedido: p, items: lineas }),
+      });
+      if (!r.ok) throw new Error(`Error ${r.status} al enviar a DT`);
+      const data = await r.json();
+      const dispatchId = data?.dispatchtrack?.dispatch_id || null;
+      await supabase.from("pedidos").update({
+        estado_sync: "enviado_dt",
+        dt_dispatch_id: dispatchId,
+        enviado_at: new Date().toISOString(),
+      }).eq("id", p.id);
+      const pedActualizado = { ...p, estado_sync: "enviado_dt", dt_dispatch_id: dispatchId };
+      setPedidoModal((prev) => ({ ...prev, pedido: pedActualizado }));
+      setPedidosMes((prev) => prev.map((x) => x.id === p.id ? pedActualizado : x));
+      setOkPed("Enviado a DispatchTrack correctamente.");
+    } catch (e) {
+      setErrPed(e.message || "No se pudo enviar a DispatchTrack.");
+    } finally {
+      setEnviandoDT(false);
+    }
   }
 
   async function abrirCobranzas() {
@@ -1938,10 +2010,12 @@ export default function App() {
                     <span>Rendición Efectivo</span>
                     <strong>{CLP(dash.rendicionEfectivo)}</strong>
                   </div>
-                  <div className="aq-money-card efectivo">
-                    <span>Efectivo Recaudado</span>
-                    <strong>{CLP(dash.efectivoRecaudado)}</strong>
-                  </div>
+                  {rol === "admin" && (
+                    <div className="aq-money-card efectivo">
+                      <span>Efectivo Recaudado</span>
+                      <strong>{CLP(dash.efectivoRecaudado)}</strong>
+                    </div>
+                  )}
                 </div>
 
                 <section className="aq-card">
@@ -3090,7 +3164,7 @@ export default function App() {
             )}
           </>
         )}
-        {/* ===================== POPUP DETALLE DE ENTREGA ===================== */}
+        {/* ===================== POPUP DETALLE / EDITAR PEDIDO ===================== */}
         {pedidoModal && (
           <div className="aq-modal-ov" onClick={() => setPedidoModal(null)}>
             <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
@@ -3106,8 +3180,56 @@ export default function App() {
                 <button className="aq-link" onClick={() => setPedidoModal(null)}>Cerrar ✕</button>
               </div>
 
+              {/* Entrega DT */}
               {renderEntregaDT(pedidoModal.entrega)}
 
+              {/* Editor de pedido (admin y operador) */}
+              {pedidoEdit && (
+                <div className="aq-modal-edit">
+                  <strong>Editar pedido</strong>
+                  <div className="aq-grid" style={{ marginTop: 10, gap: 8 }}>
+                    <label>
+                      Tipo de pago
+                      <select value={pedidoEdit.tipo_pago} onChange={(e) => setPedidoEdit({ ...pedidoEdit, tipo_pago: e.target.value, por_cobrar: e.target.value === "Por Cobrar" })}>
+                        {TIPOS_PAGO.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      Tipo de documento
+                      <select value={pedidoEdit.tipo_documento} onChange={(e) => setPedidoEdit({ ...pedidoEdit, tipo_documento: e.target.value })}>
+                        {TIPOS_DOC.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </label>
+                    <label className="aq-full">
+                      Observación
+                      <input type="text" value={pedidoEdit.observacion} onChange={(e) => setPedidoEdit({ ...pedidoEdit, observacion: e.target.value })} placeholder="Ej: cliente pagó con transferencia el 15/06" />
+                    </label>
+                  </div>
+                  {errPed && <div className="aq-result bad" style={{ marginTop: 8 }}>{errPed}</div>}
+                  {okPed && <div className="aq-result ok" style={{ marginTop: 8 }}>{okPed}</div>}
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    <button className="aq-btn" style={{ flex: 1 }} disabled={guardandoPed} onClick={guardarPedidoEdit}>
+                      {guardandoPed ? "Guardando…" : "Guardar cambios"}
+                    </button>
+                    <button
+                      className="aq-btn-sec"
+                      style={{ flex: 1 }}
+                      disabled={enviandoDT}
+                      onClick={forzarEnvioDT}
+                      title="Reenvía este pedido a DispatchTrack (útil si falló o necesita actualizarse)"
+                    >
+                      {enviandoDT ? "Enviando…" : "🔄 Forzar envío a DT"}
+                    </button>
+                  </div>
+                  <p className="aq-mini" style={{ marginTop: 6 }}>
+                    {pedidoModal.pedido.estado_sync === "enviado_dt"
+                      ? "✓ Ya enviado a DT" + (pedidoModal.pedido.enviado_at ? " · " + new Date(pedidoModal.pedido.enviado_at).toLocaleString("es-CL") : "")
+                      : "⚠ Pendiente de envío a DispatchTrack"}
+                  </p>
+                </div>
+              )}
+
+              {/* Gestión de cobro si corresponde */}
               {esPagoNo(pedidoModal.entrega) && (
                 <div className="aq-modal-cobro">
                   <strong>{pedidoModal.pedido.cobro_cobrado ? "✓ Deuda cobrada" : "⚠ Entregado sin pago — por cobrar"}</strong>
@@ -3468,8 +3590,8 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-money-card.proveedor strong { color:#1a4a8a; }
 .aq-money-card.rendicion { background:#fff7e6; border:1px solid #f0d8a0; color:#8a6400; }
 .aq-money-card.rendicion strong { color:#8a6400; }
-.aq-money-card.efectivo { background:#fff8f0; border:1px solid #f5c18a; color:#7a3d00; }
-.aq-money-card.efectivo strong { color:#a04d00; }
+.aq-money-card.efectivo { background:#e7f6ee; border:1px solid #9bd5b4; color:#1a5a36; }
+.aq-money-card.efectivo strong { color:#1a7a45; }
 
 /* Gráfico de meta (bullet chart) */
 .aq-meta-card { }
@@ -3488,6 +3610,11 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-dom-edit { background:#f0f7ff; border:1px solid #bdd7f5; border-radius:10px; padding:12px 14px; margin-bottom:10px; }
 .aq-dom-edit .aq-grid { grid-template-columns:1fr 1fr; }
 .aq-dom-edit input { font-size:13px; }
+
+.aq-modal-edit { margin-top:14px; background:#f8fafc; border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+.aq-modal-edit > strong { color:var(--navy); display:block; margin-bottom:2px; }
+.aq-modal-edit .aq-grid { grid-template-columns:1fr 1fr; }
+.aq-modal-edit input, .aq-modal-edit select { font-size:13px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
