@@ -1676,9 +1676,11 @@ export default function App() {
 
   const pedidosFiltrados = useMemo(() => {
     const q = buscarPedido.trim().toLowerCase();
+    const hoyStr = new Date().toISOString().slice(0, 10);
     return pedidosMes.filter((p) => {
       if (filtroEstado === "enviados" && p.estado_sync !== "enviado_dt") return false;
       if (filtroEstado === "pendientes" && p.estado_sync === "enviado_dt") return false;
+      if (filtroEstado === "hoy" && (p.fecha_min_entrega || "").slice(0, 10) !== hoyStr) return false;
       if (!q) return true;
       const i = infoPedido(p);
       return (
@@ -1840,9 +1842,12 @@ export default function App() {
                   >
                     <span>Pendientes</span><strong>{dash.pendientes}</strong>
                   </button>
-                  <div className="aq-kpi">
+                  <button
+                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "hoy" ? " on" : "")}
+                    onClick={() => setFiltroEstado(filtroEstado === "hoy" ? "todos" : "hoy")}
+                  >
                     <span>Para hoy</span><strong>{dash.paraHoy}</strong>
-                  </div>
+                  </button>
                 </div>
 
                 <div className="aq-money">
@@ -1977,6 +1982,54 @@ export default function App() {
                     );
                   })()}
                 </section>
+
+                {/* Mejor mes como meta */}
+                {(() => {
+                  const todosM = ger.meses;
+                  const mejor = todosM.reduce((mx, m) => m.monto > mx.monto ? m : mx, { monto: 0, label: "—" });
+                  const actual = ger.mesActual;
+                  const meta = mejor.monto;
+                  const pct = meta > 0 ? Math.min(100, Math.round((actual.monto / meta) * 100)) : 0;
+                  const superada = actual.monto >= meta && meta > 0;
+                  return (
+                    <section className="aq-card aq-meta-card">
+                      <div className="aq-meta-head">
+                        <div>
+                          <h2>Meta del año</h2>
+                          <p className="aq-muted" style={{ margin: "2px 0 0" }}>Mejor mes histórico como referencia: <strong>{mejor.label}</strong> · {CLP(meta)}</p>
+                        </div>
+                        <div className="aq-meta-badge" style={{ background: superada ? "#e7f6ee" : "#fff7e6", color: superada ? "#1a7a45" : "#8a6400", border: "1px solid " + (superada ? "#9bd5b4" : "#f0d8a0") }}>
+                          {superada ? "🏆 Meta superada" : pct + "% de la meta"}
+                        </div>
+                      </div>
+                      <div className="aq-meta-row">
+                        <span className="aq-meta-label">Este mes</span>
+                        <span className="aq-meta-val">{CLP(actual.monto)}</span>
+                        <span className="aq-meta-label">Meta</span>
+                        <span className="aq-meta-val">{CLP(meta)}</span>
+                        <span className="aq-meta-label">Diferencia</span>
+                        <span className="aq-meta-val" style={{ color: superada ? "#1a7a45" : "#b42318" }}>
+                          {superada ? "+" : ""}{CLP(actual.monto - meta)}
+                        </span>
+                      </div>
+                      {/* Bullet chart */}
+                      <div className="aq-bullet">
+                        <div className="aq-bullet-track">
+                          <div className="aq-bullet-fill" style={{ width: pct + "%", background: superada ? "#1a9a52" : pct >= 75 ? "#00aeef" : pct >= 50 ? "#e0a400" : "#d92d20" }} />
+                          <div className="aq-bullet-goal" title={"Meta: " + CLP(meta)} />
+                        </div>
+                        <div className="aq-bullet-labels">
+                          <span>$0</span>
+                          <span style={{ position: "absolute", left: "50%", transform: "translateX(-50%)" }}>{CLP(meta / 2)}</span>
+                          <span>{CLP(meta)}</span>
+                        </div>
+                      </div>
+                      <p className="aq-mini" style={{ marginTop: 6, color: "var(--muted)" }}>
+                        La meta se actualiza automáticamente con el mes de mayor ingreso registrado. {superada ? "¡Nuevo récord este mes!" : `Faltan ${CLP(meta - actual.monto)} para superarla.`}
+                      </p>
+                    </section>
+                  );
+                })()}
 
                 <div className="aq-grid2">
                   {/* Mix de productos */}
@@ -2157,45 +2210,50 @@ export default function App() {
                       );
                     })()}
                     <div className="aq-grid">
-                      <label>Nombre<input value={cliEdit.nombre || ""} onChange={(e) => setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
-                      <label>RUT<input value={cliEdit.rut || ""} onChange={(e) => setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
+                      <label>Nombre<input value={cliEdit.nombre || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, nombre: e.target.value })} /></label>
+                      <label>RUT<input value={cliEdit.rut || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, rut: e.target.value })} placeholder="12.345.678-9" /></label>
                       <label>Código cliente
                         <input value={cliEdit.codigo_cliente || ""} disabled readOnly title="Código correlativo, no editable" />
                         <span className="aq-mini">{cliEdit._nuevo ? "Se genera automático (formato 2212-1)" : "Correlativo, no editable"}</span>
                       </label>
-                      <label>Teléfono<input value={cliEdit.telefono || ""} onChange={(e) => setCliEdit({ ...cliEdit, telefono: e.target.value })} /></label>
-                      <label>Email<input type="email" value={cliEdit.email || ""} onChange={(e) => setCliEdit({ ...cliEdit, email: e.target.value })} placeholder="correo@cliente.cl" /></label>
+                      <label>Teléfono<input value={cliEdit.telefono || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, telefono: e.target.value })} /></label>
+                      <label>Email<input type="email" value={cliEdit.email || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, email: e.target.value })} placeholder="correo@cliente.cl" /></label>
                       <label>Marca
-                        <select value={cliEdit.marca || ""} onChange={(e) => setCliEdit({ ...cliEdit, marca: e.target.value })}>
+                        <select value={cliEdit.marca || ""} disabled={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, marca: e.target.value })}>
                           <option value="">—</option>
                           {MARCAS.map((m) => <option key={m} value={m}>{m}</option>)}
                         </select>
                       </label>
                     </div>
                     <label className="aq-check" style={{ marginTop: 14 }}>
-                      <input type="checkbox" checked={!!cliEdit.es_empresa} onChange={(e) => setCliEdit({ ...cliEdit, es_empresa: e.target.checked })} />
+                      <input type="checkbox" checked={!!cliEdit.es_empresa} disabled={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, es_empresa: e.target.checked })} />
                       Es empresa (factura)
                     </label>
                     {cliEdit.es_empresa && (
                       <div className="aq-grid" style={{ marginTop: 10 }}>
-                        <label>Razón social<input value={cliEdit.razon_social || ""} onChange={(e) => setCliEdit({ ...cliEdit, razon_social: e.target.value })} /></label>
-                        <label>Giro<input value={cliEdit.giro || ""} onChange={(e) => setCliEdit({ ...cliEdit, giro: e.target.value })} /></label>
+                        <label>Razón social<input value={cliEdit.razon_social || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, razon_social: e.target.value })} /></label>
+                        <label>Giro<input value={cliEdit.giro || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, giro: e.target.value })} /></label>
                       </div>
                     )}
-                    <label className="aq-full">Notas<textarea rows="2" value={cliEdit.notas || ""} onChange={(e) => setCliEdit({ ...cliEdit, notas: e.target.value })} /></label>
+                    <label className="aq-full">Notas<textarea rows="2" readOnly={rol !== "admin"} value={cliEdit.notas || ""} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, notas: e.target.value })} /></label>
                     <label className="aq-check" style={{ marginTop: 12 }}>
                       <input type="checkbox" checked={!!cliEdit.bloqueado} onChange={(e) => setCliEdit({ ...cliEdit, bloqueado: e.target.checked })} />
                       Cliente bloqueado para comprar
                     </label>
                     {cliEdit.bloqueado && (
                       <label className="aq-full">Motivo del bloqueo
-                        <textarea rows="2" value={cliEdit.motivo_bloqueo || ""} onChange={(e) => setCliEdit({ ...cliEdit, motivo_bloqueo: e.target.value })} placeholder="Ej: Bloqueo por no pago" />
+                        <textarea rows="2" value={cliEdit.motivo_bloqueo || ""} readOnly={rol !== "admin"} onChange={(e) => rol === "admin" && setCliEdit({ ...cliEdit, motivo_bloqueo: e.target.value })} placeholder="Ej: Bloqueo por no pago" />
                       </label>
                     )}
+                    {rol !== "admin" && !cliEdit._nuevo && (
+                      <p className="aq-mini" style={{ color: "var(--muted)", marginTop: 8 }}>Solo el administrador puede editar los datos del cliente.</p>
+                    )}
                     <div className="aq-mant-acts">
-                      <button className="aq-btn" disabled={guardandoCli} onClick={guardarCliente}>
-                        {guardandoCli ? "Guardando…" : (cliEdit._nuevo ? "Crear cliente" : "Guardar cambios")}
-                      </button>
+                      {rol === "admin" && (
+                        <button className="aq-btn" disabled={guardandoCli} onClick={guardarCliente}>
+                          {guardandoCli ? "Guardando…" : (cliEdit._nuevo ? "Crear cliente" : "Guardar cambios")}
+                        </button>
+                      )}
                       {!cliEdit._nuevo && (
                         <button className="aq-btn-sec" disabled={cargandoHist} onClick={() => verHistorial(cliEdit)}>
                           {cargandoHist ? "Cargando…" : "Ver pedidos"}
@@ -3280,6 +3338,20 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-money-card.proveedor strong { color:#1a4a8a; }
 .aq-money-card.rendicion { background:#f0fdf4; border:1px solid #9bd5b4; color:#1a5a36; }
 .aq-money-card.rendicion strong { color:#1a7a45; }
+
+/* Gráfico de meta (bullet chart) */
+.aq-meta-card { }
+.aq-meta-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
+.aq-meta-head h2 { margin:0; }
+.aq-meta-badge { padding:6px 14px; border-radius:20px; font-size:13px; font-weight:700; white-space:nowrap; }
+.aq-meta-row { display:grid; grid-template-columns:auto 1fr auto 1fr auto 1fr; gap:4px 10px; align-items:baseline; margin-bottom:14px; }
+.aq-meta-label { font-size:12px; color:var(--muted); }
+.aq-meta-val { font-size:16px; font-weight:700; color:var(--navy); }
+.aq-bullet { margin-bottom:4px; }
+.aq-bullet-track { position:relative; height:22px; background:#eef0f5; border-radius:11px; overflow:hidden; }
+.aq-bullet-fill { position:absolute; left:0; top:0; height:100%; border-radius:11px; transition:width .6s cubic-bezier(.4,0,.2,1); }
+.aq-bullet-goal { position:absolute; right:0; top:0; width:3px; height:100%; background:var(--navy); opacity:.7; }
+.aq-bullet-labels { position:relative; display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:3px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
