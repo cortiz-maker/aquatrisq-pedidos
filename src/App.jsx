@@ -149,6 +149,23 @@ function montoRendicion(entrega) {
   const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
+// Efectivo Recaudado: substatus = "Venta", Pago = "Sí", Medio Pago = "Efectivo"
+// Monto: campo "Monto Venta"
+function esEfectivoRecaudado(entrega) {
+  if (!entrega) return false;
+  if ((entrega.substatus || "").trim() !== "Venta") return false;
+  const ans = answersFromRaw(entrega);
+  const pago = ans.find((x) => /^pago$/i.test(x.name.trim()));
+  if (!pago || !/^\s*s[íi]\s*$/i.test(String(pago.val))) return false;
+  const medio = ans.find((x) => /medio.*pago/i.test(x.name));
+  return medio ? /efectivo/i.test(String(medio.val)) : false;
+}
+function montoEfectivoRecaudado(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /monto venta/i.test(x.name));
+  if (!a) return 0;
+  const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
 export default function App() {
   const credsListas =
@@ -1664,6 +1681,10 @@ export default function App() {
         const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
         return s + (esRendicionEfectivo(e) ? montoRendicion(e) : 0);
       }, 0),
+      efectivoRecaudado: ped.reduce((s, p) => {
+        const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
+        return s + (esEfectivoRecaudado(e) ? montoEfectivoRecaudado(e) : 0);
+      }, 0),
     };
   })();
 
@@ -1916,6 +1937,10 @@ export default function App() {
                   <div className="aq-money-card rendicion">
                     <span>Rendición Efectivo</span>
                     <strong>{CLP(dash.rendicionEfectivo)}</strong>
+                  </div>
+                  <div className="aq-money-card efectivo">
+                    <span>Efectivo Recaudado</span>
+                    <strong>{CLP(dash.efectivoRecaudado)}</strong>
                   </div>
                 </div>
 
@@ -3441,8 +3466,10 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 
 .aq-money-card.proveedor { background:#eef6ff; border:1px solid #b3d4f5; color:#1a4a8a; }
 .aq-money-card.proveedor strong { color:#1a4a8a; }
-.aq-money-card.rendicion { background:#f0fdf4; border:1px solid #9bd5b4; color:#1a5a36; }
-.aq-money-card.rendicion strong { color:#1a7a45; }
+.aq-money-card.rendicion { background:#fff7e6; border:1px solid #f0d8a0; color:#8a6400; }
+.aq-money-card.rendicion strong { color:#8a6400; }
+.aq-money-card.efectivo { background:#fff8f0; border:1px solid #f5c18a; color:#7a3d00; }
+.aq-money-card.efectivo strong { color:#a04d00; }
 
 /* Gráfico de meta (bullet chart) */
 .aq-meta-card { }
