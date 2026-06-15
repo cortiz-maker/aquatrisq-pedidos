@@ -116,7 +116,35 @@ function esPagoNo(entrega) {
   return v != null && /^\s*no\s*$/i.test(String(v));
 }
 function montoEntrega(entrega) {
-  const a = answersFromRaw(entrega).find((x) => /monto/i.test(x.name));
+  const a = answersFromRaw(entrega).find((x) => /monto venta/i.test(x.name));
+  if (!a) return 0;
+  const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+// Compra Proveedor: substatus = "Compra Proveedor", campo "Prooveedor" contiene "Aguas Altas"
+// Monto: campo "Monto Factura"
+function esCompraProveedor(entrega) {
+  if (!entrega) return false;
+  const sub = (entrega.substatus || "").trim();
+  return sub === "Compra Proveedor";
+}
+function montoCompraProveedor(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /monto factura/i.test(x.name));
+  if (!a) return 0;
+  const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+// Rendición Efectivo: substatus = "Compra", campo "Tipo Compra" = "Rendición Efectivo"
+// Monto: campo "Monto Compra"
+function esRendicionEfectivo(entrega) {
+  if (!entrega) return false;
+  const sub = (entrega.substatus || "").trim();
+  if (sub !== "Compra") return false;
+  const a = answersFromRaw(entrega).find((x) => /tipo compra/i.test(x.name));
+  return a ? /rendici[oó]n efectivo/i.test(a.val) : false;
+}
+function montoRendicion(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /monto compra/i.test(x.name));
   if (!a) return 0;
   const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
@@ -1578,6 +1606,15 @@ export default function App() {
       deudaMonto: conDeuda.reduce((s, p) => s + (Number(p.monto_total) || 0), 0),
       cobrados: ped.filter((p) => p.cobro_cobrado).length,
       recuperados: ped.filter((p) => p.cobro_recuperado).length,
+      // Compra Proveedor (Aguas Altas) y Rendición Efectivo
+      compraProveedor: ped.reduce((s, p) => {
+        const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
+        return s + (esCompraProveedor(e) ? montoCompraProveedor(e) : 0);
+      }, 0),
+      rendicionEfectivo: ped.reduce((s, p) => {
+        const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
+        return s + (esRendicionEfectivo(e) ? montoRendicion(e) : 0);
+      }, 0),
     };
   })();
 
@@ -1818,6 +1855,14 @@ export default function App() {
                     <strong>{CLP(dash.deudaMonto)}</strong>
                     <em className="aq-money-sub">{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados} · histórico en Cobranzas</em>
                   </button>
+                  <div className="aq-money-card proveedor">
+                    <span>Compra Proveedor</span>
+                    <strong>{CLP(dash.compraProveedor)}</strong>
+                  </div>
+                  <div className="aq-money-card rendicion">
+                    <span>Rendición Efectivo</span>
+                    <strong>{CLP(dash.rendicionEfectivo)}</strong>
+                  </div>
                 </div>
 
                 <section className="aq-card">
@@ -3230,6 +3275,11 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-contactos li:last-child { border-bottom:none; }
 .aq-cont-nom { display:block; font-weight:600; color:var(--ink); }
 .aq-cont-sub { display:block; font-size:12px; color:var(--muted); }
+
+.aq-money-card.proveedor { background:#eef6ff; border:1px solid #b3d4f5; color:#1a4a8a; }
+.aq-money-card.proveedor strong { color:#1a4a8a; }
+.aq-money-card.rendicion { background:#f0fdf4; border:1px solid #9bd5b4; color:#1a5a36; }
+.aq-money-card.rendicion strong { color:#1a7a45; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
