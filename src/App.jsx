@@ -3,9 +3,10 @@ import { supabase } from "./supabaseClient.js";
 import { PUENTE_URL, SUPABASE_URL } from "./config.js";
 
 // ── Valores de enums (tal cual están en Postgres) ────────────
-const TIPOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta", "Debito", "Plan PrePago", "Por Cobrar"];
+const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar"];
 const TIPOS_DOC = ["boleta", "factura", "sin_documento"];
 const MARCAS = ["TrisQ"];
+const CHOFERES = ["Felipe Hernandez", "Italo Loiza"];
 // Origen de un descuento manual en pedido_descuentos (texto libre, pero acotamos).
 const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 
@@ -207,6 +208,7 @@ export default function App() {
   const [fechaMax, setFechaMax] = useState(() => fechaManana("17:00"));
   const [observacion, setObservacion] = useState("");
   const [creadoPor, setCreadoPor] = useState("");
+  const [nroDte, setNroDte] = useState("");
 
   // Guardado
   const [guardando, setGuardando] = useState(false);
@@ -890,7 +892,7 @@ export default function App() {
         .from("pedido_items").select("*").eq("pedido_id", p.id);
       const lineas = (itemsRaw || []).map((l) => ({
         ...l,
-        subtotal_dt: Math.round((Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0)),
+        subtotal: Math.round((Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0)),
       }));
       const r = await fetch(`${PUENTE_URL}/api/dispatches`, {
         method: "POST",
@@ -1565,6 +1567,7 @@ export default function App() {
         observacion: observacion.trim() || null,
         estado_sync: "pendiente",
         creado_por: creadoPor.trim() || null,
+        nro_jumpseller: nroDte.trim() || null,
         plan_contratado_id: consumePlan && planPrepago ? planPrepago.id : null,
         consume_plan: consumePlan && !!planPrepago,
       };
@@ -1588,7 +1591,6 @@ export default function App() {
           codigo: prod ? prod.codigo : null,
           cantidad: cant,
           precio_unit: pu,
-          subtotal_dt: Math.round(cant * pu), // totaliza para DispatchTrack (qty × precio)
         };
       });
       const { error: eItems } = await supabase.from("pedido_items").insert(lineas);
@@ -1686,6 +1688,7 @@ export default function App() {
       setItems([]);
       setDescuentos([]);
       setObservacion("");
+      setNroDte("");
       setCliente(null);
       setDomicilioId("");
       setPlanPrepago(null);
@@ -3124,8 +3127,15 @@ export default function App() {
                       <input type="datetime-local" value={fechaMax} onChange={(e) => setFechaMax(e.target.value)} />
                     </label>
                     <label>
-                      Operador
-                      <input value={creadoPor} onChange={(e) => setCreadoPor(e.target.value)} placeholder="Tu nombre" />
+                      Chofer
+                      <select value={creadoPor} onChange={(e) => setCreadoPor(e.target.value)}>
+                        <option value="">— Sin asignar —</option>
+                        {CHOFERES.map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      N° DTE
+                      <input value={nroDte} onChange={(e) => setNroDte(e.target.value)} placeholder="Ej: 1234" />
                     </label>
                   </div>
                   <label className="aq-full">
