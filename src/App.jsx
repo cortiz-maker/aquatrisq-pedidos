@@ -238,7 +238,11 @@ export default function App() {
   const [cliEdit, setCliEdit] = useState(null);   // objeto cliente en edición (null = ninguno)
   const [guardandoCli, setGuardandoCli] = useState(false);
   const [okCli, setOkCli] = useState("");
-  const [semaforoCli, setSemaforoCli] = useState(null); // { cls, dias, label } o null
+  const [semaforoCli, setSemaforoCli] = useState(null);
+  const [domEdit, setDomEdit] = useState(null);    // domicilio en edición { id?, cliente_id, identificador_dt, etiqueta, direccion, comuna, es_principal, _nuevo }
+  const [guardandoDom, setGuardandoDom] = useState(false);
+  const [okDom, setOkDom] = useState("");
+  const [errDom, setErrDom] = useState(""); // { cls, dias, label } o null
   // Historial de pedidos del cliente
   const [histPedidos, setHistPedidos] = useState(null); // null = no cargado
   const [cargandoHist, setCargandoHist] = useState(false);
@@ -711,6 +715,9 @@ export default function App() {
     setHistItems({});
     setHistEntregas({});
     setSemaforoCli(null);
+    setDomEdit(null);
+    setOkDom("");
+    setErrDom("");
     setCliEdit({ ...c, _nuevo: false });
     calcSemaforo(c);
   }
@@ -935,6 +942,43 @@ export default function App() {
         )}
       </div>
     );
+  }
+
+  async function guardarDomicilio() {
+    if (!domEdit) return;
+    setGuardandoDom(true); setErrDom(""); setOkDom("");
+    try {
+      const payload = {
+        cliente_id:      cliEdit.id,
+        identificador_dt: (domEdit.identificador_dt || "").trim() || null,
+        etiqueta:        (domEdit.etiqueta || "").trim() || null,
+        direccion:       (domEdit.direccion || "").trim() || null,
+        comuna:          (domEdit.comuna || "").trim() || null,
+        es_principal:    !!domEdit.es_principal,
+      };
+      if (!payload.identificador_dt) { setErrDom("El identificador (ej: 0215-2) es obligatorio."); return; }
+      if (!payload.direccion)        { setErrDom("La dirección es obligatoria."); return; }
+      if (domEdit._nuevo) {
+        const { error } = await supabase.from("domicilios").insert(payload);
+        if (error) throw error;
+        setOkDom("Domicilio agregado.");
+      } else {
+        const { error } = await supabase.from("domicilios").update(payload).eq("id", domEdit.id);
+        if (error) throw error;
+        setOkDom("Domicilio actualizado.");
+      }
+      // Refresca índice global de domicilios
+      const { data: nuevos } = await supabase.from("domicilios").select("*").eq("cliente_id", cliEdit.id);
+      setTodosDomicilios((prev) => {
+        const sinEste = prev.filter((d) => d.cliente_id !== cliEdit.id);
+        return [...sinEste, ...(nuevos || [])];
+      });
+      setDomEdit(null);
+    } catch (e) {
+      setErrDom(e.message || "No se pudo guardar el domicilio.");
+    } finally {
+      setGuardandoDom(false);
+    }
   }
 
   async function guardarCliente() {
@@ -2193,19 +2237,75 @@ export default function App() {
                     )}
                     {!cliEdit._nuevo && (() => {
                       const doms = todosDomicilios.filter((d) => d.cliente_id === cliEdit.id);
-                      if (doms.length === 0) return null;
                       return (
                         <div className="aq-contactos">
-                          <strong>Contactos / domicilios de este código ({doms.length})</strong>
-                          <ul>
-                            {doms.map((d) => (
-                              <li key={d.id}>
-                                <span className="aq-cont-nom">{d.etiqueta || "(sin nombre de contacto)"}</span>
-                                <span className="aq-cont-sub">{d.identificador_dt}{d.direccion ? " · " + d.direccion : ""}{d.comuna ? ", " + d.comuna : ""}{d.es_principal ? " · principal" : ""}</span>
-                              </li>
-                            ))}
-                          </ul>
-                          <span className="aq-mini">Un mismo código agrupa varias personas (titular, familiares). En Nuevo pedido eliges a quién va el despacho.</span>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                            <strong>Domicilios ({doms.length})</strong>
+                            {!domEdit && (
+                              <button className="aq-link" onClick={() => { setDomEdit({ _nuevo: true, cliente_id: cliEdit.id, identificador_dt: "", etiqueta: "", direccion: "", comuna: "", es_principal: false }); setOkDom(""); setErrDom(""); }}>
+                                + Agregar domicilio
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Editor de domicilio */}
+                          {domEdit && (
+                            <div className="aq-dom-edit">
+                              <strong style={{ display: "block", marginBottom: 8, color: "var(--navy)" }}>{domEdit._nuevo ? "Nuevo domicilio" : "Editar domicilio"}</strong>
+                              <div className="aq-grid" style={{ gap: 8 }}>
+                                <label>
+                                  Identificador (NNNN-N) *
+                                  <input value={domEdit.identificador_dt || ""} readOnly={!domEdit._nuevo} onChange={(e) => setDomEdit({ ...domEdit, identificador_dt: e.target.value })} placeholder="Ej: 0215-2" />
+                                  {domEdit._nuevo && <span className="aq-mini">Debe ser único (ej: 0215-2, 0215-3…)</span>}
+                                </label>
+                                <label>
+                                  Nombre contacto
+                                  <input value={domEdit.etiqueta || ""} onChange={(e) => setDomEdit({ ...domEdit, etiqueta: e.target.value })} placeholder="Ej: Juan Pérez / Dpto 5" />
+                                </label>
+                                <label className="aq-full">
+                                  Dirección *
+                                  <input value={domEdit.direccion || ""} onChange={(e) => setDomEdit({ ...domEdit, direccion: e.target.value })} placeholder="Ej: Av. Providencia 1234, Dpto 5" />
+                                </label>
+                                <label>
+                                  Comuna
+                                  <input value={domEdit.comuna || ""} onChange={(e) => setDomEdit({ ...domEdit, comuna: e.target.value })} placeholder="Ej: Providencia" />
+                                </label>
+                              </div>
+                              <label className="aq-check" style={{ marginTop: 10 }}>
+                                <input type="checkbox" checked={!!domEdit.es_principal} onChange={(e) => setDomEdit({ ...domEdit, es_principal: e.target.checked })} />
+                                Domicilio principal
+                              </label>
+                              {errDom && <div className="aq-result bad" style={{ marginTop: 8 }}>{errDom}</div>}
+                              {okDom && <div className="aq-result ok" style={{ marginTop: 8 }}>{okDom}</div>}
+                              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                                <button className="aq-btn" style={{ flex: 1 }} disabled={guardandoDom} onClick={guardarDomicilio}>
+                                  {guardandoDom ? "Guardando…" : (domEdit._nuevo ? "Agregar" : "Guardar cambios")}
+                                </button>
+                                <button className="aq-btn-sec" onClick={() => { setDomEdit(null); setErrDom(""); setOkDom(""); }}>Cancelar</button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Lista de domicilios */}
+                          {!domEdit && (
+                            <ul>
+                              {doms.length === 0 && <li><span className="aq-muted">Sin domicilios registrados.</span></li>}
+                              {doms.map((d) => (
+                                <li key={d.id} style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                                  <div>
+                                    <span className="aq-cont-nom">{d.etiqueta || "(sin nombre)"}{d.es_principal ? " · principal" : ""}</span>
+                                    <span className="aq-cont-sub">{d.identificador_dt}{d.direccion ? " · " + d.direccion : ""}{d.comuna ? ", " + d.comuna : ""}</span>
+                                  </div>
+                                  <button className="aq-link" style={{ whiteSpace: "nowrap", fontSize: 12, marginTop: 2 }} onClick={() => { setDomEdit({ ...d, _nuevo: false }); setOkDom(""); setErrDom(""); }}>
+                                    Editar
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+
+                          {okDom && !domEdit && <div className="aq-result ok" style={{ marginTop: 8 }}>{okDom}</div>}
+                          {doms.length > 0 && !domEdit && <span className="aq-mini" style={{ marginTop: 6, display: "block" }}>En Nuevo pedido puedes elegir a qué domicilio va el despacho.</span>}
                         </div>
                       );
                     })()}
@@ -3352,6 +3452,10 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-bullet-fill { position:absolute; left:0; top:0; height:100%; border-radius:11px; transition:width .6s cubic-bezier(.4,0,.2,1); }
 .aq-bullet-goal { position:absolute; right:0; top:0; width:3px; height:100%; background:var(--navy); opacity:.7; }
 .aq-bullet-labels { position:relative; display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:3px; }
+
+.aq-dom-edit { background:#f0f7ff; border:1px solid #bdd7f5; border-radius:10px; padding:12px 14px; margin-bottom:10px; }
+.aq-dom-edit .aq-grid { grid-template-columns:1fr 1fr; }
+.aq-dom-edit input { font-size:13px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
