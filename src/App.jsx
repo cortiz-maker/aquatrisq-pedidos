@@ -13,16 +13,28 @@ const CLP = (n) =>
   "$" + (Number(n) || 0).toLocaleString("es-CL", { maximumFractionDigits: 0 });
 
 // Mensaje que ve el operador y que se envía por correo al cliente.
-function mensajeConfirmacion(guia) {
-  return [
-    `Hola! Tu Pedido Nº ${guia} ya fue ingresado a la agenda para ser despachado.`,
-    `-`,
-    `Síguenos en nuestro instagram y no olvides subirnos *@aquatrisq y déjanos tu opinión* 💦💙`,
-    `-`,
-    `🟡*Importante:*🟡`,
-    `- Si estas *agendando recargas* recuerda que debes entregar *la misma cantidad de bidones*.`,
-    `- Los despachos podrían sufrir modificaciones con respecto al día de entrega, de ser el caso *será avisado mediante este mismo medio*, y confirmado por este medio.`,
-  ].join("\n");
+function mensajeConfirmacion(guia, nombreCliente) {
+  const nombre = (nombreCliente || "").trim();
+  return `¡Hola! 👋
+Tu Pedido N° ${guia} ha sido ingresado a nuestra agenda y se encuentra programado para despacho el día de mañana. 🚚💧
+
+📲 Síguenos en Instagram @aquatrisq y no olvides etiquetarnos cuando recibas tu pedido. ¡Nos encanta conocer tu experiencia y ver cómo disfrutas nuestros productos! 💦💙
+
+🟡 Información Importante:
+• Si solicitaste recargas, recuerda tener disponibles para intercambio la misma cantidad de bidones.
+• Las fechas de despacho podrían sufrir modificaciones por motivos operacionales. En caso de cualquier cambio, te informaremos oportunamente por este mismo medio.
+
+💳 Para tu comodidad, también puedes realizar el pago de forma rápida y segura a través de nuestro enlace de pago:
+https://pay.sumup.com/b2c/Q4EFMRBM
+
+📝 Importante al momento de pagar:
+• Ingresa el monto correspondiente a tu pedido.
+• En el campo "Tu nombre completo", por favor escribe tu nombre junto con el número de pedido o factura (${nombre} - N° ${guia}).
+
+Una vez realizado el pago, agradeceremos nos envíes el comprobante por este mismo medio para actualizar nuestros registros.
+
+¡Muchas gracias por preferirnos!
+Saludos, Equipo TrisQ 💧`;
 }
 
 // Email válido (mismo criterio que la normalización de la base).
@@ -1473,7 +1485,7 @@ export default function App() {
 
       // 6) Mensaje de confirmación + correo al cliente (best-effort)
       const guia = pedido.numero_guia;
-      const mensaje = mensajeConfirmacion(guia);
+      const mensaje = mensajeConfirmacion(guia, cliente?.nombre);
       const emailDestino = emailValido(cliente?.email) ? cliente.email.trim() : null;
 
       const detalle = lineas
