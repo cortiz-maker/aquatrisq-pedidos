@@ -167,6 +167,40 @@ function montoEfectivoRecaudado(entrega) {
   const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
+// ── Caja del chofer: Compra operativa, Estado de factura y Proveedor ──
+// "Tipo Compra" de una compra (substatus = "Compra"). Ej.: "Combustible", "Insumos", "Rendición Efectivo".
+function tipoCompra(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /tipo compra/i.test(x.name));
+  return a && a.val ? String(a.val).trim() : "";
+}
+// Compra operativa (substatus = "Compra") que NO es Rendición Efectivo. Monto: campo "Monto Compra".
+function esCompraNoRendicion(entrega) {
+  if (!entrega) return false;
+  if ((entrega.substatus || "").trim() !== "Compra") return false;
+  return !esRendicionEfectivo(entrega);
+}
+function montoCompra(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /monto compra/i.test(x.name));
+  if (!a) return 0;
+  const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+// Estado de la factura de una "Compra Proveedor": campo "Estado Factura" = "Pagado" | "Pendiente".
+function estadoFacturaProveedor(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /estado factura/i.test(x.name));
+  return a && a.val ? String(a.val).trim() : "";
+}
+function esCompraProvPagada(entrega) {
+  return esCompraProveedor(entrega) && /pagad/i.test(estadoFacturaProveedor(entrega));
+}
+function esCompraProvPendiente(entrega) {
+  return esCompraProveedor(entrega) && /pendient/i.test(estadoFacturaProveedor(entrega));
+}
+// Nombre del proveedor (campo "Proveedor" / "Prooveedor" — toleramos ambas grafías).
+function nombreProveedor(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /pro+veedor/i.test(x.name));
+  return a && a.val ? String(a.val).trim() : "Proveedor sin nombre";
+}
 
 export default function App() {
   const credsListas =
@@ -232,6 +266,8 @@ export default function App() {
   const [ger, setGer] = useState(null);
   const [cargandoGer, setCargandoGer] = useState(false);
   const [errorGer, setErrorGer] = useState("");
+  const [popEfectivo, setPopEfectivo] = useState(false);   // pop-up "Efectivo a Rendir"
+  const [popProveedor, setPopProveedor] = useState(false); // pop-up "Pendiente pago proveedor"
 
   // Agregar email faltante al cliente desde el formulario
   const [emailNuevo, setEmailNuevo] = useState("");
@@ -425,7 +461,7 @@ export default function App() {
 
       const { data: peds, error: ePed } = await supabase
         .from("pedidos")
-        .select("id, created_at, monto_total, por_cobrar, domicilio_id")
+        .select("id, created_at, monto_total, por_cobrar, domicilio_id, numero_guia")
         .gte("created_at", desde)
         .order("created_at", { ascending: true });
       if (ePed) throw ePed;
@@ -521,7 +557,71 @@ export default function App() {
         });
       } catch { /* si falla, dejamos venc30 en cero */ }
 
-      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30 });
+      // ── Caja del mes: Efectivo a Rendir y Pendiente de pago a proveedor ──
+      // Se calcula sobre las entregas (dt_entregas) de los pedidos del MES ACTUAL,
+      // para ser consistente con los KPIs "del mes" de arriba.
+      let efectivo = {
+        recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
+        compras: [], rendiciones: [], compraProvPagadoDet: [],
+      };
+      let provPendiente = { total: 0, count: 0, proveedores: [] };
+      try {
+        const mesKey = hoyPeriodo();
+        const guiasMes = [...new Set(
+          pedidos
+            .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
+            .map((p) => p.numero_guia)
+        )];
+        let entsMes = [];
+        for (let i = 0; i < guiasMes.length; i += 200) {
+          const lote = guiasMes.slice(i, i + 200);
+          if (!lote.length) break;
+          const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+          entsMes = entsMes.concat(data || []);
+        }
+        // Nos quedamos con la entrega más reciente por guía (por si hubo reintentos).
+        const porGuia = {};
+        entsMes.forEach((e) => {
+          if (!e.guide) return;
+          const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+          const prev = porGuia[e.guide];
+          const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+          if (!prev || t >= tp) porGuia[e.guide] = e;
+        });
+        Object.values(porGuia).forEach((e) => {
+          if (esEfectivoRecaudado(e)) efectivo.recaudacion += montoEfectivoRecaudado(e);
+          if (esCompraNoRendicion(e)) {
+            const m = montoCompra(e);
+            efectivo.comprasNoRend += m;
+            efectivo.compras.push({ guide: e.guide, monto: m, tipo: tipoCompra(e) || "Compra" });
+          }
+          if (esRendicionEfectivo(e)) {
+            const m = montoRendicion(e);
+            efectivo.rendicion += m;
+            efectivo.rendiciones.push({ guide: e.guide, monto: m });
+          }
+          if (esCompraProvPagada(e)) {
+            const m = montoCompraProveedor(e);
+            efectivo.compraProvPagado += m;
+            efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e) });
+          }
+          if (esCompraProvPendiente(e)) {
+            const m = montoCompraProveedor(e);
+            provPendiente.total += m;
+            provPendiente.count += 1;
+            const nom = nombreProveedor(e);
+            const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
+            if (slot) { slot.monto += m; slot.count += 1; slot.guias.push(e.guide); }
+            else provPendiente.proveedores.push({ proveedor: nom, monto: m, count: 1, guias: [e.guide] });
+          }
+        });
+        // Efectivo a Rendir = recaudación − compras operativas (≠ rendición) − compra proveedor PAGADA.
+        // (La rendición de efectivo ya entregada se muestra en el pop-up como referencia de conciliación.)
+        efectivo.aRendir = efectivo.recaudacion - efectivo.comprasNoRend - efectivo.compraProvPagado;
+        provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
+      } catch { /* si falla, dejamos la caja en cero */ }
+
+      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30, efectivo, provPendiente });
     } catch (e) {
       setErrorGer(e.message || "No se pudo cargar el panel gerencial.");
       setGer(null);
@@ -2137,6 +2237,30 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Caja del mes: operaciones de efectivo del chofer */}
+                <div className="aq-kpis aq-kpis-2">
+                  <button
+                    className={"aq-kpi aq-kpi-btn aq-kpi-cash" + ((ger.efectivo?.aRendir || 0) < 0 ? " neg" : "")}
+                    onClick={() => setPopEfectivo(true)}
+                    title="Ver desglose"
+                  >
+                    <span>Efectivo libre / a Rendir 🔎</span>
+                    <strong>{CLP(ger.efectivo ? ger.efectivo.aRendir : 0)}</strong>
+                    <em className="aq-kpi-sub">
+                      Recaudado {CLP(ger.efectivo?.recaudacion || 0)} − compras − prov. pagado
+                    </em>
+                  </button>
+                  <button
+                    className={"aq-kpi aq-kpi-btn aq-kpi-prov" + ((ger.provPendiente?.total || 0) > 0 ? " on-warn" : "")}
+                    onClick={() => setPopProveedor(true)}
+                    title="Ver desglose por proveedor"
+                  >
+                    <span>Pendiente pago proveedor 🔎</span>
+                    <strong>{CLP(ger.provPendiente ? ger.provPendiente.total : 0)}</strong>
+                    <em className="aq-kpi-sub">{ger.provPendiente?.count || 0} factura(s) por pagar</em>
+                  </button>
+                </div>
+
                 {/* Evolución mensual */}
                 <section className="aq-card">
                   <h2>Evolución (últimos 6 meses)</h2>
@@ -2262,6 +2386,114 @@ export default function App() {
                 <p className="aq-muted">
                   Datos de los últimos 6 meses. Cumplimiento de entrega y cobranza por antigüedad se sumarán al conectar el retorno de DispatchTrack.
                 </p>
+
+                {/* ── Pop-up: Efectivo libre / a Rendir ── */}
+                {popEfectivo && ger.efectivo && (
+                  <div className="aq-modal-ov" onClick={() => setPopEfectivo(false)}>
+                    <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+                      <div className="aq-modal-head">
+                        <div>
+                          <strong>Efectivo libre / a Rendir</strong>
+                          <span className="aq-muted">Mes en curso · sobre entregas de DispatchTrack</span>
+                        </div>
+                        <button className="aq-link" onClick={() => setPopEfectivo(false)}>Cerrar ✕</button>
+                      </div>
+
+                      <div className="aq-desglose">
+                        <div className="aq-desglose-row">
+                          <span>Recaudación de efectivo</span>
+                          <strong className="pos">{CLP(ger.efectivo.recaudacion)}</strong>
+                        </div>
+                        <div className="aq-desglose-row">
+                          <span>(−) Compras (Tipo ≠ Rendición Efectivo)</span>
+                          <strong className="neg">−{CLP(ger.efectivo.comprasNoRend)}</strong>
+                        </div>
+                        <div className="aq-desglose-row">
+                          <span>(−) Compra Proveedor pagada</span>
+                          <strong className="neg">−{CLP(ger.efectivo.compraProvPagado)}</strong>
+                        </div>
+                        <div className="aq-desglose-row total">
+                          <span>= Efectivo a Rendir</span>
+                          <strong>{CLP(ger.efectivo.aRendir)}</strong>
+                        </div>
+                        <div className="aq-desglose-row ref">
+                          <span>Rendición de efectivo ya entregada</span>
+                          <strong>{CLP(ger.efectivo.rendicion)}</strong>
+                        </div>
+                      </div>
+
+                      {ger.efectivo.compras.length > 0 && (
+                        <div className="aq-modal-edit">
+                          <strong>Compras (≠ Rendición Efectivo)</strong>
+                          {ger.efectivo.compras.map((c, i) => (
+                            <div className="aq-det-line" key={"c" + i}>
+                              <span>{c.tipo}{c.guide ? " · guía " + c.guide : ""}</span>
+                              <span>{CLP(c.monto)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ger.efectivo.compraProvPagadoDet.length > 0 && (
+                        <div className="aq-modal-edit">
+                          <strong>Compra Proveedor pagada</strong>
+                          {ger.efectivo.compraProvPagadoDet.map((c, i) => (
+                            <div className="aq-det-line" key={"p" + i}>
+                              <span>{c.proveedor}{c.guide ? " · guía " + c.guide : ""}</span>
+                              <span>{CLP(c.monto)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ger.efectivo.rendiciones.length > 0 && (
+                        <div className="aq-modal-edit">
+                          <strong>Rendiciones de efectivo</strong>
+                          {ger.efectivo.rendiciones.map((c, i) => (
+                            <div className="aq-det-line" key={"r" + i}>
+                              <span>{c.guide ? "Guía " + c.guide : "Rendición"}</span>
+                              <span>{CLP(c.monto)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Pop-up: Pendiente de pago a proveedor ── */}
+                {popProveedor && ger.provPendiente && (
+                  <div className="aq-modal-ov" onClick={() => setPopProveedor(false)}>
+                    <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+                      <div className="aq-modal-head">
+                        <div>
+                          <strong>Pendiente de pago a proveedor</strong>
+                          <span className="aq-muted">Facturas con Estado = Pendiente · mes en curso</span>
+                        </div>
+                        <button className="aq-link" onClick={() => setPopProveedor(false)}>Cerrar ✕</button>
+                      </div>
+
+                      <div className="aq-desglose">
+                        <div className="aq-desglose-row total">
+                          <span>Total por pagar</span>
+                          <strong>{CLP(ger.provPendiente.total)}</strong>
+                        </div>
+                      </div>
+
+                      {ger.provPendiente.proveedores.length === 0 ? (
+                        <p className="aq-muted">Sin facturas pendientes en el mes.</p>
+                      ) : (
+                        <div className="aq-modal-edit">
+                          <strong>Desglose por proveedor</strong>
+                          {ger.provPendiente.proveedores.map((p, i) => (
+                            <div className="aq-det-line" key={"pp" + i}>
+                              <span>{p.proveedor} · {p.count} fact.</span>
+                              <span>{CLP(p.monto)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <div className="aq-card aq-muted">Sin datos para mostrar todavía.</div>
@@ -3630,6 +3862,31 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 
 .aq-kpi-venc { border-color:#f3b4ad !important; background:#fdecea; }
 .aq-kpi-venc strong { color:var(--bad); }
+/* Segunda fila de tarjetas (operaciones de caja) */
+.aq-kpis-2 { grid-template-columns:repeat(2,1fr); margin-top:10px; }
+.aq-kpi-sub { display:block; font-size:11px; color:var(--muted); margin-top:6px; font-style:normal; }
+.aq-kpi-cash { display:flex; flex-direction:column; align-items:flex-start; }
+.aq-kpi-cash strong { color:var(--navy); }
+.aq-kpi-cash.neg strong { color:var(--bad); }
+.aq-kpi-prov { display:flex; flex-direction:column; align-items:flex-start; }
+.aq-kpi-prov.on-warn { border-color:#f0d8a0; background:#fff7e6; }
+.aq-kpi-prov.on-warn strong { color:#8a6400; }
+/* Desglose dentro de los pop-ups */
+.aq-desglose { border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.aq-desglose-row { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid var(--line); font-size:14px; }
+.aq-desglose-row:last-child { border-bottom:none; }
+.aq-desglose-row span { color:var(--ink); }
+.aq-desglose-row strong { font-family:'Fraunces',serif; }
+.aq-desglose-row strong.pos { color:var(--navy); }
+.aq-desglose-row strong.neg { color:var(--bad); }
+.aq-desglose-row.total { background:#f0f7ff; }
+.aq-desglose-row.total strong { color:var(--navy); font-size:18px; }
+.aq-desglose-row.ref { background:#f8fafc; }
+.aq-desglose-row.ref span, .aq-desglose-row.ref strong { color:var(--muted); }
+.aq-det-line { display:flex; justify-content:space-between; gap:10px; font-size:13px; padding:5px 0; border-bottom:1px dashed var(--line); }
+.aq-det-line:last-child { border-bottom:none; }
+.aq-det-line span:first-child { color:var(--ink); }
+.aq-det-line span:last-child { font-variant-numeric:tabular-nums; color:var(--navy); }
 
 /* Semáforo de pago del cliente */
 .aq-semaforo { display:inline-flex; align-items:center; gap:8px; font-size:13px; font-weight:600; padding:7px 12px; border-radius:10px; margin-bottom:12px; border:1px solid; }
