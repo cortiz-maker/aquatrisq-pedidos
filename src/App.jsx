@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient.js";
 import { PUENTE_URL, SUPABASE_URL } from "./config.js";
 
@@ -25,6 +25,110 @@ const COMUNAS_RM = [
   "San José de Maipo", "San Miguel", "San Pedro", "San Ramón", "Santiago",
   "Talagante", "Tiltil", "Vitacura",
 ];
+
+// Centroides aproximados (lat, lng) de las comunas de la RM, para los PIN del mapa.
+const COMUNA_COORDS = {
+  "Alhué": [-34.029, -71.101], "Buin": [-33.733, -70.741], "Calera de Tango": [-33.636, -70.761],
+  "Cerrillos": [-33.496, -70.718], "Cerro Navia": [-33.422, -70.737], "Colina": [-33.202, -70.675],
+  "Conchalí": [-33.385, -70.675], "Curacaví": [-33.409, -71.139], "El Bosque": [-33.562, -70.675],
+  "El Monte": [-33.680, -70.983], "Estación Central": [-33.461, -70.696], "Huechuraba": [-33.368, -70.639],
+  "Independencia": [-33.417, -70.665], "Isla de Maipo": [-33.751, -70.899], "La Cisterna": [-33.538, -70.662],
+  "La Florida": [-33.523, -70.599], "La Granja": [-33.540, -70.627], "La Pintana": [-33.583, -70.634],
+  "La Reina": [-33.445, -70.538], "Lampa": [-33.287, -70.880], "Las Condes": [-33.409, -70.550],
+  "Lo Barnechea": [-33.350, -70.518], "Lo Espejo": [-33.523, -70.688], "Lo Prado": [-33.444, -70.727],
+  "Macul": [-33.492, -70.598], "Maipú": [-33.511, -70.758], "María Pinto": [-33.516, -71.139],
+  "Melipilla": [-33.687, -71.215], "Ñuñoa": [-33.457, -70.598], "Padre Hurtado": [-33.574, -70.816],
+  "Paine": [-33.808, -70.741], "Pedro Aguirre Cerda": [-33.487, -70.675], "Peñaflor": [-33.609, -70.877],
+  "Peñalolén": [-33.489, -70.551], "Pirque": [-33.639, -70.549], "Providencia": [-33.431, -70.609],
+  "Pudahuel": [-33.442, -70.747], "Puente Alto": [-33.611, -70.576], "Quilicura": [-33.367, -70.729],
+  "Quinta Normal": [-33.428, -70.700], "Recoleta": [-33.403, -70.642], "Renca": [-33.404, -70.729],
+  "San Bernardo": [-33.592, -70.700], "San Joaquín": [-33.497, -70.628], "San José de Maipo": [-33.644, -70.354],
+  "San Miguel": [-33.497, -70.651], "San Pedro": [-33.897, -71.460], "San Ramón": [-33.538, -70.645],
+  "Santiago": [-33.449, -70.669], "Talagante": [-33.664, -70.928], "Tiltil": [-33.088, -70.929],
+  "Vitacura": [-33.390, -70.576],
+};
+
+// Normaliza un nombre de comuna para buscar sus coordenadas (sin acentos / minúsculas).
+function claveComuna(s) {
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+const COORDS_POR_CLAVE = Object.fromEntries(
+  Object.entries(COMUNA_COORDS).map(([nom, xy]) => [claveComuna(nom), xy])
+);
+
+// Mapa de la Región Metropolitana con un PIN por comuna, dimensionado por nº de pedidos.
+// Carga Leaflet desde CDN en tiempo de ejecución (sin dependencias en el repo).
+function MapaComunasRM({ comunas }) {
+  const cont = useRef(null);
+  const mapRef = useRef(null);
+  const [listo, setListo] = useState(typeof window !== "undefined" && !!window.L);
+
+  // Carga de Leaflet (CSS + JS) una sola vez.
+  useEffect(() => {
+    if (typeof window === "undefined" || window.L) { setListo(!!(typeof window !== "undefined" && window.L)); return; }
+    if (!document.getElementById("leaflet-css")) {
+      const css = document.createElement("link");
+      css.id = "leaflet-css"; css.rel = "stylesheet";
+      css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      document.head.appendChild(css);
+    }
+    let js = document.getElementById("leaflet-js");
+    const onReady = () => setListo(true);
+    if (!js) {
+      js = document.createElement("script");
+      js.id = "leaflet-js"; js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+      js.onload = onReady;
+      document.head.appendChild(js);
+    } else {
+      js.addEventListener("load", onReady);
+      if (window.L) onReady();
+    }
+    return () => { js && js.removeEventListener && js.removeEventListener("load", onReady); };
+  }, []);
+
+  // Dibujo / actualización de los marcadores.
+  useEffect(() => {
+    if (!listo || !window.L || !cont.current) return;
+    const L = window.L;
+    if (!mapRef.current) {
+      mapRef.current = L.map(cont.current, { scrollWheelZoom: false }).setView([-33.55, -70.66], 10);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 18, attribution: "© OpenStreetMap",
+      }).addTo(mapRef.current);
+    }
+    const map = mapRef.current;
+    // Limpia marcadores previos.
+    if (map._aqLayer) { map.removeLayer(map._aqLayer); }
+    const grupo = L.layerGroup().addTo(map);
+    map._aqLayer = grupo;
+
+    const conCoords = (comunas || [])
+      .map((c) => ({ ...c, xy: COORDS_POR_CLAVE[claveComuna(c.comuna)] }))
+      .filter((c) => c.xy);
+    const maxK = Math.max(1, ...conCoords.map((c) => c.count));
+    const puntos = [];
+    conCoords.forEach((c) => {
+      const r = 8 + Math.round((Math.sqrt(c.count) / Math.sqrt(maxK)) * 22); // 8–30 px
+      const mk = L.circleMarker(c.xy, {
+        radius: r, color: "#1f3b73", weight: 2, fillColor: "#34a07a", fillOpacity: 0.7,
+      }).addTo(grupo);
+      mk.bindTooltip(`${c.comuna} · ${c.count} ped.`, { direction: "top" });
+      mk.bindPopup(`<strong>${c.comuna}</strong><br/>${c.count} pedido(s)`);
+      puntos.push(c.xy);
+    });
+    if (puntos.length) {
+      try { map.fitBounds(L.latLngBounds(puntos).pad(0.2)); } catch { /* noop */ }
+    }
+    setTimeout(() => map.invalidateSize(), 80);
+  }, [listo, comunas]);
+
+  return (
+    <div>
+      <div ref={cont} className="aq-mapa" />
+      {!listo && <p className="aq-muted" style={{ marginTop: 8 }}>Cargando mapa…</p>}
+    </div>
+  );
+}
 
 const CLP = (n) =>
   "$" + (Number(n) || 0).toLocaleString("es-CL", { maximumFractionDigits: 0 });
@@ -551,8 +655,7 @@ export default function App() {
             .sort((a, b) => b[1] - a[1] || empiezaMayus(a[0]) - empiezaMayus(b[0]) || a[0].localeCompare(b[0]))[0][0];
           return { comuna: label, count: g.count };
         })
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 8);
+        .sort((a, b) => b.count - a.count);
 
       // KPIs del mes actual
       const mesActual = meses[meses.length - 1] || { count: 0, monto: 0 };
@@ -2417,29 +2520,31 @@ export default function App() {
                     })()}
                   </section>
 
-                  {/* Pedidos por comuna */}
+                  {/* Pedidos por comuna (mapa RM) */}
                   <section className="aq-card">
                     <h2>Pedidos por comuna</h2>
                     {ger.comunas.length === 0 ? (
                       <p className="aq-muted">Sin pedidos en el período.</p>
-                    ) : (() => {
-                      const maxK = Math.max(1, ...ger.comunas.map((c) => c.count));
-                      return (
-                        <div className="aq-hbars">
-                          {ger.comunas.map((c) => (
-                            <div className="aq-hbar" key={c.comuna}>
-                              <div className="aq-hbar-head">
-                                <span className="aq-hbar-name">{c.comuna}</span>
-                                <span className="aq-hbar-num">{c.count}</span>
-                              </div>
-                              <div className="aq-hbar-track">
-                                <div className="aq-hbar-fill alt" style={{ width: Math.round((c.count / maxK) * 100) + "%" }} />
-                              </div>
-                            </div>
+                    ) : (
+                      <>
+                        <MapaComunasRM comunas={ger.comunas} />
+                        <div className="aq-comuna-list">
+                          {ger.comunas.slice(0, 10).map((c) => (
+                            <span className="aq-comuna-chip" key={c.comuna}>
+                              {c.comuna} <strong>{c.count}</strong>
+                            </span>
                           ))}
                         </div>
-                      );
-                    })()}
+                        {(() => {
+                          const sinUbic = ger.comunas.filter((c) => !COORDS_POR_CLAVE[claveComuna(c.comuna)]);
+                          return sinUbic.length ? (
+                            <p className="aq-muted" style={{ marginTop: 8 }}>
+                              Sin ubicación en el mapa: {sinUbic.map((c) => `${c.comuna} (${c.count})`).join(", ")}
+                            </p>
+                          ) : null;
+                        })()}
+                      </>
+                    )}
                   </section>
                 </div>
 
@@ -3782,6 +3887,12 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 .aq-hbar-track { background:var(--bg); border-radius:6px; height:12px; overflow:hidden; }
 .aq-hbar-fill { height:100%; background:var(--blue); border-radius:6px; min-width:3px; transition:width .3s; }
 .aq-hbar-fill.alt { background:#5dbf9e; }
+/* Mapa de comunas (Leaflet) */
+.aq-mapa { height:340px; width:100%; border-radius:12px; overflow:hidden; border:1px solid var(--line); z-index:0; }
+.aq-mapa .leaflet-container { font:inherit; }
+.aq-comuna-list { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+.aq-comuna-chip { font-size:12px; background:#f0f7ff; border:1px solid var(--line); border-radius:999px; padding:3px 10px; color:var(--ink); }
+.aq-comuna-chip strong { color:var(--navy); margin-left:2px; }
 @media (max-width:700px) { .aq-grid2 { grid-template-columns:1fr; } }
 
 /* Buscador de pedidos */
