@@ -3,7 +3,7 @@ import { supabase } from "./supabaseClient.js";
 import { PUENTE_URL, SUPABASE_URL } from "./config.js";
 
 // ── Valores de enums (tal cual están en Postgres) ────────────
-const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar"];
+const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar", "Pedido Pagado"];
 const TIPOS_DOC = ["boleta", "factura", "sin_documento"];
 const MARCAS = ["TrisQ"];
 const CHOFERES = ["Felipe Hernandez", "Italo Loiza"];
@@ -279,7 +279,8 @@ export default function App() {
   // ── Cobranza / gestión de cobro (Pago = No en el formulario de entrega) ──
   const [entregasMap, setEntregasMap] = useState({});   // guide -> dt_entregas (pedidos del dashboard)
   const [pedidoModal, setPedidoModal] = useState(null);  // { pedido, entrega } para el popup de detalle
-  const [pedidoEdit, setPedidoEdit] = useState(null);    // campos editables del pedido en el modal
+  const [pedidoEdit, setPedidoEdit] = useState(null);
+  const [itemsModal, setItemsModal] = useState([]);      // items editables en el modal
   const [guardandoPed, setGuardandoPed] = useState(false);
   const [okPed, setOkPed] = useState("");
   const [errPed, setErrPed] = useState("");
@@ -847,34 +848,58 @@ export default function App() {
     }
   }
   // ── Cobranza / gestión de cobro ────────────────────────────
-  function abrirPedidoModal(p) {
+  async function abrirPedidoModal(p) {
     const entrega = p.numero_guia ? entregasMap[p.numero_guia] : null;
     setPedidoModal({ pedido: p, entrega });
     setPedidoEdit({
-      tipo_pago:      p.tipo_pago || "Transferencia",
+      tipo_pago:      p.tipo_pago || "Transferencia / Medio Digital",
       por_cobrar:     !!p.por_cobrar,
       tipo_documento: p.tipo_documento || "boleta",
       observacion:    p.observacion || "",
     });
+    setItemsModal([]);
     setOkPed(""); setErrPed("");
+    // Cargar items del pedido
+    try {
+      const { data: its } = await supabase.from("pedido_items").select("*").eq("pedido_id", p.id);
+      setItemsModal((its || []).map((l) => ({ ...l, _key: l.id })));
+    } catch { /* sin items */ }
   }
 
   async function guardarPedidoEdit() {
     if (!pedidoModal || !pedidoEdit) return;
     setGuardandoPed(true); setErrPed(""); setOkPed("");
     try {
+      // Recalcular total desde los items editados
+      const nuevoTotal = itemsModal.reduce((s, l) => s + (Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0), 0);
       const patch = {
         tipo_pago:      pedidoEdit.tipo_pago,
-        por_cobrar:     pedidoEdit.por_cobrar,
+        por_cobrar:     pedidoEdit.tipo_pago === "Por Cobrar",
         tipo_documento: pedidoEdit.tipo_documento,
         observacion:    pedidoEdit.observacion || null,
+        monto_total:    nuevoTotal,
       };
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedidoModal.pedido.id);
       if (error) throw error;
+
+      // Reemplazar items: borrar los viejos e insertar los nuevos
+      await supabase.from("pedido_items").delete().eq("pedido_id", pedidoModal.pedido.id);
+      const itemsLimpios = itemsModal
+        .filter((l) => (Number(l.cantidad) || 0) > 0)
+        .map((l) => ({
+          pedido_id:   pedidoModal.pedido.id,
+          producto_id: l.producto_id || null,
+          nombre:      l.nombre || "",
+          codigo:      l.codigo || null,
+          cantidad:    Number(l.cantidad) || 0,
+          precio_unit: Number(l.precio_unit) || 0,
+        }));
+      if (itemsLimpios.length) await supabase.from("pedido_items").insert(itemsLimpios);
+
       const pedActualizado = { ...pedidoModal.pedido, ...patch };
       setPedidoModal((prev) => ({ ...prev, pedido: pedActualizado }));
       setPedidosMes((prev) => prev.map((p) => p.id === pedActualizado.id ? pedActualizado : p));
-      setOkPed("Pedido actualizado.");
+      setOkPed("Pedido e items actualizados.");
     } catch (e) {
       setErrPed(e.message || "No se pudo guardar.");
     } finally {
@@ -3200,7 +3225,7 @@ export default function App() {
                   <div className="aq-grid" style={{ marginTop: 10, gap: 8 }}>
                     <label>
                       Tipo de pago
-                      <select value={pedidoEdit.tipo_pago} onChange={(e) => setPedidoEdit({ ...pedidoEdit, tipo_pago: e.target.value, por_cobrar: e.target.value === "Por Cobrar" })}>
+                      <select value={pedidoEdit.tipo_pago} onChange={(e) => setPedidoEdit({ ...pedidoEdit, tipo_pago: e.target.value })}>
                         {TIPOS_PAGO.map((t) => <option key={t} value={t}>{t}</option>)}
                       </select>
                     </label>
@@ -3215,19 +3240,51 @@ export default function App() {
                       <input type="text" value={pedidoEdit.observacion} onChange={(e) => setPedidoEdit({ ...pedidoEdit, observacion: e.target.value })} placeholder="Ej: cliente pagó con transferencia el 15/06" />
                     </label>
                   </div>
+
+                  {/* Items editables */}
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <strong style={{ fontSize: 13, color: "var(--navy)" }}>Productos / items</strong>
+                      <button className="aq-link" style={{ fontSize: 12 }} onClick={() => setItemsModal((prev) => [...prev, { _key: Date.now(), nombre: "", codigo: "", cantidad: 1, precio_unit: 0, producto_id: null }])}>
+                        + Agregar ítem
+                      </button>
+                    </div>
+                    {itemsModal.map((l, idx) => (
+                      <div key={l._key} className="aq-items-edit-row">
+                        <input
+                          value={l.nombre} placeholder="Nombre del producto"
+                          style={{ flex: 2 }}
+                          onChange={(e) => setItemsModal((prev) => prev.map((x, i) => i === idx ? { ...x, nombre: e.target.value } : x))}
+                        />
+                        <input
+                          type="number" min="0" value={l.cantidad} placeholder="Qty"
+                          style={{ width: 54 }}
+                          onChange={(e) => setItemsModal((prev) => prev.map((x, i) => i === idx ? { ...x, cantidad: Number(e.target.value) } : x))}
+                        />
+                        <input
+                          type="number" min="0" value={l.precio_unit} placeholder="$ unit"
+                          style={{ width: 90 }}
+                          onChange={(e) => setItemsModal((prev) => prev.map((x, i) => i === idx ? { ...x, precio_unit: Number(e.target.value) } : x))}
+                        />
+                        <span style={{ fontSize: 13, color: "var(--mid)", minWidth: 70, textAlign: "right" }}>
+                          {CLP((l.cantidad || 0) * (l.precio_unit || 0))}
+                        </span>
+                        <button className="aq-link" style={{ color: "var(--bad)", fontSize: 20, lineHeight: 1, padding: "0 4px" }} onClick={() => setItemsModal((prev) => prev.filter((_, i) => i !== idx))}>×</button>
+                      </div>
+                    ))}
+                    <div style={{ display: "flex", justifyContent: "flex-end", fontSize: 15, fontWeight: 700, color: "var(--navy)", marginTop: 8, gap: 8 }}>
+                      <span>Total:</span>
+                      <span>{CLP(itemsModal.reduce((s, l) => s + (l.cantidad || 0) * (l.precio_unit || 0), 0))}</span>
+                    </div>
+                  </div>
+
                   {errPed && <div className="aq-result bad" style={{ marginTop: 8 }}>{errPed}</div>}
                   {okPed && <div className="aq-result ok" style={{ marginTop: 8 }}>{okPed}</div>}
                   <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                     <button className="aq-btn" style={{ flex: 1 }} disabled={guardandoPed} onClick={guardarPedidoEdit}>
                       {guardandoPed ? "Guardando…" : "Guardar cambios"}
                     </button>
-                    <button
-                      className="aq-btn-sec"
-                      style={{ flex: 1 }}
-                      disabled={enviandoDT}
-                      onClick={forzarEnvioDT}
-                      title="Reenvía este pedido a DispatchTrack (útil si falló o necesita actualizarse)"
-                    >
+                    <button className="aq-btn-sec" style={{ flex: 1 }} disabled={enviandoDT} onClick={forzarEnvioDT} title="Reenvía a DispatchTrack con los datos actualizados">
                       {enviandoDT ? "Enviando…" : "🔄 Forzar envío a DT"}
                     </button>
                   </div>
@@ -3625,6 +3682,11 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-modal-edit > strong { color:var(--navy); display:block; margin-bottom:2px; }
 .aq-modal-edit .aq-grid { grid-template-columns:1fr 1fr; }
 .aq-modal-edit input, .aq-modal-edit select { font-size:13px; }
+
+.aq-items-edit-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid var(--line); }
+.aq-items-edit-row:last-of-type { border-bottom:none; }
+.aq-items-edit-row input { padding:6px 8px; border:1px solid var(--line); border-radius:7px; font-family:inherit; font-size:13px; background:var(--white); color:var(--ink); }
+.aq-items-edit-row input:focus { outline:none; border-color:var(--cyan); }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
