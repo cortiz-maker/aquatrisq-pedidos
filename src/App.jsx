@@ -10,6 +10,22 @@ const CHOFERES = ["Felipe Hernandez", "Italo Loiza"];
 // Origen de un descuento manual en pedido_descuentos (texto libre, pero acotamos).
 const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 
+// Comunas de la Región Metropolitana (52), con la grafía canónica. Se usa como
+// lista fija en el formulario de domicilio para evitar variantes ("providencia"
+// vs "Providencia") en el origen.
+const COMUNAS_RM = [
+  "Alhué", "Buin", "Calera de Tango", "Cerrillos", "Cerro Navia", "Colina",
+  "Conchalí", "Curacaví", "El Bosque", "El Monte", "Estación Central",
+  "Huechuraba", "Independencia", "Isla de Maipo", "La Cisterna", "La Florida",
+  "La Granja", "La Pintana", "La Reina", "Lampa", "Las Condes", "Lo Barnechea",
+  "Lo Espejo", "Lo Prado", "Macul", "Maipú", "María Pinto", "Melipilla", "Ñuñoa",
+  "Padre Hurtado", "Paine", "Pedro Aguirre Cerda", "Peñaflor", "Peñalolén",
+  "Pirque", "Providencia", "Pudahuel", "Puente Alto", "Quilicura",
+  "Quinta Normal", "Recoleta", "Renca", "San Bernardo", "San Joaquín",
+  "San José de Maipo", "San Miguel", "San Pedro", "San Ramón", "Santiago",
+  "Talagante", "Tiltil", "Vitacura",
+];
+
 const CLP = (n) =>
   "$" + (Number(n) || 0).toLocaleString("es-CL", { maximumFractionDigits: 0 });
 
@@ -513,14 +529,28 @@ export default function App() {
       const mix = Object.values(mapProd).sort((a, b) => b.cantidad - a.cantidad).slice(0, 7);
 
       // 3) Pedidos por comuna (vía domicilio → comuna)
+      // Pedidos por comuna — normalizamos para fusionar variantes ("Providencia"
+      // y "providencia" cuentan como una). La etiqueta visible es la variante más
+      // frecuente (y, a igualdad, la mejor capitalizada).
+      const normComuna = (s) => String(s || "")
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
+        .toLowerCase().replace(/\s+/g, " ").trim();
       const mapCom = {};
       pedidos.forEach((p) => {
         const dom = domPorId[p.domicilio_id];
-        const com = (dom && dom.comuna) ? dom.comuna : "Sin comuna";
-        mapCom[com] = (mapCom[com] || 0) + 1;
+        const raw = (dom && dom.comuna && String(dom.comuna).trim()) ? String(dom.comuna).trim() : "Sin comuna";
+        const key = normComuna(raw) || "sin comuna";
+        if (!mapCom[key]) mapCom[key] = { count: 0, labels: {} };
+        mapCom[key].count += 1;
+        mapCom[key].labels[raw] = (mapCom[key].labels[raw] || 0) + 1;
       });
-      const comunas = Object.entries(mapCom)
-        .map(([comuna, count]) => ({ comuna, count }))
+      const empiezaMayus = (s) => /^[A-ZÁÉÍÓÚÑ]/.test(s) ? 0 : 1;
+      const comunas = Object.values(mapCom)
+        .map((g) => {
+          const label = Object.entries(g.labels)
+            .sort((a, b) => b[1] - a[1] || empiezaMayus(a[0]) - empiezaMayus(b[0]) || a[0].localeCompare(b[0]))[0][0];
+          return { comuna: label, count: g.count };
+        })
         .sort((a, b) => b.count - a.count)
         .slice(0, 8);
 
@@ -2687,7 +2717,13 @@ export default function App() {
                                 </label>
                                 <label>
                                   Comuna
-                                  <input value={domEdit.comuna || ""} onChange={(e) => setDomEdit({ ...domEdit, comuna: e.target.value })} placeholder="Ej: Providencia" />
+                                  <select value={domEdit.comuna || ""} onChange={(e) => setDomEdit({ ...domEdit, comuna: e.target.value })}>
+                                    <option value="">— Selecciona comuna —</option>
+                                    {domEdit.comuna && !COMUNAS_RM.includes(domEdit.comuna) && (
+                                      <option value={domEdit.comuna}>{domEdit.comuna} (actual)</option>
+                                    )}
+                                    {COMUNAS_RM.map((c) => <option key={c} value={c}>{c}</option>)}
+                                  </select>
                                 </label>
                               </div>
                               <label className="aq-check" style={{ marginTop: 10 }}>
