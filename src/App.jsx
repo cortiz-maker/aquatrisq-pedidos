@@ -185,16 +185,18 @@ function montoCompra(entrega) {
   const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
-// Estado de la factura de una "Compra Proveedor": campo "Estado Factura" = "Pagado" | "Pendiente".
-function estadoFacturaProveedor(entrega) {
-  const a = answersFromRaw(entrega).find((x) => /estado factura/i.test(x.name));
+// Estado de pago de una "Compra Proveedor": en DispatchTrack el campo se llama
+// "Estado de Pago" (a veces "Estado De Pago") y toma "Pagado" | "Pendiente".
+// Toleramos también la grafía "Estado Factura" por si conviviera en formularios antiguos.
+function estadoPagoProveedor(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /estado\s*(de\s*)?(pago|factura)/i.test(x.name));
   return a && a.val ? String(a.val).trim() : "";
 }
 function esCompraProvPagada(entrega) {
-  return esCompraProveedor(entrega) && /pagad/i.test(estadoFacturaProveedor(entrega));
+  return esCompraProveedor(entrega) && /pagad/i.test(estadoPagoProveedor(entrega));
 }
 function esCompraProvPendiente(entrega) {
-  return esCompraProveedor(entrega) && /pendient/i.test(estadoFacturaProveedor(entrega));
+  return esCompraProveedor(entrega) && /pendient/i.test(estadoPagoProveedor(entrega));
 }
 // Nombre del proveedor (campo "Proveedor" / "Prooveedor" — toleramos ambas grafías).
 function nombreProveedor(entrega) {
