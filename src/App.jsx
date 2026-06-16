@@ -564,10 +564,13 @@ export default function App() {
       // para ser consistente con los KPIs "del mes" de arriba.
       let efectivo = {
         recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
-        compras: [], rendiciones: [], compraProvPagadoDet: [],
+        compras: [], rendiciones: [], compraProvPagadoDet: [], choferes: [],
       };
       let provPendiente = { total: 0, count: 0, proveedores: [] };
       try {
+        // Guías excluidas de todo cálculo de caja (normalizamos quitando guiones/espacios).
+        const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const EXCLUIR_GUIAS = new Set(["AQ00015"]);
         const mesKey = hoyPeriodo();
         const guiasMes = [...new Set(
           pedidos
@@ -590,22 +593,33 @@ export default function App() {
           const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
           if (!prev || t >= tp) porGuia[e.guide] = e;
         });
+        // Acumulador por chofer para el efectivo a rendir.
+        const chofMap = {};
+        const slotChofer = (nombre) => {
+          if (!chofMap[nombre]) chofMap[nombre] = { chofer: nombre, recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0 };
+          return chofMap[nombre];
+        };
         Object.values(porGuia).forEach((e) => {
+          if (EXCLUIR_GUIAS.has(normGuia(e.guide))) return; // guía excluida
           const chofer = (e.chofer || "").trim() || "Sin chofer";
-          if (esEfectivoRecaudado(e)) efectivo.recaudacion += montoEfectivoRecaudado(e);
+          const sc = slotChofer(chofer);
+          if (esEfectivoRecaudado(e)) {
+            const m = montoEfectivoRecaudado(e);
+            efectivo.recaudacion += m; sc.recaudacion += m;
+          }
           if (esCompraNoRendicion(e)) {
             const m = montoCompra(e);
-            efectivo.comprasNoRend += m;
+            efectivo.comprasNoRend += m; sc.comprasNoRend += m;
             efectivo.compras.push({ guide: e.guide, monto: m, tipo: tipoCompra(e) || "Compra", chofer });
           }
           if (esRendicionEfectivo(e)) {
             const m = montoRendicion(e);
-            efectivo.rendicion += m;
+            efectivo.rendicion += m; sc.rendicion += m;
             efectivo.rendiciones.push({ guide: e.guide, monto: m, chofer });
           }
           if (esCompraProvPagada(e)) {
             const m = montoCompraProveedor(e);
-            efectivo.compraProvPagado += m;
+            efectivo.compraProvPagado += m; sc.compraProvPagado += m;
             efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
           }
           if (esCompraProvPendiente(e)) {
@@ -629,6 +643,11 @@ export default function App() {
         // Efectivo a Rendir = recaudación − compras operativas (≠ rendición)
         // − compra proveedor PAGADA − rendición de efectivo ya entregada.
         efectivo.aRendir = efectivo.recaudacion - efectivo.comprasNoRend - efectivo.compraProvPagado - efectivo.rendicion;
+        // Subtotal a rendir por chofer.
+        efectivo.choferes = Object.values(chofMap).map((c) => ({
+          ...c,
+          aRendir: c.recaudacion - c.comprasNoRend - c.compraProvPagado - c.rendicion,
+        })).sort((a, b) => b.aRendir - a.aRendir);
         provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
       } catch { /* si falla, dejamos la caja en cero */ }
 
@@ -2433,6 +2452,23 @@ export default function App() {
                         </div>
                       </div>
 
+                      {ger.efectivo.choferes && ger.efectivo.choferes.length > 0 && (
+                        <div className="aq-modal-edit">
+                          <strong>A rendir por chofer</strong>
+                          {ger.efectivo.choferes.map((c, i) => (
+                            <div className="aq-chofer-box" key={"ch" + i}>
+                              <div className="aq-det-line aq-chofer-cab">
+                                <span>👤 {c.chofer}</span>
+                                <span className={c.aRendir < 0 ? "neg" : ""}>{CLP(c.aRendir)}</span>
+                              </div>
+                              <div className="aq-chofer-detalle">
+                                Recaudado {CLP(c.recaudacion)} − compras {CLP(c.comprasNoRend)} − prov. pagado {CLP(c.compraProvPagado)} − rendición {CLP(c.rendicion)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {ger.efectivo.compras.length > 0 && (
                         <div className="aq-modal-edit">
                           <strong>Compras (≠ Rendición Efectivo)</strong>
@@ -3916,6 +3952,13 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-prov-cab span:last-child { font-weight:700; }
 .aq-prov-fact { border-bottom:none; padding:2px 0 2px 12px; opacity:.85; }
 .aq-prov-fact span:first-child { font-size:12px; }
+/* Subtotal a rendir por chofer */
+.aq-chofer-box { padding:6px 0; border-bottom:1px dashed var(--line); }
+.aq-chofer-box:last-child { border-bottom:none; }
+.aq-chofer-cab { border-bottom:none; font-weight:600; }
+.aq-chofer-cab span:last-child { font-family:'Fraunces',serif; font-size:16px; color:var(--navy); }
+.aq-chofer-cab span:last-child.neg { color:var(--bad); }
+.aq-chofer-detalle { font-size:11px; color:var(--muted); margin-top:2px; }
 
 /* Semáforo de pago del cliente */
 .aq-semaforo { display:inline-flex; align-items:center; gap:8px; font-size:13px; font-weight:600; padding:7px 12px; border-radius:10px; margin-bottom:12px; border:1px solid; }
