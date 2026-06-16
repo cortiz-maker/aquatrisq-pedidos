@@ -591,21 +591,22 @@ export default function App() {
           if (!prev || t >= tp) porGuia[e.guide] = e;
         });
         Object.values(porGuia).forEach((e) => {
+          const chofer = (e.chofer || "").trim() || "Sin chofer";
           if (esEfectivoRecaudado(e)) efectivo.recaudacion += montoEfectivoRecaudado(e);
           if (esCompraNoRendicion(e)) {
             const m = montoCompra(e);
             efectivo.comprasNoRend += m;
-            efectivo.compras.push({ guide: e.guide, monto: m, tipo: tipoCompra(e) || "Compra" });
+            efectivo.compras.push({ guide: e.guide, monto: m, tipo: tipoCompra(e) || "Compra", chofer });
           }
           if (esRendicionEfectivo(e)) {
             const m = montoRendicion(e);
             efectivo.rendicion += m;
-            efectivo.rendiciones.push({ guide: e.guide, monto: m });
+            efectivo.rendiciones.push({ guide: e.guide, monto: m, chofer });
           }
           if (esCompraProvPagada(e)) {
             const m = montoCompraProveedor(e);
             efectivo.compraProvPagado += m;
-            efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e) });
+            efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
           }
           if (esCompraProvPendiente(e)) {
             const m = montoCompraProveedor(e);
@@ -613,13 +614,21 @@ export default function App() {
             provPendiente.count += 1;
             const nom = nombreProveedor(e);
             const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
-            if (slot) { slot.monto += m; slot.count += 1; slot.guias.push(e.guide); }
-            else provPendiente.proveedores.push({ proveedor: nom, monto: m, count: 1, guias: [e.guide] });
+            if (slot) {
+              slot.monto += m; slot.count += 1; slot.guias.push(e.guide);
+              if (!slot.choferes.includes(chofer)) slot.choferes.push(chofer);
+              slot.facturas.push({ guide: e.guide, monto: m, chofer });
+            } else {
+              provPendiente.proveedores.push({
+                proveedor: nom, monto: m, count: 1, guias: [e.guide],
+                choferes: [chofer], facturas: [{ guide: e.guide, monto: m, chofer }],
+              });
+            }
           }
         });
-        // Efectivo a Rendir = recaudación − compras operativas (≠ rendición) − compra proveedor PAGADA.
-        // (La rendición de efectivo ya entregada se muestra en el pop-up como referencia de conciliación.)
-        efectivo.aRendir = efectivo.recaudacion - efectivo.comprasNoRend - efectivo.compraProvPagado;
+        // Efectivo a Rendir = recaudación − compras operativas (≠ rendición)
+        // − compra proveedor PAGADA − rendición de efectivo ya entregada.
+        efectivo.aRendir = efectivo.recaudacion - efectivo.comprasNoRend - efectivo.compraProvPagado - efectivo.rendicion;
         provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
       } catch { /* si falla, dejamos la caja en cero */ }
 
@@ -2249,7 +2258,7 @@ export default function App() {
                     <span>Efectivo libre / a Rendir 🔎</span>
                     <strong>{CLP(ger.efectivo ? ger.efectivo.aRendir : 0)}</strong>
                     <em className="aq-kpi-sub">
-                      Recaudado {CLP(ger.efectivo?.recaudacion || 0)} − compras − prov. pagado
+                      Recaudado {CLP(ger.efectivo?.recaudacion || 0)} − compras − prov. pagado − rendición
                     </em>
                   </button>
                   <button
@@ -2414,13 +2423,13 @@ export default function App() {
                           <span>(−) Compra Proveedor pagada</span>
                           <strong className="neg">−{CLP(ger.efectivo.compraProvPagado)}</strong>
                         </div>
+                        <div className="aq-desglose-row">
+                          <span>(−) Rendición de efectivo entregada</span>
+                          <strong className="neg">−{CLP(ger.efectivo.rendicion)}</strong>
+                        </div>
                         <div className="aq-desglose-row total">
                           <span>= Efectivo a Rendir</span>
                           <strong>{CLP(ger.efectivo.aRendir)}</strong>
-                        </div>
-                        <div className="aq-desglose-row ref">
-                          <span>Rendición de efectivo ya entregada</span>
-                          <strong>{CLP(ger.efectivo.rendicion)}</strong>
                         </div>
                       </div>
 
@@ -2429,7 +2438,7 @@ export default function App() {
                           <strong>Compras (≠ Rendición Efectivo)</strong>
                           {ger.efectivo.compras.map((c, i) => (
                             <div className="aq-det-line" key={"c" + i}>
-                              <span>{c.tipo}{c.guide ? " · guía " + c.guide : ""}</span>
+                              <span>{c.tipo}{c.guide ? " · guía " + c.guide : ""}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
                             </div>
                           ))}
@@ -2440,7 +2449,7 @@ export default function App() {
                           <strong>Compra Proveedor pagada</strong>
                           {ger.efectivo.compraProvPagadoDet.map((c, i) => (
                             <div className="aq-det-line" key={"p" + i}>
-                              <span>{c.proveedor}{c.guide ? " · guía " + c.guide : ""}</span>
+                              <span>{c.proveedor}{c.guide ? " · guía " + c.guide : ""}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
                             </div>
                           ))}
@@ -2451,7 +2460,7 @@ export default function App() {
                           <strong>Rendiciones de efectivo</strong>
                           {ger.efectivo.rendiciones.map((c, i) => (
                             <div className="aq-det-line" key={"r" + i}>
-                              <span>{c.guide ? "Guía " + c.guide : "Rendición"}</span>
+                              <span>{c.guide ? "Guía " + c.guide : "Rendición"}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
                             </div>
                           ))}
@@ -2486,9 +2495,17 @@ export default function App() {
                         <div className="aq-modal-edit">
                           <strong>Desglose por proveedor</strong>
                           {ger.provPendiente.proveedores.map((p, i) => (
-                            <div className="aq-det-line" key={"pp" + i}>
-                              <span>{p.proveedor} · {p.count} fact.</span>
-                              <span>{CLP(p.monto)}</span>
+                            <div className="aq-prov-grupo" key={"pp" + i}>
+                              <div className="aq-det-line aq-prov-cab">
+                                <span>{p.proveedor} · {p.count} fact.<em className="aq-det-chofer">{p.choferes.join(", ")}</em></span>
+                                <span>{CLP(p.monto)}</span>
+                              </div>
+                              {p.facturas.map((f, j) => (
+                                <div className="aq-det-line aq-prov-fact" key={"f" + i + "_" + j}>
+                                  <span>{f.guide ? "Guía " + f.guide : "Factura"}<em className="aq-det-chofer">{f.chofer}</em></span>
+                                  <span>{CLP(f.monto)}</span>
+                                </div>
+                              ))}
                             </div>
                           ))}
                         </div>
@@ -3889,6 +3906,16 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-det-line:last-child { border-bottom:none; }
 .aq-det-line span:first-child { color:var(--ink); }
 .aq-det-line span:last-child { font-variant-numeric:tabular-nums; color:var(--navy); }
+/* Chofer asignado dentro de una línea de detalle */
+.aq-det-chofer { display:block; font-size:11px; font-style:normal; color:var(--muted); margin-top:1px; }
+.aq-det-chofer::before { content:"👤 "; }
+/* Agrupación por proveedor (cabecera + facturas) */
+.aq-prov-grupo { padding:4px 0; border-bottom:1px dashed var(--line); }
+.aq-prov-grupo:last-child { border-bottom:none; }
+.aq-prov-cab { border-bottom:none; font-weight:600; }
+.aq-prov-cab span:last-child { font-weight:700; }
+.aq-prov-fact { border-bottom:none; padding:2px 0 2px 12px; opacity:.85; }
+.aq-prov-fact span:first-child { font-size:12px; }
 
 /* Semáforo de pago del cliente */
 .aq-semaforo { display:inline-flex; align-items:center; gap:8px; font-size:13px; font-weight:600; padding:7px 12px; border-radius:10px; margin-bottom:12px; border:1px solid; }
