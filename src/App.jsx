@@ -366,6 +366,11 @@ export default function App() {
   const [creadoPor, setCreadoPor] = useState("");
   const [nroDte, setNroDte] = useState("");
 
+  // Nº de pedido reservado al iniciar la toma (correlativo atómico desde la base).
+  const [numeroReservado, setNumeroReservado] = useState(null);
+  const [reservandoNum, setReservandoNum] = useState(false);
+  const [errorReserva, setErrorReserva] = useState("");
+
   // Guardado
   const [guardando, setGuardando] = useState(false);
   const [resultado, setResultado] = useState(null); // { ok, guia, sync, msg }
@@ -1829,6 +1834,47 @@ export default function App() {
   const errorValidacion = validar();
 
   // ── Guardar pedido ─────────────────────────────────────────
+  // ── Reserva del Nº de pedido al iniciar la toma ────────────
+  // Llama al correlativo atómico de la base (siguiente_numero_aq) y lo guarda
+  // en este navegador para que sobreviva a un refresco mientras no se guarde.
+  const LS_NUM_RESERVADO = "aq_numero_reservado";
+
+  async function reservarNumero({ forzar = false } = {}) {
+    if (numeroReservado && !forzar) return numeroReservado;
+    setReservandoNum(true);
+    setErrorReserva("");
+    try {
+      const { data, error } = await supabase.rpc("siguiente_numero_aq");
+      if (error) throw error;
+      const num = typeof data === "string" ? data : (Array.isArray(data) ? data[0] : null);
+      if (!num) throw new Error("La base no devolvió un número.");
+      setNumeroReservado(num);
+      try { localStorage.setItem(LS_NUM_RESERVADO, num); } catch { /* noop */ }
+      return num;
+    } catch (e) {
+      setErrorReserva(e.message || "No se pudo reservar el número.");
+      return null;
+    } finally {
+      setReservandoNum(false);
+    }
+  }
+
+  // Recupera una reserva pendiente de este navegador al cargar la app.
+  useEffect(() => {
+    try {
+      const n = localStorage.getItem(LS_NUM_RESERVADO);
+      if (n) setNumeroReservado(n);
+    } catch { /* noop */ }
+  }, []);
+
+  // Reserva automática al entrar a "Nuevo pedido" si no hay una pendiente.
+  useEffect(() => {
+    if (vista === "nuevo" && credsListas && rol !== "gerencial" && !numeroReservado && !reservandoNum) {
+      reservarNumero();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vista, credsListas, rol]);
+
   async function guardarPedido() {
     const err = validar();
     if (err) {
@@ -1839,10 +1885,12 @@ export default function App() {
     setResultado(null);
 
     try {
-      // 1) Cabecera. numero_guia lo genera la función siguiente_numero_aq().
+      // 1) Cabecera. Si reservamos un número al iniciar, lo insertamos explícito
+      // (la base NO consume otro, porque numero_guia se asigna por DEFAULT, no por trigger).
       const cabecera = {
         cliente_id: cliente.id,
         domicilio_id: domicilioId,
+        ...(numeroReservado ? { numero_guia: numeroReservado } : {}),
         fecha_min_entrega: fechaMin ? new Date(fechaMin).toISOString() : null,
         fecha_max_entrega: fechaMax ? new Date(fechaMax).toISOString() : null,
         marca: marca || null,
@@ -1982,6 +2030,8 @@ export default function App() {
       setPlanPrepago(null);
       setConsumePlan(false);
       setResultado(null);
+      setNumeroReservado(null);
+      try { localStorage.removeItem(LS_NUM_RESERVADO); } catch { /* noop */ }
     } catch (e) {
       setResultado({ ok: false, msg: "No se pudo guardar: " + (e.message || e) });
     } finally {
@@ -3295,6 +3345,24 @@ export default function App() {
         {/* ===================== NUEVO PEDIDO ===================== */}
         {credsListas && !cargando && !errorCarga && vista === "nuevo" && (
           <>
+            {/* Nº de pedido reservado */}
+            <section className="aq-card aq-num-reserva">
+              <div className="aq-num-main">
+                <span className="aq-num-label">Nº de pedido</span>
+                <strong className={"aq-num-valor" + (numeroReservado ? "" : " aq-num-pend")}>
+                  {numeroReservado || (reservandoNum ? "Reservando…" : "—")}
+                </strong>
+              </div>
+              <div className="aq-num-side">
+                {errorReserva
+                  ? <span className="aq-num-err">{errorReserva}</span>
+                  : <span className="aq-mini">Reservado al iniciar. Úsalo como referencia para emitir el DTE antes de guardar.</span>}
+                <button className="aq-link" disabled={reservandoNum} onClick={() => reservarNumero({ forzar: true })}>
+                  {errorReserva ? "Reintentar" : (numeroReservado ? "Reservar otro" : "Reservar")}
+                </button>
+              </div>
+            </section>
+
             {/* Cliente */}
             <section className="aq-card">
               <h2>Cliente</h2>
@@ -3893,6 +3961,14 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 .aq-comuna-list { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
 .aq-comuna-chip { font-size:12px; background:#f0f7ff; border:1px solid var(--line); border-radius:999px; padding:3px 10px; color:var(--ink); }
 .aq-comuna-chip strong { color:var(--navy); margin-left:2px; }
+/* Encabezado del Nº de pedido reservado */
+.aq-num-reserva { display:flex; justify-content:space-between; align-items:center; gap:14px; flex-wrap:wrap; background:#f0f7ff; border:1px solid #cfe2ff; }
+.aq-num-main { display:flex; flex-direction:column; }
+.aq-num-label { font-size:12px; color:var(--muted); }
+.aq-num-valor { font-family:'Fraunces',serif; font-size:30px; color:var(--navy); line-height:1.1; letter-spacing:.5px; }
+.aq-num-valor.aq-num-pend { color:var(--muted); }
+.aq-num-side { display:flex; flex-direction:column; align-items:flex-end; gap:4px; text-align:right; }
+.aq-num-err { color:var(--bad); font-size:12px; max-width:280px; }
 @media (max-width:700px) { .aq-grid2 { grid-template-columns:1fr; } }
 
 /* Buscador de pedidos */
