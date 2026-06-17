@@ -395,6 +395,7 @@ export default function App() {
   const [errorGer, setErrorGer] = useState("");
   const [popEfectivo, setPopEfectivo] = useState(false);   // pop-up "Efectivo a Rendir"
   const [popProveedor, setPopProveedor] = useState(false); // pop-up "Pendiente pago proveedor"
+  const [mixVista, setMixVista] = useState("torta");       // "torta" | "barras"
 
   // Agregar email faltante al cliente desde el formulario
   const [emailNuevo, setEmailNuevo] = useState("");
@@ -2575,10 +2576,16 @@ export default function App() {
                 <div className="aq-grid2">
                   {/* Mix de productos */}
                   <section className="aq-card">
-                    <h2>Mix de productos</h2>
+                    <div className="aq-card-head">
+                      <h2>Mix de productos</h2>
+                      <div className="aq-toggle">
+                        <button className={mixVista === "torta" ? "on" : ""} onClick={() => setMixVista("torta")}>Torta</button>
+                        <button className={mixVista === "barras" ? "on" : ""} onClick={() => setMixVista("barras")}>Barras</button>
+                      </div>
+                    </div>
                     {ger.mix.length === 0 ? (
                       <p className="aq-muted">Sin ventas en el período.</p>
-                    ) : (() => {
+                    ) : mixVista === "barras" ? (() => {
                       const maxC = Math.max(1, ...ger.mix.map((p) => p.cantidad));
                       return (
                         <div className="aq-hbars">
@@ -2593,6 +2600,49 @@ export default function App() {
                               </div>
                             </div>
                           ))}
+                        </div>
+                      );
+                    })() : (() => {
+                      const COLORS = ["#1f3b73", "#0fae8e", "#378add", "#ef9f27", "#7f77dd", "#d85a30", "#888780"];
+                      const total = ger.mix.reduce((s, p) => s + p.cantidad, 0) || 1;
+                      const r = 54, C = 2 * Math.PI * r;
+                      let acc = 0;
+                      const segs = ger.mix.map((p, i) => {
+                        const frac = p.cantidad / total;
+                        const len = frac * C;
+                        const seg = { ...p, color: COLORS[i % COLORS.length], len, off: -acc, pct: Math.round(frac * 100) };
+                        acc += len;
+                        return seg;
+                      });
+                      return (
+                        <div className="aq-torta">
+                          <div className="aq-torta-svg">
+                            <svg viewBox="0 0 140 140" width="140" height="140" role="img"
+                              aria-label="Distribución del mix de productos por unidades.">
+                              <circle cx="70" cy="70" r={r} fill="none" stroke="var(--line)" strokeWidth="24" />
+                              {segs.map((s) => (
+                                <circle key={s.nombre} cx="70" cy="70" r={r} fill="none" stroke={s.color} strokeWidth="24"
+                                  strokeDasharray={`${s.len.toFixed(2)} ${(C - s.len).toFixed(2)}`}
+                                  strokeDashoffset={s.off.toFixed(2)} transform="rotate(-90 70 70)">
+                                  <title>{s.nombre}: {s.cantidad} un ({s.pct}%)</title>
+                                </circle>
+                              ))}
+                            </svg>
+                            <div className="aq-torta-centro">
+                              <strong>{total}</strong>
+                              <span>unidades</span>
+                            </div>
+                          </div>
+                          <div className="aq-torta-leg">
+                            {segs.map((s) => (
+                              <div className="aq-torta-leg-i" key={s.nombre}>
+                                <span className="aq-torta-pt" style={{ background: s.color }} />
+                                <span className="aq-torta-nom">{s.nombre}</span>
+                                <span className="aq-torta-pct">{s.pct}%</span>
+                                <span className="aq-torta-det">{s.cantidad} un · {CLP(s.valor)}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       );
                     })()}
@@ -3990,6 +4040,25 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 .aq-evol-xsub { fill:var(--muted); font-size:10px; text-anchor:middle; }
 .aq-evol-pline { fill:none; stroke:#0fae8e; stroke-width:2.5; stroke-linejoin:round; }
 .aq-evol-dot { fill:#0fae8e; stroke:#fff; stroke-width:1.5; }
+/* Encabezado de tarjeta con control y toggle torta/barras */
+.aq-card-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+.aq-card-head h2 { margin:0; }
+.aq-toggle { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.aq-toggle button { border:none; background:#fff; color:var(--muted); font-size:12px; padding:5px 11px; cursor:pointer; }
+.aq-toggle button.on { background:var(--navy); color:#fff; }
+/* Mix como dona */
+.aq-torta { display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+.aq-torta-svg { position:relative; width:140px; height:140px; flex:0 0 auto; }
+.aq-torta-centro { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
+.aq-torta-centro strong { font-family:'Fraunces',serif; font-size:24px; color:var(--navy); line-height:1; }
+.aq-torta-centro span { font-size:11px; color:var(--muted); }
+.aq-torta-leg { flex:1 1 220px; min-width:200px; display:flex; flex-direction:column; }
+.aq-torta-leg-i { display:flex; align-items:center; gap:8px; font-size:13px; padding:5px 0; border-bottom:0.5px solid var(--line); }
+.aq-torta-leg-i:last-child { border-bottom:none; }
+.aq-torta-pt { width:11px; height:11px; border-radius:3px; flex:0 0 auto; }
+.aq-torta-nom { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.aq-torta-pct { font-weight:600; color:var(--navy); }
+.aq-torta-det { color:var(--muted); font-size:12px; white-space:nowrap; }
 .aq-hbars { display:flex; flex-direction:column; gap:11px; }
 .aq-hbar-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:4px; }
 .aq-hbar-name { font-size:13px; color:var(--ink); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
