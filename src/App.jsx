@@ -2478,19 +2478,47 @@ export default function App() {
                 <section className="aq-card">
                   <h2>Evolución (últimos 6 meses)</h2>
                   {(() => {
-                    const maxM = Math.max(1, ...ger.meses.map((m) => m.monto));
+                    const M = ger.meses;
+                    const n = Math.max(1, M.length);
+                    const W = 560, H = 220, padL = 10, padR = 10, padT = 24, padB = 42;
+                    const plotW = W - padL - padR, plotH = H - padT - padB;
+                    const band = plotW / n, barW = Math.min(46, band * 0.5);
+                    const maxM = Math.max(1, ...M.map((m) => m.monto));
+                    const maxC = Math.max(1, ...M.map((m) => m.count));
+                    const cx = (i) => padL + band * i + band / 2;
+                    const yBar = (v) => padT + plotH - (v / maxM) * plotH;
+                    const yLine = (v) => padT + plotH - (v / maxC) * plotH;
+                    const corto = (v) => v >= 1000000
+                      ? "$" + (v / 1e6).toFixed(1).replace(".", ",") + "M"
+                      : v >= 1000 ? "$" + Math.round(v / 1000) + "k" : "$" + v;
+                    const linea = M.map((m, i) => `${cx(i)},${yLine(m.count)}`).join(" ");
                     return (
-                      <div className="aq-bars">
-                        {ger.meses.map((m) => (
-                          <div className="aq-bar-col" key={m.key}>
-                            <div className="aq-bar-val">{m.monto ? CLP(m.monto) : ""}</div>
-                            <div className="aq-bar-track">
-                              <div className="aq-bar-fill" style={{ height: Math.round((m.monto / maxM) * 100) + "%" }} />
-                            </div>
-                            <div className="aq-bar-lab">{m.label}</div>
-                            <div className="aq-bar-sub">{m.count} ped.</div>
-                          </div>
-                        ))}
+                      <div className="aq-evol">
+                        <div className="aq-evol-leg">
+                          <span className="aq-evol-leg-i"><span className="aq-evol-sw bar" /> Ingresos (barras)</span>
+                          <span className="aq-evol-leg-i"><span className="aq-evol-sw line" /> Pedidos (línea)</span>
+                        </div>
+                        <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="aq-evol-svg" role="img"
+                          aria-label="Evolución de ingresos (barras) y pedidos (línea) en los últimos 6 meses.">
+                          <line x1={padL} y1={padT + plotH} x2={W - padR} y2={padT + plotH} className="aq-evol-axis" />
+                          {M.map((m, i) => (
+                            <g key={m.key}>
+                              <rect x={cx(i) - barW / 2} y={yBar(m.monto)} width={barW}
+                                height={Math.max(0, padT + plotH - yBar(m.monto))} rx="4" className="aq-evol-bar">
+                                <title>{m.label}: {CLP(m.monto)} · {m.count} ped.</title>
+                              </rect>
+                              <text x={cx(i)} y={yBar(m.monto) - 6} className="aq-evol-vbar">{m.monto ? corto(m.monto) : ""}</text>
+                              <text x={cx(i)} y={padT + plotH + 17} className="aq-evol-xlab">{m.label}</text>
+                              <text x={cx(i)} y={padT + plotH + 31} className="aq-evol-xsub">{m.count} ped.</text>
+                            </g>
+                          ))}
+                          <polyline points={linea} className="aq-evol-pline" />
+                          {M.map((m, i) => (
+                            <circle key={"p" + m.key} cx={cx(i)} cy={yLine(m.count)} r="3.6" className="aq-evol-dot">
+                              <title>{m.label}: {m.count} pedido(s)</title>
+                            </circle>
+                          ))}
+                        </svg>
                       </div>
                     );
                   })()}
@@ -3948,6 +3976,20 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 .aq-bar-fill { width:100%; background:var(--navy); border-radius:7px 7px 0 0; min-height:3px; transition:height .3s; }
 .aq-bar-lab { font-size:12px; font-weight:600; color:var(--ink); margin-top:6px; }
 .aq-bar-sub { font-size:11px; color:var(--muted); }
+/* Evolución combinada (barras de ingresos + línea de pedidos) */
+.aq-evol-leg { display:flex; gap:18px; font-size:12px; color:var(--muted); margin-bottom:8px; }
+.aq-evol-leg-i { display:flex; align-items:center; gap:6px; }
+.aq-evol-sw { width:12px; height:12px; display:inline-block; }
+.aq-evol-sw.bar { background:var(--navy); border-radius:3px; }
+.aq-evol-sw.line { background:#0fae8e; border-radius:50%; }
+.aq-evol-svg { display:block; width:100%; height:auto; }
+.aq-evol-axis { stroke:var(--line); stroke-width:1; }
+.aq-evol-bar { fill:var(--navy); }
+.aq-evol-vbar { fill:var(--navy); font-size:10px; font-weight:600; text-anchor:middle; }
+.aq-evol-xlab { fill:var(--ink); font-size:11px; font-weight:600; text-anchor:middle; }
+.aq-evol-xsub { fill:var(--muted); font-size:10px; text-anchor:middle; }
+.aq-evol-pline { fill:none; stroke:#0fae8e; stroke-width:2.5; stroke-linejoin:round; }
+.aq-evol-dot { fill:#0fae8e; stroke:#fff; stroke-width:1.5; }
 .aq-hbars { display:flex; flex-direction:column; gap:11px; }
 .aq-hbar-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:4px; }
 .aq-hbar-name { font-size:13px; color:var(--ink); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
