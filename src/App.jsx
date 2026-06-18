@@ -362,6 +362,12 @@ export default function App() {
   }
   const [fechaMin, setFechaMin] = useState(() => fechaManana("09:00"));
   const [fechaMax, setFechaMax] = useState(() => fechaManana("17:00"));
+  // Fecha de entrega: hoy (usada por el perfil distribuidor)
+  function fechaHoy(hora) {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${hora}`;
+  }
   const [observacion, setObservacion] = useState("");
   const [creadoPor, setCreadoPor] = useState("");
   const [nroDte, setNroDte] = useState("");
@@ -1905,6 +1911,25 @@ export default function App() {
   useEffect(() => {
     if (rol === "distribuidor" && distChofer) setCreadoPor(distChofer);
   }, [rol, distChofer]);
+
+  // Distribuidor: valores duros del pedido (no edita el formulario):
+  // 1 línea CP1·Compra, cantidad 1, precio 0, y entrega = hoy.
+  useEffect(() => {
+    if (rol !== "distribuidor" || vista !== "nuevo") return;
+    const cp1 = productos.find((p) => (p.codigo || "").toUpperCase() === "CP1");
+    if (cp1 && items.length === 0) {
+      setItems([{
+        key: crypto.randomUUID(),
+        producto_id: cp1.id,
+        cantidad: 1,
+        precio_unit: 0,
+        precio_editado: true,
+      }]);
+    }
+    setFechaMin(fechaHoy("09:00"));
+    setFechaMax(fechaHoy("17:00"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rol, vista, productos, items.length]);
 
   async function guardarPedido() {
     const err = validar();
@@ -3640,6 +3665,7 @@ export default function App() {
                 )}
 
                 {/* Productos */}
+                {rol !== "distribuidor" && (
                 <section className="aq-card">
                   <div className="aq-row-head">
                     <h2>Productos</h2>
@@ -3685,8 +3711,10 @@ export default function App() {
                     </div>
                   )}
                 </section>
+                )}
 
                 {/* Descuentos */}
+                {rol !== "distribuidor" && (
                 <section className="aq-card">
                   <div className="aq-row-head">
                     <h2>Descuentos</h2>
@@ -3728,8 +3756,10 @@ export default function App() {
                     </div>
                   ))}
                 </section>
+                )}
 
                 {/* Documento y pago */}
+                {rol !== "distribuidor" && (
                 <section className="aq-card">
                   <h2>Documento y pago</h2>
                   <div className="aq-grid">
@@ -3760,8 +3790,10 @@ export default function App() {
                     </label>
                   </div>
                 </section>
+                )}
 
                 {/* Entrega y notas */}
+                {rol !== "distribuidor" && (
                 <section className="aq-card">
                   <h2>Entrega</h2>
                   <div className="aq-grid">
@@ -3792,25 +3824,32 @@ export default function App() {
                     <textarea rows="2" value={observacion} onChange={(e) => setObservacion(e.target.value)} />
                   </label>
                 </section>
+                )}
 
                 {/* Resumen */}
                 <section className="aq-card aq-resumen">
-                  <div className="aq-tot">
-                    <span>Subtotal</span><span>{CLP(subtotal)}</span>
-                  </div>
-                  {totalDesc > 0 && (
-                    <div className="aq-tot aq-tot-desc">
-                      <span>Descuentos</span><span>−{CLP(totalDesc)}</span>
-                    </div>
+                  {rol !== "distribuidor" && (
+                    <>
+                      <div className="aq-tot">
+                        <span>Subtotal</span><span>{CLP(subtotal)}</span>
+                      </div>
+                      {totalDesc > 0 && (
+                        <div className="aq-tot aq-tot-desc">
+                          <span>Descuentos</span><span>−{CLP(totalDesc)}</span>
+                        </div>
+                      )}
+                      <div className="aq-tot aq-tot-total">
+                        <span>Total</span><span>{CLP(montoTotal)}</span>
+                      </div>
+                    </>
                   )}
-                  <div className="aq-tot aq-tot-total">
-                    <span>Total</span><span>{CLP(montoTotal)}</span>
-                  </div>
 
                   {errorValidacion && <p className="aq-hint">{errorValidacion}</p>}
 
                   <button className="aq-btn" disabled={!!errorValidacion || guardando} onClick={guardarPedido}>
-                    {guardando ? "Guardando…" : "Guardar pedido"}
+                    {guardando
+                      ? (rol === "distribuidor" ? "Generando…" : "Guardando…")
+                      : (rol === "distribuidor" ? "Generar Correlativo DT" : "Guardar pedido")}
                   </button>
 
                   {resultado && (
