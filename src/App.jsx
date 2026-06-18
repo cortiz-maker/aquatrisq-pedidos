@@ -719,7 +719,7 @@ export default function App() {
       try {
         // Guías excluidas de todo cálculo de caja (normalizamos quitando guiones/espacios).
         const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012"]);
+        const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00013", "AQ00006"]);
         const mesKey = hoyPeriodo();
         const guiasMes = [...new Set(
           pedidos
