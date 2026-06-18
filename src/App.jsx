@@ -6,7 +6,7 @@ import { PUENTE_URL, SUPABASE_URL } from "./config.js";
 const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar", "Pedido Pagado"];
 const TIPOS_DOC = ["boleta", "factura", "sin_documento"];
 const MARCAS = ["TrisQ"];
-const CHOFERES = ["Felipe Hernandez", "Italo Loiza"];
+const CHOFERES = ["Felipe Hernandez", "Italo Loiza", "César Ortiz"];
 // Origen de un descuento manual en pedido_descuentos (texto libre, pero acotamos).
 const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 
@@ -382,8 +382,12 @@ export default function App() {
   // ── Autenticación (Supabase Auth) ──────────────────────────
   const [authReady, setAuthReady] = useState(false);
   const [session, setSession] = useState(null);
-  const [rol, setRol] = useState(null);           // admin | operador | gerencial
+  const [rol, setRol] = useState(null);           // admin | operador | gerencial | distribuidor
   const [perfilNombre, setPerfilNombre] = useState("");
+  // Datos duros del distribuidor (de su fila en `perfiles`): nombre de chofer e
+  // identificador_dt de su propio domicilio (ej. "215-1"). Quedan fijos al login.
+  const [distChofer, setDistChofer] = useState("");
+  const [distIdentDt, setDistIdentDt] = useState("");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPass, setLoginPass] = useState("");
   const [loginError, setLoginError] = useState("");
@@ -573,9 +577,9 @@ export default function App() {
     }
   }
   useEffect(() => {
-    if (vista === "inicio") cargarDashboard(periodo);
+    if (vista === "inicio" && rol !== "distribuidor" && rol !== "gerencial") cargarDashboard(periodo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vista, periodo, credsListas, session]);
+  }, [vista, periodo, credsListas, session, rol]);
 
   // ── Carga del dashboard gerencial (últimos 6 meses) ────────
   async function cargarGerencial() {
@@ -821,16 +825,18 @@ export default function App() {
     if (!credsListas) { setAuthReady(true); return; }
     let activo = true;
     async function cargarPerfil(sess) {
-      if (!sess) { setRol(null); setPerfilNombre(""); return; }
+      if (!sess) { setRol(null); setPerfilNombre(""); setDistChofer(""); setDistIdentDt(""); return; }
       const { data } = await supabase
         .from("perfiles")
-        .select("rol, nombre, activo")
+        .select("rol, nombre, activo, chofer_nombre, identificador_dt")
         .eq("id", sess.user.id)
         .maybeSingle();
       if (!activo) return;
       if (data && data.activo) {
         setRol(data.rol);
         setPerfilNombre(data.nombre || sess.user.email);
+        setDistChofer(data.chofer_nombre || "");
+        setDistIdentDt(data.identificador_dt || "");
         setVista("inicio");
       } else {
         setRol(null);
@@ -875,6 +881,10 @@ export default function App() {
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
     if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas")) {
+      setVista("inicio");
+    }
+    // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
+    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -1876,6 +1886,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vista, credsListas, rol]);
 
+  // Distribuidor: al entrar a "Nuevo pedido", fija su propio cliente/domicilio
+  // (resuelto por su identificador_dt) y lo deja no editable. Sus correlativos
+  // siempre salen con SUS datos duros como contacto destino en DispatchTrack.
+  useEffect(() => {
+    if (rol !== "distribuidor" || vista !== "nuevo" || !credsListas) return;
+    if (cliente) return; // ya fijado
+    const ident = (distIdentDt || "").trim().toLowerCase();
+    if (!ident) return;
+    const dom = todosDomicilios.find((d) => (d.identificador_dt || "").toLowerCase() === ident);
+    if (!dom) return;
+    const c = clientes.find((x) => x.id === dom.cliente_id);
+    if (c) elegirCliente(c, dom.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rol, vista, credsListas, distIdentDt, todosDomicilios, clientes, cliente]);
+
+  // Distribuidor: su nombre de chofer es SIEMPRE el autor del pedido.
+  useEffect(() => {
+    if (rol === "distribuidor" && distChofer) setCreadoPor(distChofer);
+  }, [rol, distChofer]);
+
   async function guardarPedido() {
     const err = validar();
     if (err) {
@@ -1900,10 +1930,10 @@ export default function App() {
         tipo_documento: tipoDocumento,
         rut_factura: tipoDocumento === "factura" ? rutFactura.trim() : null,
         monto_total: montoTotal,
-        origen: "formulario",
+        origen: rol === "distribuidor" ? "distribuidor" : "formulario",
         observacion: observacion.trim() || null,
         estado_sync: "pendiente",
-        creado_por: creadoPor.trim() || null,
+        creado_por: (rol === "distribuidor" ? (distChofer || creadoPor) : creadoPor).trim() || null,
         nro_jumpseller: nroDte.trim() || null,
         plan_contratado_id: consumePlan && planPrepago ? planPrepago.id : null,
         consume_plan: consumePlan && !!planPrepago,
@@ -2260,10 +2290,10 @@ export default function App() {
             {rol !== "gerencial" && (
               <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
             )}
-            {rol !== "gerencial" && (
+            {rol !== "gerencial" && rol !== "distribuidor" && (
               <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>{rol === "admin" ? "Mantenedores" : "Clientes"}</button>
             )}
-            {rol !== "gerencial" && (
+            {rol !== "gerencial" && rol !== "distribuidor" && (
               <button className={vista === "cobranzas" ? "on" : ""} onClick={abrirCobranzas}>Cobranzas</button>
             )}
             <span className="aq-user" title={rol}>
@@ -2285,8 +2315,21 @@ export default function App() {
         {credsListas && cargando && <div className="aq-card">Cargando catálogos…</div>}
         {errorCarga && <div className="aq-card aq-error">No se pudieron cargar los datos: {errorCarga}</div>}
 
+        {/* ===================== INICIO DISTRIBUIDOR ===================== */}
+        {credsListas && vista === "inicio" && rol === "distribuidor" && (
+          <section className="aq-card">
+            <h2>Hola, {distChofer || perfilNombre}</h2>
+            <p className="aq-muted">
+              Genera un nuevo correlativo con tus datos ({distIdentDt || "sin identificador"}).
+              Úsalo como referencia para gestionar la entrega en DispatchTrack: al asignarlo allá,
+              quedará bajo tus credenciales para cierre como <strong>Entregado/Compra</strong> o <strong>Entregado/Compra Proveedor</strong>.
+            </p>
+            <button className="aq-btn" onClick={() => setVista("nuevo")}>+ Nuevo correlativo</button>
+          </section>
+        )}
+
         {/* ===================== INICIO / DASHBOARD ===================== */}
-        {credsListas && vista === "inicio" && rol !== "gerencial" && (
+        {credsListas && vista === "inicio" && rol !== "gerencial" && rol !== "distribuidor" && (
           <>
             <section className="aq-card aq-period">
               <button className="aq-per-nav" onClick={() => cambiarPeriodo(-1)} aria-label="Mes anterior">‹</button>
@@ -3478,10 +3521,15 @@ export default function App() {
                     <div>
                       <strong>{cliente.nombre}</strong>
                       <span>{cliente.rut || cliente.codigo_cliente}{cliente.es_empresa ? " · empresa" : ""}</span>
+                      {rol === "distribuidor" && (
+                        <span className="aq-mini">Datos fijos del distribuidor · {distChofer}{distIdentDt ? " · " + distIdentDt : ""}</span>
+                      )}
                     </div>
-                    <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); setAvisoDeuda(null); setSemaforoCli(null); }}>
-                      Cambiar
-                    </button>
+                    {rol !== "distribuidor" && (
+                      <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); setAvisoDeuda(null); setSemaforoCli(null); }}>
+                        Cambiar
+                      </button>
+                    )}
                   </div>
                   {!emailValido(cliente.email) && (
                     <div className="aq-email-alert">
@@ -3727,9 +3775,11 @@ export default function App() {
                     </label>
                     <label>
                       Chofer
-                      <select value={creadoPor} onChange={(e) => setCreadoPor(e.target.value)}>
+                      <select value={creadoPor} onChange={(e) => setCreadoPor(e.target.value)} disabled={rol === "distribuidor"}>
                         <option value="">— Sin asignar —</option>
-                        {CHOFERES.map((c) => <option key={c} value={c}>{c}</option>)}
+                        {(rol === "distribuidor" && distChofer && !CHOFERES.includes(distChofer)
+                          ? [distChofer, ...CHOFERES]
+                          : CHOFERES).map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
                     </label>
                     <label>
