@@ -333,6 +333,14 @@ const CHOFER_OVERRIDE = { "AQ00043": "Felipe Hernandez" };
 // Compras Proveedor mal marcadas "Pagado" en DispatchTrack y que están PENDIENTES.
 const FORZAR_PENDIENTE = new Set(["AQ00013"]);
 
+// Costo base de la recarga según litros: 20L = $600, 10/12L = $300, otro = 0.
+function costoUnitRecarga(it) {
+  const s = `${it.nombre || ""} ${it.codigo || ""}`.toLowerCase();
+  if (/(^|[^\d])20([^\d]|$)/.test(s)) return 600;
+  if (/(^|[^\d])1[02]([^\d]|$)/.test(s)) return 300; // 10 o 12 litros
+  return 0;
+}
+
 // ── Resumen ejecutivo de caja (Excel, una hoja por chofer) ──────────
 // Carga SheetJS desde CDN bajo demanda: NO requiere tocar package.json ni
 // instalar nada en Vercel. Arma un libro con: Resumen general · una hoja por
@@ -439,6 +447,111 @@ async function descargarResumenEjecutivo(ger) {
   XLSX.writeFile(wb, `Resumen_ejecutivo_caja_${hoy.toISOString().slice(0, 10)}.xlsx`);
 }
 
+// ── Caja del mes (Efectivo a Rendir + Pendiente proveedor) para un mesKey ──
+// Reutilizable por el panel gerencial y por el dashboard admin/operador.
+async function calcularCajaMes(mesKey) {
+  const efectivo = {
+    recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
+    compras: [], rendiciones: [], compraProvPagadoDet: [], recaudaciones: [], choferes: [],
+  };
+  let provPendiente = { total: 0, count: 0, proveedores: [] };
+  let provResumen = { generado: 0, pagado: 0, pendiente: 0 };
+  try {
+    const { data: peds } = await supabase
+      .from("pedidos").select("created_at, numero_guia").gte("created_at", mesKey + "-01");
+    const guiasMes = [...new Set(
+      (peds || [])
+        .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
+        .map((p) => p.numero_guia)
+    )];
+    let entsMes = [];
+    for (let i = 0; i < guiasMes.length; i += 200) {
+      const lote = guiasMes.slice(i, i + 200);
+      if (!lote.length) break;
+      const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+      entsMes = entsMes.concat(data || []);
+    }
+    const porGuia = {};
+    entsMes.forEach((e) => {
+      if (!e.guide) return;
+      const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+      const prev = porGuia[e.guide];
+      const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+      if (!prev || t >= tp) porGuia[e.guide] = e;
+    });
+    const pagadosSet = new Set();
+    try {
+      const { data: pgs } = await supabase
+        .from("pagos_proveedor").select("numero_guia, pagado")
+        .eq("mes", mesKey).eq("pagado", true);
+      (pgs || []).forEach((p) => pagadosSet.add(normGuia(p.numero_guia)));
+    } catch { /* tabla aún no creada */ }
+    let generadoProv = 0, pagadoProvTotal = 0;
+    const chofMap = {};
+    const slotChofer = (nombre) => {
+      if (!chofMap[nombre]) chofMap[nombre] = { chofer: nombre, recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0 };
+      return chofMap[nombre];
+    };
+    Object.values(porGuia).forEach((e) => {
+      const gN = normGuia(e.guide);
+      if (EXCLUIR_GUIAS.has(gN)) return;
+      const chofer = CHOFER_OVERRIDE[gN] || (e.chofer || "").trim() || "Sin chofer";
+      const sc = slotChofer(chofer);
+      if (esEfectivoRecaudado(e)) {
+        const m = montoEfectivoRecaudado(e);
+        efectivo.recaudacion += m; sc.recaudacion += m;
+        efectivo.recaudaciones.push({ guide: e.guide, monto: m, chofer });
+      }
+      if (esCompraNoRendicion(e)) {
+        const m = montoCompra(e);
+        efectivo.comprasNoRend += m; sc.comprasNoRend += m;
+        efectivo.compras.push({ guide: e.guide, monto: m, tipo: tipoCompra(e) || "Compra", chofer });
+      }
+      if (esRendicionEfectivo(e)) {
+        const m = montoRendicion(e);
+        efectivo.rendicion += m; sc.rendicion += m;
+        efectivo.rendiciones.push({ guide: e.guide, monto: m, chofer });
+      }
+      const esProv = esCompraProveedor(e);
+      if (esProv) {
+        const m = montoCompraProveedor(e);
+        generadoProv += m;
+        const pagadoApp = pagadosSet.has(gN);
+        const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
+        const pagada = pagadoApp || pagadoDT;
+        if (pagada) pagadoProvTotal += m;
+        if (pagadoDT) {
+          efectivo.compraProvPagado += m; sc.compraProvPagado += m;
+          efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
+        }
+        if (!pagada) {
+          provPendiente.total += m;
+          provPendiente.count += 1;
+          const nom = nombreProveedor(e);
+          const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
+          if (slot) {
+            slot.monto += m; slot.count += 1; slot.guias.push(e.guide);
+            if (!slot.choferes.includes(chofer)) slot.choferes.push(chofer);
+            slot.facturas.push({ guide: e.guide, monto: m, chofer });
+          } else {
+            provPendiente.proveedores.push({
+              proveedor: nom, monto: m, count: 1, guias: [e.guide],
+              choferes: [chofer], facturas: [{ guide: e.guide, monto: m, chofer }],
+            });
+          }
+        }
+      }
+    });
+    efectivo.aRendir = efectivo.recaudacion - efectivo.comprasNoRend - efectivo.compraProvPagado - efectivo.rendicion;
+    efectivo.choferes = Object.values(chofMap).map((c) => ({
+      ...c, aRendir: c.recaudacion - c.comprasNoRend - c.compraProvPagado - c.rendicion,
+    })).sort((a, b) => b.aRendir - a.aRendir);
+    provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
+    provResumen = { generado: generadoProv, pagado: pagadoProvTotal, pendiente: provPendiente.total };
+  } catch { /* si falla, caja en cero */ }
+  return { efectivo, provPendiente, provResumen };
+}
+
 export default function App() {
   const credsListas =
     SUPABASE_URL && !SUPABASE_URL.startsWith("PEGA_");
@@ -530,6 +643,13 @@ export default function App() {
   const [pagoFoto, setPagoFoto] = useState(null);           // File del respaldo bancario
   const [subiendoPago, setSubiendoPago] = useState(false);
   const [errorPago, setErrorPago] = useState("");
+
+  // ── Caja y costo del mes para el dashboard admin/operador ──
+  const [cajaMes, setCajaMes] = useState(null);     // {efectivo, provPendiente, provResumen}
+  const [costoMes, setCostoMes] = useState(null);   // costo real de recargas del período
+  const [popCosto, setPopCosto] = useState(false);  // pop-up de detalle de costo
+  // Fuente de la caja para los pop-ups: gerencial usa su panel; admin/operador el dashboard.
+  const cajaView = rol === "gerencial" ? ger : cajaMes;
 
   // Agregar email faltante al cliente desde el formulario
   const [emailNuevo, setEmailNuevo] = useState("");
@@ -699,6 +819,45 @@ export default function App() {
       } else {
         setEntregasMap({});
       }
+
+      // Caja del mes (Efectivo a Rendir + Pendiente proveedor) del período.
+      try { setCajaMes(await calcularCajaMes(per)); } catch { setCajaMes(null); }
+
+      // Costo real de recargas del período: 20L=$600, 10/12L=$300 × cantidad.
+      try {
+        const ids = peds.map((p) => p.id);
+        let items = [];
+        for (let i = 0; i < ids.length; i += 200) {
+          const lote = ids.slice(i, i + 200);
+          if (!lote.length) break;
+          const { data: it } = await supabase
+            .from("pedido_items").select("nombre, codigo, cantidad, pedido_id").in("pedido_id", lote);
+          items = items.concat(it || []);
+        }
+        const diaDe = {};
+        peds.forEach((p) => { diaDe[p.id] = (p.created_at || "").slice(0, 10); });
+        const dias = {}, prods = {};
+        let total = 0;
+        items.forEach((it) => {
+          const cu = costoUnitRecarga(it);
+          if (!cu) return;
+          const qty = Number(it.cantidad) || 0;
+          const costo = qty * cu;
+          total += costo;
+          const dia = diaDe[it.pedido_id] || "—";
+          if (!dias[dia]) dias[dia] = { dia, total: 0, items: [] };
+          dias[dia].total += costo;
+          dias[dia].items.push({ nombre: it.nombre || it.codigo || "—", cantidad: qty, costoUnit: cu, costo });
+          const pn = it.nombre || it.codigo || "—";
+          if (!prods[pn]) prods[pn] = { nombre: pn, cantidad: 0, costo: 0, costoUnit: cu };
+          prods[pn].cantidad += qty; prods[pn].costo += costo;
+        });
+        setCostoMes({
+          total,
+          porDia: Object.values(dias).sort((a, b) => a.dia.localeCompare(b.dia)),
+          porProducto: Object.values(prods).sort((a, b) => b.costo - a.costo),
+        });
+      } catch { setCostoMes(null); }
     } catch (e) {
       setErrorDash(e.message || "No se pudo cargar el período.");
       setPedidosMes([]);
@@ -833,117 +992,7 @@ export default function App() {
       } catch { /* si falla, dejamos venc30 en cero */ }
 
       // ── Caja del mes: Efectivo a Rendir y Pendiente de pago a proveedor ──
-      // Se calcula sobre las entregas (dt_entregas) de los pedidos del MES ACTUAL,
-      // para ser consistente con los KPIs "del mes" de arriba.
-      let efectivo = {
-        recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
-        compras: [], rendiciones: [], compraProvPagadoDet: [], recaudaciones: [], choferes: [],
-      };
-      let provPendiente = { total: 0, count: 0, proveedores: [] };
-      let provResumen = { generado: 0, pagado: 0, pendiente: 0 };
-      try {
-        const mesKey = hoyPeriodo();
-        const guiasMes = [...new Set(
-          pedidos
-            .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
-            .map((p) => p.numero_guia)
-        )];
-        let entsMes = [];
-        for (let i = 0; i < guiasMes.length; i += 200) {
-          const lote = guiasMes.slice(i, i + 200);
-          if (!lote.length) break;
-          const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
-          entsMes = entsMes.concat(data || []);
-        }
-        // Nos quedamos con la entrega más reciente por guía (por si hubo reintentos).
-        const porGuia = {};
-        entsMes.forEach((e) => {
-          if (!e.guide) return;
-          const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
-          const prev = porGuia[e.guide];
-          const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
-          if (!prev || t >= tp) porGuia[e.guide] = e;
-        });
-        // Pagos ya registrados en la app = fuente de verdad del "pagado".
-        const pagadosSet = new Set();
-        try {
-          const { data: pgs } = await supabase
-            .from("pagos_proveedor")
-            .select("numero_guia, pagado")
-            .eq("mes", mesKey).eq("pagado", true);
-          (pgs || []).forEach((p) => pagadosSet.add(normGuia(p.numero_guia)));
-        } catch { /* tabla aún no creada: se ignora */ }
-        let generadoProv = 0, pagadoProvTotal = 0;
-        // Acumulador por chofer para el efectivo a rendir.
-        const chofMap = {};
-        const slotChofer = (nombre) => {
-          if (!chofMap[nombre]) chofMap[nombre] = { chofer: nombre, recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0 };
-          return chofMap[nombre];
-        };
-        Object.values(porGuia).forEach((e) => {
-          const gN = normGuia(e.guide);
-          if (EXCLUIR_GUIAS.has(gN)) return; // guía excluida
-          const chofer = CHOFER_OVERRIDE[gN] || (e.chofer || "").trim() || "Sin chofer";
-          const sc = slotChofer(chofer);
-          if (esEfectivoRecaudado(e)) {
-            const m = montoEfectivoRecaudado(e);
-            efectivo.recaudacion += m; sc.recaudacion += m;
-            efectivo.recaudaciones.push({ guide: e.guide, monto: m, chofer });
-          }
-          if (esCompraNoRendicion(e)) {
-            const m = montoCompra(e);
-            efectivo.comprasNoRend += m; sc.comprasNoRend += m;
-            efectivo.compras.push({ guide: e.guide, monto: m, tipo: tipoCompra(e) || "Compra", chofer });
-          }
-          if (esRendicionEfectivo(e)) {
-            const m = montoRendicion(e);
-            efectivo.rendicion += m; sc.rendicion += m;
-            efectivo.rendiciones.push({ guide: e.guide, monto: m, chofer });
-          }
-          // Compra Proveedor: una sola clasificación por registro.
-          const esProv = esCompraProveedor(e);
-          if (esProv) {
-            const m = montoCompraProveedor(e);
-            generadoProv += m;
-            const pagadoApp = pagadosSet.has(gN);
-            const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
-            const pagada = pagadoApp || pagadoDT;
-            if (pagada) pagadoProvTotal += m;
-            // Solo el cierre en efectivo del chofer (DispatchTrack) reduce el
-            // efectivo a rendir. Un pago marcado en la app es transferencia.
-            if (pagadoDT) {
-              efectivo.compraProvPagado += m; sc.compraProvPagado += m;
-              efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
-            }
-            if (!pagada) {
-              provPendiente.total += m;
-              provPendiente.count += 1;
-              const nom = nombreProveedor(e);
-              const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
-              if (slot) {
-                slot.monto += m; slot.count += 1; slot.guias.push(e.guide);
-                if (!slot.choferes.includes(chofer)) slot.choferes.push(chofer);
-                slot.facturas.push({ guide: e.guide, monto: m, chofer });
-              } else {
-                provPendiente.proveedores.push({
-                  proveedor: nom, monto: m, count: 1, guias: [e.guide],
-                  choferes: [chofer], facturas: [{ guide: e.guide, monto: m, chofer }],
-                });
-              }
-            }
-          }
-        });
-        // Efectivo a Rendir = recaudación − compras operativas (≠ rendición)
-        // − compra proveedor PAGADA − rendición de efectivo ya entregada.
-        efectivo.aRendir = efectivo.recaudacion - efectivo.comprasNoRend - efectivo.compraProvPagado - efectivo.rendicion;
-        // Subtotal a rendir por chofer.
-        efectivo.choferes = Object.values(chofMap).map((c) => ({
-          ...c,
-          aRendir: c.recaudacion - c.comprasNoRend - c.compraProvPagado - c.rendicion,
-        })).sort((a, b) => b.aRendir - a.aRendir);
-        provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
-        provResumen = { generado: generadoProv, pagado: pagadoProvTotal, pendiente: provPendiente.total };
-      } catch { /* si falla, dejamos la caja en cero */ }
+      const { efectivo, provPendiente, provResumen } = await calcularCajaMes(hoyPeriodo());
 
       setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30, efectivo, provPendiente, provResumen });
     } catch (e) {
@@ -2680,20 +2729,33 @@ export default function App() {
                     <strong>{CLP(dash.deudaMonto)}</strong>
                     <em className="aq-money-sub">{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados} · histórico en Cobranzas</em>
                   </button>
-                  <div className="aq-money-card proveedor">
-                    <span>Compra Proveedor</span>
-                    <strong>{CLP(dash.compraProveedor)}</strong>
-                  </div>
-                  <div className="aq-money-card rendicion">
-                    <span>Rendición Efectivo</span>
-                    <strong>{CLP(dash.rendicionEfectivo)}</strong>
-                  </div>
-                  {rol === "admin" && (
-                    <div className="aq-money-card efectivo">
-                      <span>Efectivo Recaudado</span>
-                      <strong>{CLP(dash.efectivoRecaudado)}</strong>
-                    </div>
-                  )}
+                  <button
+                    className={"aq-money-card proveedor" + ((cajaMes?.efectivo?.aRendir || 0) < 0 ? " neg" : "")}
+                    onClick={() => setPopEfectivo(true)}
+                    title="Ver desglose"
+                  >
+                    <span>Efectivo libre / a Rendir 🔎</span>
+                    <strong>{CLP(cajaMes?.efectivo?.aRendir || 0)}</strong>
+                    <em className="aq-money-sub">Recaudado {CLP(cajaMes?.efectivo?.recaudacion || 0)} − compras − prov. pagado − rendición</em>
+                  </button>
+                  <button
+                    className="aq-money-card rendicion"
+                    onClick={() => setPopProveedor(true)}
+                    title="Ver desglose por proveedor"
+                  >
+                    <span>Pendiente pago proveedor 🔎</span>
+                    <strong>{CLP(cajaMes?.provPendiente?.total || 0)}</strong>
+                    <em className="aq-money-sub">{cajaMes?.provPendiente?.count || 0} factura(s) por pagar</em>
+                  </button>
+                  <button
+                    className="aq-money-card efectivo"
+                    onClick={() => setPopCosto(true)}
+                    title="Ver detalle por día"
+                  >
+                    <span>Costo recargas del mes 🔎</span>
+                    <strong>{CLP(costoMes?.total || 0)}</strong>
+                    <em className="aq-money-sub">20L ${600} · 10/12L ${300} × cantidad</em>
+                  </button>
                 </div>
 
                 <section className="aq-card">
@@ -3016,8 +3078,15 @@ export default function App() {
                   Datos de los últimos 6 meses. Cumplimiento de entrega y cobranza por antigüedad se sumarán al conectar el retorno de DispatchTrack.
                 </p>
 
+              </>
+            ) : (
+              <div className="aq-card aq-muted">Sin datos para mostrar todavía.</div>
+            )}
+          </>
+        )}
+
                 {/* ── Pop-up: Efectivo libre / a Rendir ── */}
-                {popEfectivo && ger.efectivo && (
+                {popEfectivo && cajaView?.efectivo && (
                   <div className="aq-modal-ov" onClick={() => setPopEfectivo(false)}>
                     <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
                       <div className="aq-modal-head">
@@ -3031,7 +3100,7 @@ export default function App() {
                       <div style={{ margin: "0 0 12px" }}>
                         <button
                           className="aq-btn-sec"
-                          onClick={() => descargarResumenEjecutivo(ger).catch(() => alert("No se pudo generar el Excel. Reintenta con conexión."))}
+                          onClick={() => descargarResumenEjecutivo(cajaView).catch(() => alert("No se pudo generar el Excel. Reintenta con conexión."))}
                         >
                           ⬇ Descargar resumen ejecutivo (Excel · una hoja por chofer)
                         </button>
@@ -3040,30 +3109,30 @@ export default function App() {
                       <div className="aq-desglose">
                         <div className="aq-desglose-row">
                           <span>Recaudación de efectivo</span>
-                          <strong className="pos">{CLP(ger.efectivo.recaudacion)}</strong>
+                          <strong className="pos">{CLP(cajaView.efectivo.recaudacion)}</strong>
                         </div>
                         <div className="aq-desglose-row">
                           <span>(−) Compras (Tipo ≠ Rendición Efectivo)</span>
-                          <strong className="neg">−{CLP(ger.efectivo.comprasNoRend)}</strong>
+                          <strong className="neg">−{CLP(cajaView.efectivo.comprasNoRend)}</strong>
                         </div>
                         <div className="aq-desglose-row">
                           <span>(−) Compra Proveedor pagada</span>
-                          <strong className="neg">−{CLP(ger.efectivo.compraProvPagado)}</strong>
+                          <strong className="neg">−{CLP(cajaView.efectivo.compraProvPagado)}</strong>
                         </div>
                         <div className="aq-desglose-row">
                           <span>(−) Rendición de efectivo entregada</span>
-                          <strong className="neg">−{CLP(ger.efectivo.rendicion)}</strong>
+                          <strong className="neg">−{CLP(cajaView.efectivo.rendicion)}</strong>
                         </div>
                         <div className="aq-desglose-row total">
                           <span>= Efectivo a Rendir</span>
-                          <strong>{CLP(ger.efectivo.aRendir)}</strong>
+                          <strong>{CLP(cajaView.efectivo.aRendir)}</strong>
                         </div>
                       </div>
 
-                      {ger.efectivo.choferes && ger.efectivo.choferes.length > 0 && (
+                      {cajaView.efectivo.choferes && cajaView.efectivo.choferes.length > 0 && (
                         <div className="aq-modal-edit">
                           <strong>A rendir por chofer</strong>
-                          {ger.efectivo.choferes.map((c, i) => (
+                          {cajaView.efectivo.choferes.map((c, i) => (
                             <div className="aq-chofer-box" key={"ch" + i}>
                               <div className="aq-det-line aq-chofer-cab">
                                 <span>👤 {c.chofer}</span>
@@ -3077,10 +3146,10 @@ export default function App() {
                         </div>
                       )}
 
-                      {ger.efectivo.recaudaciones && ger.efectivo.recaudaciones.length > 0 && (
+                      {cajaView.efectivo.recaudaciones && cajaView.efectivo.recaudaciones.length > 0 && (
                         <div className="aq-modal-edit">
                           <strong>Recaudación de efectivo</strong>
-                          {ger.efectivo.recaudaciones.map((c, i) => (
+                          {cajaView.efectivo.recaudaciones.map((c, i) => (
                             <div className="aq-det-line" key={"rec" + i}>
                               <span>{c.guide ? "Guía " + c.guide : "Recaudación"}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
@@ -3089,10 +3158,10 @@ export default function App() {
                         </div>
                       )}
 
-                      {ger.efectivo.compras.length > 0 && (
+                      {cajaView.efectivo.compras.length > 0 && (
                         <div className="aq-modal-edit">
                           <strong>Compras (≠ Rendición Efectivo)</strong>
-                          {ger.efectivo.compras.map((c, i) => (
+                          {cajaView.efectivo.compras.map((c, i) => (
                             <div className="aq-det-line" key={"c" + i}>
                               <span>{c.tipo}{c.guide ? " · guía " + c.guide : ""}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
@@ -3100,10 +3169,10 @@ export default function App() {
                           ))}
                         </div>
                       )}
-                      {ger.efectivo.compraProvPagadoDet.length > 0 && (
+                      {cajaView.efectivo.compraProvPagadoDet.length > 0 && (
                         <div className="aq-modal-edit">
                           <strong>Compra Proveedor pagada</strong>
-                          {ger.efectivo.compraProvPagadoDet.map((c, i) => (
+                          {cajaView.efectivo.compraProvPagadoDet.map((c, i) => (
                             <div className="aq-det-line" key={"p" + i}>
                               <span>{c.proveedor}{c.guide ? " · guía " + c.guide : ""}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
@@ -3111,10 +3180,10 @@ export default function App() {
                           ))}
                         </div>
                       )}
-                      {ger.efectivo.rendiciones.length > 0 && (
+                      {cajaView.efectivo.rendiciones.length > 0 && (
                         <div className="aq-modal-edit">
                           <strong>Rendiciones de efectivo</strong>
-                          {ger.efectivo.rendiciones.map((c, i) => (
+                          {cajaView.efectivo.rendiciones.map((c, i) => (
                             <div className="aq-det-line" key={"r" + i}>
                               <span>{c.guide ? "Guía " + c.guide : "Rendición"}<em className="aq-det-chofer">{c.chofer}</em></span>
                               <span>{CLP(c.monto)}</span>
@@ -3127,7 +3196,7 @@ export default function App() {
                 )}
 
                 {/* ── Pop-up: Pendiente de pago a proveedor ── */}
-                {popProveedor && ger.provPendiente && (
+                {popProveedor && cajaView?.provPendiente && (
                   <div className="aq-modal-ov" onClick={() => setPopProveedor(false)}>
                     <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
                       <div className="aq-modal-head">
@@ -3141,33 +3210,33 @@ export default function App() {
                       <div className="aq-desglose">
                         <div className="aq-desglose-row total">
                           <span>Total por pagar</span>
-                          <strong>{CLP(ger.provPendiente.total)}</strong>
+                          <strong>{CLP(cajaView.provPendiente.total)}</strong>
                         </div>
                       </div>
 
-                      {ger.provResumen && (
+                      {cajaView.provResumen && (
                         <div className="aq-desglose" style={{ marginTop: 8 }}>
                           <div className="aq-desglose-row">
                             <span>Generado en el mes</span>
-                            <strong>{CLP(ger.provResumen.generado)}</strong>
+                            <strong>{CLP(cajaView.provResumen.generado)}</strong>
                           </div>
                           <div className="aq-desglose-row">
                             <span>Pagado</span>
-                            <strong className="pos">{CLP(ger.provResumen.pagado)}</strong>
+                            <strong className="pos">{CLP(cajaView.provResumen.pagado)}</strong>
                           </div>
                           <div className="aq-desglose-row total">
                             <span>Pendiente</span>
-                            <strong className="neg">{CLP(ger.provResumen.pendiente)}</strong>
+                            <strong className="neg">{CLP(cajaView.provResumen.pendiente)}</strong>
                           </div>
                         </div>
                       )}
 
-                      {ger.provPendiente.proveedores.length === 0 ? (
+                      {cajaView.provPendiente.proveedores.length === 0 ? (
                         <p className="aq-muted">Sin facturas pendientes en el mes.</p>
                       ) : (
                         <div className="aq-modal-edit">
                           <strong>Desglose por proveedor</strong>
-                          {ger.provPendiente.proveedores.map((p, i) => (
+                          {cajaView.provPendiente.proveedores.map((p, i) => (
                             <div className="aq-prov-grupo" key={"pp" + i}>
                               <div className="aq-det-line aq-prov-cab">
                                 <span>{p.proveedor} · {p.count} fact.<em className="aq-det-chofer">{p.choferes.join(", ")}</em></span>
@@ -3186,11 +3255,61 @@ export default function App() {
                     </div>
                   </div>
                 )}
-              </>
-            ) : (
-              <div className="aq-card aq-muted">Sin datos para mostrar todavía.</div>
-            )}
-          </>
+
+        {/* ── Pop-up: Costo de recargas del mes (detalle por día contraíble) ── */}
+        {popCosto && (
+          <div className="aq-modal-ov" onClick={() => setPopCosto(false)}>
+            <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="aq-modal-head">
+                <div>
+                  <strong>Costo recargas del mes</strong>
+                  <span className="aq-muted">Cantidad × costo base (20L $600 · 10/12L $300)</span>
+                </div>
+                <button className="aq-link" onClick={() => setPopCosto(false)}>Cerrar ✕</button>
+              </div>
+
+              <div className="aq-desglose">
+                <div className="aq-desglose-row total">
+                  <span>Costo total</span>
+                  <strong>{CLP(costoMes?.total || 0)}</strong>
+                </div>
+              </div>
+
+              {costoMes && costoMes.porProducto.length > 0 && (
+                <div className="aq-modal-edit">
+                  <strong>Por producto</strong>
+                  {costoMes.porProducto.map((p, i) => (
+                    <div className="aq-det-line" key={"cp" + i}>
+                      <span>{p.nombre}<em className="aq-det-chofer">{p.cantidad} u · ${p.costoUnit} c/u</em></span>
+                      <span>{CLP(p.costo)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {costoMes && costoMes.porDia.length > 0 ? (
+                <div className="aq-modal-edit">
+                  <strong>Detalle por día</strong>
+                  {costoMes.porDia.map((d, i) => (
+                    <details key={"cd" + i}>
+                      <summary className="aq-det-line aq-prov-cab" style={{ cursor: "pointer", listStyle: "revert" }}>
+                        <span>{d.dia}</span>
+                        <span>{CLP(d.total)}</span>
+                      </summary>
+                      {d.items.map((it, j) => (
+                        <div className="aq-det-line aq-prov-fact" key={"cdi" + i + "_" + j}>
+                          <span>{it.nombre}<em className="aq-det-chofer">{it.cantidad} u · ${it.costoUnit} c/u</em></span>
+                          <span>{CLP(it.costo)}</span>
+                        </div>
+                      ))}
+                    </details>
+                  ))}
+                </div>
+              ) : (
+                <p className="aq-muted">Sin recargas valorizadas en el período.</p>
+              )}
+            </div>
+          </div>
         )}
 
         {/* ===================== PAGOS A PROVEEDOR (admin/operador) ===================== */}
