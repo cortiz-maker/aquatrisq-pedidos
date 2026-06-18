@@ -324,6 +324,15 @@ function nombreProveedor(entrega) {
   return a && a.val ? String(a.val).trim() : "Proveedor sin nombre";
 }
 
+// ── Reglas de caja compartidas (panel gerencial + mantenedor de deudas) ──
+const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+// Guías excluidas de todo cálculo de caja.
+const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00006"]);
+// Chofer real cuando DispatchTrack dejó el campo vacío. Clave = guía sin guiones.
+const CHOFER_OVERRIDE = { "AQ00043": "Felipe Hernandez" };
+// Compras Proveedor mal marcadas "Pagado" en DispatchTrack y que están PENDIENTES.
+const FORZAR_PENDIENTE = new Set(["AQ00013"]);
+
 // ── Resumen ejecutivo de caja (Excel, una hoja por chofer) ──────────
 // Carga SheetJS desde CDN bajo demanda: NO requiere tocar package.json ni
 // instalar nada en Vercel. Arma un libro con: Resumen general · una hoja por
@@ -512,6 +521,15 @@ export default function App() {
   const [popEfectivo, setPopEfectivo] = useState(false);   // pop-up "Efectivo a Rendir"
   const [popProveedor, setPopProveedor] = useState(false); // pop-up "Pendiente pago proveedor"
   const [mixVista, setMixVista] = useState("torta");       // "torta" | "barras"
+
+  // ── Mantenedor de deudas a proveedor (admin/operador) ──────
+  const [deudasProv, setDeudasProv] = useState(null);       // [{guide, proveedor, monto, chofer, pagado, ...}]
+  const [cargandoDeudas, setCargandoDeudas] = useState(false);
+  const [errorDeudas, setErrorDeudas] = useState("");
+  const [pagoModal, setPagoModal] = useState(null);         // factura en proceso de pago
+  const [pagoFoto, setPagoFoto] = useState(null);           // File del respaldo bancario
+  const [subiendoPago, setSubiendoPago] = useState(false);
+  const [errorPago, setErrorPago] = useState("");
 
   // Agregar email faltante al cliente desde el formulario
   const [emailNuevo, setEmailNuevo] = useState("");
@@ -822,17 +840,8 @@ export default function App() {
         compras: [], rendiciones: [], compraProvPagadoDet: [], recaudaciones: [], choferes: [],
       };
       let provPendiente = { total: 0, count: 0, proveedores: [] };
+      let provResumen = { generado: 0, pagado: 0, pendiente: 0 };
       try {
-        // Guías excluidas de todo cálculo de caja (normalizamos quitando guiones/espacios).
-        const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00006"]);
-        // Chofer real cuando DispatchTrack dejó el campo vacío (dato faltante en
-        // origen). Clave = guía normalizada (sin guiones). Solo se aplica si la
-        // entrega NO trae chofer. Agrega aquí las que me confirmes.
-        const CHOFER_OVERRIDE = { "AQ00043": "Felipe Hernandez" };
-        // Compras Proveedor mal marcadas como "Pagado" en DispatchTrack que en
-        // realidad están PENDIENTES: se fuerzan a la lista de pendiente.
-        const FORZAR_PENDIENTE = new Set(["AQ00013"]);
         const mesKey = hoyPeriodo();
         const guiasMes = [...new Set(
           pedidos
@@ -855,6 +864,16 @@ export default function App() {
           const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
           if (!prev || t >= tp) porGuia[e.guide] = e;
         });
+        // Pagos ya registrados en la app = fuente de verdad del "pagado".
+        const pagadosSet = new Set();
+        try {
+          const { data: pgs } = await supabase
+            .from("pagos_proveedor")
+            .select("numero_guia, pagado")
+            .eq("mes", mesKey).eq("pagado", true);
+          (pgs || []).forEach((p) => pagadosSet.add(normGuia(p.numero_guia)));
+        } catch { /* tabla aún no creada: se ignora */ }
+        let generadoProv = 0, pagadoProvTotal = 0;
         // Acumulador por chofer para el efectivo a rendir.
         const chofMap = {};
         const slotChofer = (nombre) => {
@@ -881,31 +900,36 @@ export default function App() {
             efectivo.rendicion += m; sc.rendicion += m;
             efectivo.rendiciones.push({ guide: e.guide, monto: m, chofer });
           }
-          // Estado de la compra proveedor, con override de "pendiente".
+          // Compra Proveedor: una sola clasificación por registro.
           const esProv = esCompraProveedor(e);
-          const forzarPend = FORZAR_PENDIENTE.has(gN);
-          const provPagada = esProv && !forzarPend && esCompraProvPagada(e);
-          const provPend = esProv && (forzarPend || esCompraProvPendiente(e));
-          if (provPagada) {
+          if (esProv) {
             const m = montoCompraProveedor(e);
-            efectivo.compraProvPagado += m; sc.compraProvPagado += m;
-            efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
-          }
-          if (provPend) {
-            const m = montoCompraProveedor(e);
-            provPendiente.total += m;
-            provPendiente.count += 1;
-            const nom = nombreProveedor(e);
-            const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
-            if (slot) {
-              slot.monto += m; slot.count += 1; slot.guias.push(e.guide);
-              if (!slot.choferes.includes(chofer)) slot.choferes.push(chofer);
-              slot.facturas.push({ guide: e.guide, monto: m, chofer });
-            } else {
-              provPendiente.proveedores.push({
-                proveedor: nom, monto: m, count: 1, guias: [e.guide],
-                choferes: [chofer], facturas: [{ guide: e.guide, monto: m, chofer }],
-              });
+            generadoProv += m;
+            const pagadoApp = pagadosSet.has(gN);
+            const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
+            const pagada = pagadoApp || pagadoDT;
+            if (pagada) pagadoProvTotal += m;
+            // Solo el cierre en efectivo del chofer (DispatchTrack) reduce el
+            // efectivo a rendir. Un pago marcado en la app es transferencia.
+            if (pagadoDT) {
+              efectivo.compraProvPagado += m; sc.compraProvPagado += m;
+              efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
+            }
+            if (!pagada) {
+              provPendiente.total += m;
+              provPendiente.count += 1;
+              const nom = nombreProveedor(e);
+              const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
+              if (slot) {
+                slot.monto += m; slot.count += 1; slot.guias.push(e.guide);
+                if (!slot.choferes.includes(chofer)) slot.choferes.push(chofer);
+                slot.facturas.push({ guide: e.guide, monto: m, chofer });
+              } else {
+                provPendiente.proveedores.push({
+                  proveedor: nom, monto: m, count: 1, guias: [e.guide],
+                  choferes: [chofer], facturas: [{ guide: e.guide, monto: m, chofer }],
+                });
+              }
             }
           }
         });
@@ -918,9 +942,10 @@ export default function App() {
           aRendir: c.recaudacion - c.comprasNoRend - c.compraProvPagado - c.rendicion,
         })).sort((a, b) => b.aRendir - a.aRendir);
         provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
+        provResumen = { generado: generadoProv, pagado: pagadoProvTotal, pendiente: provPendiente.total };
       } catch { /* si falla, dejamos la caja en cero */ }
 
-      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30, efectivo, provPendiente });
+      setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30, efectivo, provPendiente, provResumen });
     } catch (e) {
       setErrorGer(e.message || "No se pudo cargar el panel gerencial.");
       setGer(null);
@@ -932,6 +957,120 @@ export default function App() {
     if (rol === "gerencial" && vista === "inicio") cargarGerencial();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rol, vista, session, todosDomicilios]);
+
+  // ── Mantenedor de deudas a proveedor (admin/operador) ──────
+  async function cargarDeudasProv() {
+    setCargandoDeudas(true); setErrorDeudas("");
+    try {
+      const mesKey = hoyPeriodo();
+      const guiasMes = [...new Set(
+        pedidos
+          .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
+          .map((p) => p.numero_guia)
+      )];
+      let entsMes = [];
+      for (let i = 0; i < guiasMes.length; i += 200) {
+        const lote = guiasMes.slice(i, i + 200);
+        if (!lote.length) break;
+        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+        entsMes = entsMes.concat(data || []);
+      }
+      const porGuia = {};
+      entsMes.forEach((e) => {
+        if (!e.guide) return;
+        const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+        const prev = porGuia[e.guide];
+        const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+        if (!prev || t >= tp) porGuia[e.guide] = e;
+      });
+      // Pagos ya registrados en la app (fuente de verdad del "pagado").
+      const pagosMap = {};
+      try {
+        const { data: pgs } = await supabase.from("pagos_proveedor").select("*").eq("mes", mesKey);
+        (pgs || []).forEach((p) => { pagosMap[normGuia(p.numero_guia)] = p; });
+      } catch { /* tabla aún no creada */ }
+      const lista = [];
+      Object.values(porGuia).forEach((e) => {
+        const gN = normGuia(e.guide);
+        if (EXCLUIR_GUIAS.has(gN)) return;
+        if (!esCompraProveedor(e)) return;
+        const pago = pagosMap[gN];
+        const pagadoApp = !!(pago && pago.pagado);
+        const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
+        lista.push({
+          numero_guia: e.guide,
+          proveedor: nombreProveedor(e),
+          monto: montoCompraProveedor(e),
+          chofer: CHOFER_OVERRIDE[gN] || (e.chofer || "").trim() || "Sin chofer",
+          mes: mesKey,
+          pagado: pagadoApp || pagadoDT,
+          origenPago: pagadoApp ? "app" : (pagadoDT ? "dispatchtrack" : null),
+          fecha_pago: pago?.fecha_pago || null,
+          pagado_por: pago?.pagado_por || null,
+          respaldo_path: pago?.respaldo_path || null,
+        });
+      });
+      lista.sort((a, b) => Number(a.pagado) - Number(b.pagado) || b.monto - a.monto);
+      setDeudasProv(lista);
+    } catch (e) {
+      setErrorDeudas(e.message || "No se pudieron cargar las deudas.");
+      setDeudasProv(null);
+    } finally {
+      setCargandoDeudas(false);
+    }
+  }
+  useEffect(() => {
+    if ((rol === "admin" || rol === "operador") && vista === "deudasprov" && session) cargarDeudasProv();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rol, vista, session]);
+
+  // Registrar pago de una deuda con respaldo bancario (foto → Storage privado).
+  async function confirmarPago() {
+    if (!pagoModal) return;
+    if (!pagoFoto) { setErrorPago("Adjunta la foto del respaldo bancario."); return; }
+    setSubiendoPago(true); setErrorPago("");
+    try {
+      const gN = normGuia(pagoModal.numero_guia);
+      const ext = (pagoFoto.name.split(".").pop() || "jpg").toLowerCase();
+      const path = `${pagoModal.mes}/${gN}-${Date.now()}.${ext}`;
+      const up = await supabase.storage
+        .from("respaldos-pago-proveedor")
+        .upload(path, pagoFoto, { upsert: false, contentType: pagoFoto.type || "image/jpeg" });
+      if (up.error) throw up.error;
+      const ins = await supabase.from("pagos_proveedor").upsert({
+        numero_guia: pagoModal.numero_guia,
+        proveedor: pagoModal.proveedor,
+        chofer: pagoModal.chofer,
+        monto: pagoModal.monto,
+        mes: pagoModal.mes,
+        origen: "dispatchtrack",
+        pagado: true,
+        fecha_pago: new Date().toISOString(),
+        pagado_por: perfilNombre || null,
+        respaldo_path: path,
+      }, { onConflict: "numero_guia" });
+      if (ins.error) throw ins.error;
+      setPagoModal(null); setPagoFoto(null);
+      await cargarDeudasProv();
+    } catch (e) {
+      setErrorPago(e.message || "No se pudo registrar el pago.");
+    } finally {
+      setSubiendoPago(false);
+    }
+  }
+
+  // Abrir el respaldo bancario (bucket privado → URL firmada temporal).
+  async function verRespaldo(path) {
+    try {
+      const { data, error } = await supabase.storage
+        .from("respaldos-pago-proveedor").createSignedUrl(path, 60);
+      if (error) throw error;
+      window.open(data.signedUrl, "_blank");
+    } catch (e) {
+      alert("No se pudo abrir el respaldo: " + (e.message || ""));
+    }
+  }
+
 
   // ── Bloque 4: cargar datos del mantenedor según sub-pestaña ─
   useEffect(() => {
@@ -1006,11 +1145,11 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov")) {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
-    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas")) {
+    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -2441,6 +2580,9 @@ export default function App() {
             {rol !== "gerencial" && rol !== "distribuidor" && (
               <button className={vista === "cobranzas" ? "on" : ""} onClick={abrirCobranzas}>Cobranzas</button>
             )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "deudasprov" ? "on" : ""} onClick={() => setVista("deudasprov")}>Pagos proveedor</button>
+            )}
             <span className="aq-user" title={rol}>
               {perfilNombre} · {rol}
               <button className="aq-logout" onClick={cerrarSesion} aria-label="Cerrar sesión">Salir</button>
@@ -2997,6 +3139,23 @@ export default function App() {
                         </div>
                       </div>
 
+                      {ger.provResumen && (
+                        <div className="aq-desglose" style={{ marginTop: 8 }}>
+                          <div className="aq-desglose-row">
+                            <span>Generado en el mes</span>
+                            <strong>{CLP(ger.provResumen.generado)}</strong>
+                          </div>
+                          <div className="aq-desglose-row">
+                            <span>Pagado</span>
+                            <strong className="pos">{CLP(ger.provResumen.pagado)}</strong>
+                          </div>
+                          <div className="aq-desglose-row total">
+                            <span>Pendiente</span>
+                            <strong className="neg">{CLP(ger.provResumen.pendiente)}</strong>
+                          </div>
+                        </div>
+                      )}
+
                       {ger.provPendiente.proveedores.length === 0 ? (
                         <p className="aq-muted">Sin facturas pendientes en el mes.</p>
                       ) : (
@@ -3026,6 +3185,102 @@ export default function App() {
               <div className="aq-card aq-muted">Sin datos para mostrar todavía.</div>
             )}
           </>
+        )}
+
+        {/* ===================== PAGOS A PROVEEDOR (admin/operador) ===================== */}
+        {credsListas && vista === "deudasprov" && (rol === "admin" || rol === "operador") && (
+          <section className="aq-card">
+            <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Pagos a proveedor</h2>
+                <span className="aq-muted">Compras a proveedor del mes · marca cada una como pagada con su respaldo bancario.</span>
+              </div>
+              <button className="aq-btn-sec" onClick={cargarDeudasProv} disabled={cargandoDeudas}>↻ Actualizar</button>
+            </div>
+
+            {errorDeudas && <div className="aq-error" style={{ marginBottom: 8 }}>{errorDeudas}</div>}
+            {cargandoDeudas && <p className="aq-muted">Cargando deudas…</p>}
+            {!cargandoDeudas && deudasProv && deudasProv.length === 0 && (
+              <p className="aq-muted">No hay compras a proveedor registradas este mes.</p>
+            )}
+
+            {!cargandoDeudas && deudasProv && deudasProv.length > 0 && (() => {
+              const pendientes = deudasProv.filter((d) => !d.pagado);
+              const pagadas = deudasProv.filter((d) => d.pagado);
+              const totPend = pendientes.reduce((s, d) => s + d.monto, 0);
+              const totPag = pagadas.reduce((s, d) => s + d.monto, 0);
+              return (
+                <>
+                  <div className="aq-desglose" style={{ marginBottom: 12 }}>
+                    <div className="aq-desglose-row"><span>Generado en el mes</span><strong>{CLP(totPend + totPag)}</strong></div>
+                    <div className="aq-desglose-row"><span>Pagado</span><strong className="pos">{CLP(totPag)}</strong></div>
+                    <div className="aq-desglose-row total"><span>Pendiente</span><strong className="neg">{CLP(totPend)}</strong></div>
+                  </div>
+
+                  {pendientes.length > 0 && <strong>Pendientes</strong>}
+                  {pendientes.map((d, i) => (
+                    <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center" }}>
+                      <span>{d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.chofer}</em></span>
+                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        {CLP(d.monto)}
+                        <button className="aq-btn-sec" onClick={() => { setPagoModal(d); setPagoFoto(null); setErrorPago(""); }}>Marcar pagado</button>
+                      </span>
+                    </div>
+                  ))}
+
+                  {pagadas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Pagadas</strong>}
+                  {pagadas.map((d, i) => (
+                    <div className="aq-det-line aq-prov-fact" key={"pag" + i}>
+                      <span>{d.proveedor} · Guía {d.numero_guia}
+                        <em className="aq-det-chofer">
+                          {d.origenPago === "app"
+                            ? `Pagado por ${d.pagado_por || "—"}${d.fecha_pago ? " · " + new Date(d.fecha_pago).toLocaleDateString("es-CL") : ""}`
+                            : "Pagado (DispatchTrack)"}
+                        </em>
+                      </span>
+                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        {CLP(d.monto)}
+                        {d.respaldo_path && (
+                          <button className="aq-link" onClick={() => verRespaldo(d.respaldo_path)}>Ver respaldo</button>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
+          </section>
+        )}
+
+        {/* Modal: marcar pagado con respaldo bancario */}
+        {pagoModal && (
+          <div className="aq-modal-ov" onClick={() => !subiendoPago && setPagoModal(null)}>
+            <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="aq-modal-head">
+                <div>
+                  <strong>Registrar pago</strong>
+                  <span className="aq-muted">{pagoModal.proveedor} · Guía {pagoModal.numero_guia} · {CLP(pagoModal.monto)}</span>
+                </div>
+                <button className="aq-link" disabled={subiendoPago} onClick={() => setPagoModal(null)}>Cerrar ✕</button>
+              </div>
+              <div className="aq-modal-edit">
+                <label className="aq-mini">Respaldo bancario (foto del comprobante)</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => { setPagoFoto(e.target.files?.[0] || null); setErrorPago(""); }}
+                />
+                {pagoFoto && <p className="aq-mini">Archivo: {pagoFoto.name}</p>}
+                {errorPago && <div className="aq-error" style={{ marginTop: 8 }}>{errorPago}</div>}
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <button className="aq-btn" style={{ marginTop: 0 }} disabled={subiendoPago || !pagoFoto} onClick={confirmarPago}>
+                    {subiendoPago ? "Registrando…" : "Confirmar pago"}
+                  </button>
+                  <button className="aq-btn-sec" disabled={subiendoPago} onClick={() => setPagoModal(null)}>Cancelar</button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* ===================== CONFIRMACIÓN ===================== */}
