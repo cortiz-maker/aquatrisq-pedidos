@@ -333,12 +333,21 @@ const CHOFER_OVERRIDE = { "AQ00043": "Felipe Hernandez" };
 // Compras Proveedor mal marcadas "Pagado" en DispatchTrack y que están PENDIENTES.
 const FORZAR_PENDIENTE = new Set(["AQ00013"]);
 
-// Costo base de la recarga según litros: 20L = $600, 10/12L = $300, otro = 0.
-function costoUnitRecarga(it) {
-  const s = `${it.nombre || ""} ${it.codigo || ""}`.toLowerCase();
-  if (/(^|[^\d])20([^\d]|$)/.test(s)) return 600;
-  if (/(^|[^\d])1[02]([^\d]|$)/.test(s)) return 300; // 10 o 12 litros
-  return 0;
+// Lee del formulario de "Compra Proveedor" (DispatchTrack) las unidades por
+// formato. Tolerante a la grafía del nombre del campo: busca 20/12/10 + "lt".
+function numFrom(v) {
+  const n = Number(String(v).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function unidadesCompraProveedor(entrega) {
+  let u20 = 0, u12 = 0, u10 = 0;
+  answersFromRaw(entrega).forEach((a) => {
+    const nm = (a.name || "").toLowerCase();
+    if (/20\s*l/.test(nm)) u20 += numFrom(a.val);
+    else if (/12\s*l/.test(nm)) u12 += numFrom(a.val);
+    else if (/10\s*l/.test(nm)) u10 += numFrom(a.val);
+  });
+  return { u20, u12, u10 };
 }
 
 // ── Resumen ejecutivo de caja (Excel, una hoja por chofer) ──────────
@@ -456,6 +465,7 @@ async function calcularCajaMes(mesKey) {
   };
   let provPendiente = { total: 0, count: 0, proveedores: [] };
   let provResumen = { generado: 0, pagado: 0, pendiente: 0 };
+  let costo = { total: 0, u20: 0, u12: 0, u10: 0, porDia: [] };
   try {
     const { data: peds } = await supabase
       .from("pedidos").select("created_at, numero_guia").gte("created_at", mesKey + "-01");
@@ -487,6 +497,7 @@ async function calcularCajaMes(mesKey) {
       (pgs || []).forEach((p) => pagadosSet.add(normGuia(p.numero_guia)));
     } catch { /* tabla aún no creada */ }
     let generadoProv = 0, pagadoProvTotal = 0;
+    const diasCosto = {};
     const chofMap = {};
     const slotChofer = (nombre) => {
       if (!chofMap[nombre]) chofMap[nombre] = { chofer: nombre, recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0 };
@@ -514,6 +525,17 @@ async function calcularCajaMes(mesKey) {
       }
       const esProv = esCompraProveedor(e);
       if (esProv) {
+        // Costo real por unidades del formulario (20L $600 · 12/10L $300).
+        const un = unidadesCompraProveedor(e);
+        if (un.u20 || un.u12 || un.u10) {
+          const c = un.u20 * 600 + (un.u12 + un.u10) * 300;
+          costo.total += c; costo.u20 += un.u20; costo.u12 += un.u12; costo.u10 += un.u10;
+          const dia = (e.gestionado_en || "").slice(0, 10) || mesKey;
+          if (!diasCosto[dia]) diasCosto[dia] = { dia, total: 0, u20: 0, u12: 0, u10: 0, items: [] };
+          const d = diasCosto[dia];
+          d.total += c; d.u20 += un.u20; d.u12 += un.u12; d.u10 += un.u10;
+          d.items.push({ guide: e.guide, proveedor: nombreProveedor(e), u20: un.u20, u12: un.u12, u10: un.u10, costo: c });
+        }
         const m = montoCompraProveedor(e);
         generadoProv += m;
         const pagadoApp = pagadosSet.has(gN);
@@ -548,8 +570,9 @@ async function calcularCajaMes(mesKey) {
     })).sort((a, b) => b.aRendir - a.aRendir);
     provPendiente.proveedores.sort((a, b) => b.monto - a.monto);
     provResumen = { generado: generadoProv, pagado: pagadoProvTotal, pendiente: provPendiente.total };
+    costo.porDia = Object.values(diasCosto).sort((a, b) => a.dia.localeCompare(b.dia));
   } catch { /* si falla, caja en cero */ }
-  return { efectivo, provPendiente, provResumen };
+  return { efectivo, provPendiente, provResumen, costo };
 }
 
 export default function App() {
@@ -645,8 +668,7 @@ export default function App() {
   const [errorPago, setErrorPago] = useState("");
 
   // ── Caja y costo del mes para el dashboard admin/operador ──
-  const [cajaMes, setCajaMes] = useState(null);     // {efectivo, provPendiente, provResumen}
-  const [costoMes, setCostoMes] = useState(null);   // costo real de recargas del período
+  const [cajaMes, setCajaMes] = useState(null);     // {efectivo, provPendiente, provResumen, costo}
   const [popCosto, setPopCosto] = useState(false);  // pop-up de detalle de costo
   // Fuente de la caja para los pop-ups: gerencial usa su panel; admin/operador el dashboard.
   const cajaView = rol === "gerencial" ? ger : cajaMes;
@@ -820,44 +842,8 @@ export default function App() {
         setEntregasMap({});
       }
 
-      // Caja del mes (Efectivo a Rendir + Pendiente proveedor) del período.
+      // Caja del mes (Efectivo a Rendir + Pendiente proveedor + Costo recargas).
       try { setCajaMes(await calcularCajaMes(per)); } catch { setCajaMes(null); }
-
-      // Costo real de recargas del período: 20L=$600, 10/12L=$300 × cantidad.
-      try {
-        const ids = peds.map((p) => p.id);
-        let items = [];
-        for (let i = 0; i < ids.length; i += 200) {
-          const lote = ids.slice(i, i + 200);
-          if (!lote.length) break;
-          const { data: it } = await supabase
-            .from("pedido_items").select("nombre, codigo, cantidad, pedido_id").in("pedido_id", lote);
-          items = items.concat(it || []);
-        }
-        const diaDe = {};
-        peds.forEach((p) => { diaDe[p.id] = (p.created_at || "").slice(0, 10); });
-        const dias = {}, prods = {};
-        let total = 0;
-        items.forEach((it) => {
-          const cu = costoUnitRecarga(it);
-          if (!cu) return;
-          const qty = Number(it.cantidad) || 0;
-          const costo = qty * cu;
-          total += costo;
-          const dia = diaDe[it.pedido_id] || "—";
-          if (!dias[dia]) dias[dia] = { dia, total: 0, items: [] };
-          dias[dia].total += costo;
-          dias[dia].items.push({ nombre: it.nombre || it.codigo || "—", cantidad: qty, costoUnit: cu, costo });
-          const pn = it.nombre || it.codigo || "—";
-          if (!prods[pn]) prods[pn] = { nombre: pn, cantidad: 0, costo: 0, costoUnit: cu };
-          prods[pn].cantidad += qty; prods[pn].costo += costo;
-        });
-        setCostoMes({
-          total,
-          porDia: Object.values(dias).sort((a, b) => a.dia.localeCompare(b.dia)),
-          porProducto: Object.values(prods).sort((a, b) => b.costo - a.costo),
-        });
-      } catch { setCostoMes(null); }
     } catch (e) {
       setErrorDash(e.message || "No se pudo cargar el período.");
       setPedidosMes([]);
@@ -2753,8 +2739,8 @@ export default function App() {
                     title="Ver detalle por día"
                   >
                     <span>Costo recargas del mes 🔎</span>
-                    <strong>{CLP(costoMes?.total || 0)}</strong>
-                    <em className="aq-money-sub">20L ${600} · 10/12L ${300} × cantidad</em>
+                    <strong>{CLP(cajaMes?.costo?.total || 0)}</strong>
+                    <em className="aq-money-sub">Unidades Compra Proveedor (DT): 20L $600 · 12/10L $300</em>
                   </button>
                 </div>
 
@@ -3263,7 +3249,7 @@ export default function App() {
               <div className="aq-modal-head">
                 <div>
                   <strong>Costo recargas del mes</strong>
-                  <span className="aq-muted">Cantidad × costo base (20L $600 · 10/12L $300)</span>
+                  <span className="aq-muted">Unidades de Compra Proveedor (DispatchTrack) · 20L $600 · 12/10L $300</span>
                 </div>
                 <button className="aq-link" onClick={() => setPopCosto(false)}>Cerrar ✕</button>
               </div>
@@ -3271,34 +3257,40 @@ export default function App() {
               <div className="aq-desglose">
                 <div className="aq-desglose-row total">
                   <span>Costo total</span>
-                  <strong>{CLP(costoMes?.total || 0)}</strong>
+                  <strong>{CLP(cajaMes?.costo?.total || 0)}</strong>
                 </div>
               </div>
 
-              {costoMes && costoMes.porProducto.length > 0 && (
+              {cajaMes?.costo && (
                 <div className="aq-modal-edit">
-                  <strong>Por producto</strong>
-                  {costoMes.porProducto.map((p, i) => (
-                    <div className="aq-det-line" key={"cp" + i}>
-                      <span>{p.nombre}<em className="aq-det-chofer">{p.cantidad} u · ${p.costoUnit} c/u</em></span>
-                      <span>{CLP(p.costo)}</span>
-                    </div>
-                  ))}
+                  <strong>Por formato</strong>
+                  <div className="aq-det-line">
+                    <span>20 lts<em className="aq-det-chofer">{cajaMes.costo.u20} u · $600 c/u</em></span>
+                    <span>{CLP(cajaMes.costo.u20 * 600)}</span>
+                  </div>
+                  <div className="aq-det-line">
+                    <span>12 lts<em className="aq-det-chofer">{cajaMes.costo.u12} u · $300 c/u</em></span>
+                    <span>{CLP(cajaMes.costo.u12 * 300)}</span>
+                  </div>
+                  <div className="aq-det-line">
+                    <span>10 lts<em className="aq-det-chofer">{cajaMes.costo.u10} u · $300 c/u</em></span>
+                    <span>{CLP(cajaMes.costo.u10 * 300)}</span>
+                  </div>
                 </div>
               )}
 
-              {costoMes && costoMes.porDia.length > 0 ? (
+              {cajaMes?.costo && cajaMes.costo.porDia.length > 0 ? (
                 <div className="aq-modal-edit">
                   <strong>Detalle por día</strong>
-                  {costoMes.porDia.map((d, i) => (
+                  {cajaMes.costo.porDia.map((d, i) => (
                     <details key={"cd" + i}>
                       <summary className="aq-det-line aq-prov-cab" style={{ cursor: "pointer", listStyle: "revert" }}>
-                        <span>{d.dia}</span>
+                        <span>{d.dia}<em className="aq-det-chofer">{d.u20}×20L · {d.u12}×12L · {d.u10}×10L</em></span>
                         <span>{CLP(d.total)}</span>
                       </summary>
                       {d.items.map((it, j) => (
                         <div className="aq-det-line aq-prov-fact" key={"cdi" + i + "_" + j}>
-                          <span>{it.nombre}<em className="aq-det-chofer">{it.cantidad} u · ${it.costoUnit} c/u</em></span>
+                          <span>{it.guide ? "Guía " + it.guide : "Registro"}<em className="aq-det-chofer">{it.proveedor} · {it.u20}×20L {it.u12}×12L {it.u10}×10L</em></span>
                           <span>{CLP(it.costo)}</span>
                         </div>
                       ))}
@@ -3306,7 +3298,7 @@ export default function App() {
                   ))}
                 </div>
               ) : (
-                <p className="aq-muted">Sin recargas valorizadas en el período.</p>
+                <p className="aq-muted">Sin unidades de Compra Proveedor en el período.</p>
               )}
             </div>
           </div>
