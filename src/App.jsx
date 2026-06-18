@@ -388,6 +388,12 @@ async function descargarResumenEjecutivo(ger) {
       ["A Rendir", c.aRendir],
       ["", ""],
     ];
+    const recCh = (ef.recaudaciones || []).filter((x) => x.chofer === c.chofer);
+    if (recCh.length) {
+      filas.push(["Detalle recaudación", ""], ["Guía", "Monto"]);
+      recCh.forEach((x) => filas.push([x.guide || "", x.monto]));
+      filas.push(["", ""]);
+    }
     const comprasCh = (ef.compras || []).filter((x) => x.chofer === c.chofer);
     if (comprasCh.length) {
       filas.push(["Detalle compras (≠ rendición)", "", ""], ["Tipo", "Guía", "Monto"]);
@@ -813,13 +819,20 @@ export default function App() {
       // para ser consistente con los KPIs "del mes" de arriba.
       let efectivo = {
         recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
-        compras: [], rendiciones: [], compraProvPagadoDet: [], choferes: [],
+        compras: [], rendiciones: [], compraProvPagadoDet: [], recaudaciones: [], choferes: [],
       };
       let provPendiente = { total: 0, count: 0, proveedores: [] };
       try {
         // Guías excluidas de todo cálculo de caja (normalizamos quitando guiones/espacios).
         const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00013", "AQ00006"]);
+        const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00006"]);
+        // Chofer real cuando DispatchTrack dejó el campo vacío (dato faltante en
+        // origen). Clave = guía normalizada (sin guiones). Solo se aplica si la
+        // entrega NO trae chofer. Agrega aquí las que me confirmes.
+        const CHOFER_OVERRIDE = { "AQ00043": "Felipe Hernandez" };
+        // Compras Proveedor mal marcadas como "Pagado" en DispatchTrack que en
+        // realidad están PENDIENTES: se fuerzan a la lista de pendiente.
+        const FORZAR_PENDIENTE = new Set(["AQ00013"]);
         const mesKey = hoyPeriodo();
         const guiasMes = [...new Set(
           pedidos
@@ -849,12 +862,14 @@ export default function App() {
           return chofMap[nombre];
         };
         Object.values(porGuia).forEach((e) => {
-          if (EXCLUIR_GUIAS.has(normGuia(e.guide))) return; // guía excluida
-          const chofer = (e.chofer || "").trim() || "Sin chofer";
+          const gN = normGuia(e.guide);
+          if (EXCLUIR_GUIAS.has(gN)) return; // guía excluida
+          const chofer = CHOFER_OVERRIDE[gN] || (e.chofer || "").trim() || "Sin chofer";
           const sc = slotChofer(chofer);
           if (esEfectivoRecaudado(e)) {
             const m = montoEfectivoRecaudado(e);
             efectivo.recaudacion += m; sc.recaudacion += m;
+            efectivo.recaudaciones.push({ guide: e.guide, monto: m, chofer });
           }
           if (esCompraNoRendicion(e)) {
             const m = montoCompra(e);
@@ -866,12 +881,17 @@ export default function App() {
             efectivo.rendicion += m; sc.rendicion += m;
             efectivo.rendiciones.push({ guide: e.guide, monto: m, chofer });
           }
-          if (esCompraProvPagada(e)) {
+          // Estado de la compra proveedor, con override de "pendiente".
+          const esProv = esCompraProveedor(e);
+          const forzarPend = FORZAR_PENDIENTE.has(gN);
+          const provPagada = esProv && !forzarPend && esCompraProvPagada(e);
+          const provPend = esProv && (forzarPend || esCompraProvPendiente(e));
+          if (provPagada) {
             const m = montoCompraProveedor(e);
             efectivo.compraProvPagado += m; sc.compraProvPagado += m;
             efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
           }
-          if (esCompraProvPendiente(e)) {
+          if (provPend) {
             const m = montoCompraProveedor(e);
             provPendiente.total += m;
             provPendiente.count += 1;
@@ -2904,6 +2924,18 @@ export default function App() {
                               <div className="aq-chofer-detalle">
                                 Recaudado {CLP(c.recaudacion)} − compras {CLP(c.comprasNoRend)} − prov. pagado {CLP(c.compraProvPagado)} − rendición {CLP(c.rendicion)}
                               </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {ger.efectivo.recaudaciones && ger.efectivo.recaudaciones.length > 0 && (
+                        <div className="aq-modal-edit">
+                          <strong>Recaudación de efectivo</strong>
+                          {ger.efectivo.recaudaciones.map((c, i) => (
+                            <div className="aq-det-line" key={"rec" + i}>
+                              <span>{c.guide ? "Guía " + c.guide : "Recaudación"}<em className="aq-det-chofer">{c.chofer}</em></span>
+                              <span>{CLP(c.monto)}</span>
                             </div>
                           ))}
                         </div>
