@@ -963,8 +963,14 @@ export default function App() {
     setCargandoDeudas(true); setErrorDeudas("");
     try {
       const mesKey = hoyPeriodo();
+      const desdeMes = mesKey + "-01";
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("created_at, numero_guia")
+        .gte("created_at", desdeMes);
+      if (ePed) throw ePed;
       const guiasMes = [...new Set(
-        pedidos
+        (peds || [])
           .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
           .map((p) => p.numero_guia)
       )];
