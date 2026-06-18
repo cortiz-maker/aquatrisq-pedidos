@@ -324,6 +324,106 @@ function nombreProveedor(entrega) {
   return a && a.val ? String(a.val).trim() : "Proveedor sin nombre";
 }
 
+// ── Resumen ejecutivo de caja (Excel, una hoja por chofer) ──────────
+// Carga SheetJS desde CDN bajo demanda: NO requiere tocar package.json ni
+// instalar nada en Vercel. Arma un libro con: Resumen general · una hoja por
+// chofer (con su detalle) · Pendiente de pago a proveedor.
+let _sheetJsPromise = null;
+function cargarSheetJS() {
+  if (typeof window !== "undefined" && window.XLSX) return Promise.resolve(window.XLSX);
+  if (_sheetJsPromise) return _sheetJsPromise;
+  _sheetJsPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js";
+    s.onload = () => resolve(window.XLSX);
+    s.onerror = () => reject(new Error("No se pudo cargar SheetJS"));
+    document.head.appendChild(s);
+  });
+  return _sheetJsPromise;
+}
+function nombreHojaUnico(s, usados) {
+  let base = String(s || "Chofer").replace(/[\\/?*[\]:]/g, " ").trim().slice(0, 28) || "Chofer";
+  let n = base, i = 2;
+  while (usados.has(n.toLowerCase())) { n = base.slice(0, 26) + " " + i; i++; }
+  usados.add(n.toLowerCase());
+  return n;
+}
+async function descargarResumenEjecutivo(ger) {
+  const ef = ger?.efectivo;
+  if (!ef) return;
+  const XLSX = await cargarSheetJS();
+  const wb = XLSX.utils.book_new();
+  const usados = new Set();
+  const hoy = new Date();
+  const mesTxt = hoy.toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+
+  // 1) Resumen general
+  const resumen = [
+    ["Resumen ejecutivo de caja", ""],
+    ["Periodo", mesTxt],
+    ["Generado", hoy.toLocaleString("es-CL")],
+    ["", ""],
+    ["Concepto", "Monto"],
+    ["Recaudación de efectivo", ef.recaudacion],
+    ["(−) Compras (Tipo ≠ Rendición Efectivo)", -ef.comprasNoRend],
+    ["(−) Compra Proveedor pagada", -ef.compraProvPagado],
+    ["(−) Rendición de efectivo entregada", -ef.rendicion],
+    ["= Efectivo a Rendir", ef.aRendir],
+    ["", ""],
+    ["Pendiente de pago a proveedor", ger.provPendiente?.total || 0],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumen), nombreHojaUnico("Resumen", usados));
+
+  // 2) Una hoja por chofer
+  (ef.choferes || []).forEach((c) => {
+    const filas = [
+      ["Chofer", c.chofer],
+      ["Periodo", mesTxt],
+      ["", ""],
+      ["Concepto", "Monto"],
+      ["Recaudación", c.recaudacion],
+      ["Compras (≠ rendición)", -c.comprasNoRend],
+      ["Compra proveedor pagada", -c.compraProvPagado],
+      ["Rendición entregada", -c.rendicion],
+      ["A Rendir", c.aRendir],
+      ["", ""],
+    ];
+    const comprasCh = (ef.compras || []).filter((x) => x.chofer === c.chofer);
+    if (comprasCh.length) {
+      filas.push(["Detalle compras (≠ rendición)", "", ""], ["Tipo", "Guía", "Monto"]);
+      comprasCh.forEach((x) => filas.push([x.tipo, x.guide || "", x.monto]));
+      filas.push(["", "", ""]);
+    }
+    const provCh = (ef.compraProvPagadoDet || []).filter((x) => x.chofer === c.chofer);
+    if (provCh.length) {
+      filas.push(["Detalle compra proveedor pagada", "", ""], ["Proveedor", "Guía", "Monto"]);
+      provCh.forEach((x) => filas.push([x.proveedor, x.guide || "", x.monto]));
+      filas.push(["", "", ""]);
+    }
+    const rendCh = (ef.rendiciones || []).filter((x) => x.chofer === c.chofer);
+    if (rendCh.length) {
+      filas.push(["Detalle rendiciones de efectivo", ""], ["Guía", "Monto"]);
+      rendCh.forEach((x) => filas.push([x.guide || "", x.monto]));
+    }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(filas), nombreHojaUnico(c.chofer, usados));
+  });
+
+  // 3) Pendiente de pago a proveedor
+  const pend = [
+    ["Pendiente de pago a proveedor", "", "", ""],
+    ["Periodo", mesTxt, "", ""],
+    ["", "", "", ""],
+    ["Proveedor", "Guía", "Chofer", "Monto"],
+  ];
+  (ger.provPendiente?.proveedores || []).forEach((p) => {
+    (p.facturas || []).forEach((f) => pend.push([p.proveedor, f.guide || "", f.chofer || "", f.monto]));
+  });
+  pend.push(["", "", "Total", ger.provPendiente?.total || 0]);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pend), nombreHojaUnico("Pendiente proveedor", usados));
+
+  XLSX.writeFile(wb, `Resumen_ejecutivo_caja_${hoy.toISOString().slice(0, 10)}.xlsx`);
+}
+
 export default function App() {
   const credsListas =
     SUPABASE_URL && !SUPABASE_URL.startsWith("PEGA_");
@@ -2758,6 +2858,15 @@ export default function App() {
                           <span className="aq-muted">Mes en curso · sobre entregas de DispatchTrack</span>
                         </div>
                         <button className="aq-link" onClick={() => setPopEfectivo(false)}>Cerrar ✕</button>
+                      </div>
+
+                      <div style={{ margin: "0 0 12px" }}>
+                        <button
+                          className="aq-btn-sec"
+                          onClick={() => descargarResumenEjecutivo(ger).catch(() => alert("No se pudo generar el Excel. Reintenta con conexión."))}
+                        >
+                          ⬇ Descargar resumen ejecutivo (Excel · una hoja por chofer)
+                        </button>
                       </div>
 
                       <div className="aq-desglose">
