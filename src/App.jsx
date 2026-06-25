@@ -1756,6 +1756,20 @@ export default function App() {
       setOkCli("Error: " + (err.message || err));
     }
   }
+  // Reactivar = volver a la baja lógica. Vuelve a aparecer en Nuevo pedido.
+  async function reactivarCliente(c) {
+    if (!c) return;
+    try {
+      const { error } = await supabase.from("clientes").update({ activo: true }).eq("id", c.id);
+      if (error) throw error;
+      const actualizado = { ...c, activo: true };
+      setClientes((prev) => prev.map((x) => (x.id === c.id ? actualizado : x)));
+      setCliEdit(actualizado);
+      setOkCli("Cliente reactivado.");
+    } catch (err) {
+      setOkCli("Error: " + (err.message || err));
+    }
+  }
 
   // ── Mantenedor de productos (admin) ────────────────────────
   async function cargarProductosAll() {
@@ -3630,6 +3644,9 @@ export default function App() {
                       )}
                       {rol === "admin" && !cliEdit._nuevo && cliEdit.activo !== false && (
                         <button className="aq-btn-danger" onClick={() => desactivarCliente(cliEdit)}>Desactivar</button>
+                      )}
+                      {rol === "admin" && !cliEdit._nuevo && cliEdit.activo === false && (
+                        <button className="aq-btn-sec" onClick={() => reactivarCliente(cliEdit)}>Activar</button>
                       )}
                     </div>
                     {okCli && <div className={"aq-result " + (okCli.startsWith("Error") ? "bad" : "ok")}>{okCli}</div>}
