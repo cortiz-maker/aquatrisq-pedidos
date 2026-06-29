@@ -666,6 +666,12 @@ export default function App() {
   const [pagoFoto, setPagoFoto] = useState(null);           // File del respaldo bancario
   const [subiendoPago, setSubiendoPago] = useState(false);
   const [errorPago, setErrorPago] = useState("");
+  // ── Abonos parciales (cobro a cliente + deuda proveedor) ──
+  const [abonoModal, setAbonoModal] = useState(null);       // { tipo:"cobro"|"proveedor", ...datos, saldo }
+  const [abonoMonto, setAbonoMonto] = useState("");         // input monto del abono
+  const [abonoHist, setAbonoHist] = useState([]);           // historial de abonos del ítem abierto
+  const [guardandoAbono, setGuardandoAbono] = useState(false);
+  const [errorAbono, setErrorAbono] = useState("");
 
   // ── Caja y costo del mes para el dashboard admin/operador ──
   const [cajaMes, setCajaMes] = useState(null);     // {efectivo, provPendiente, provResumen, costo}
@@ -730,6 +736,7 @@ export default function App() {
   const [errorCob, setErrorCob] = useState("");
   const [okCob, setOkCob] = useState("");
   const [filtroCob, setFiltroCob] = useState("pendientes"); // pendientes | gestionados | todos
+  const [buscarCob, setBuscarCob] = useState("");           // texto de búsqueda en gestión de cobro
   const [guardandoCob, setGuardandoCob] = useState("");  // id del pedido en proceso
   const [avisoDeuda, setAvisoDeuda] = useState(null);    // { guias:[], monto } alerta en Nuevo pedido
   const [cobExpand, setCobExpand] = useState({});        // cliente_id -> grupo expandido en Cobranzas
@@ -1038,10 +1045,14 @@ export default function App() {
         const pago = pagosMap[gN];
         const pagadoApp = !!(pago && pago.pagado);
         const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
+        const monto = montoCompraProveedor(e);
+        const abonado = Number(pago?.abonado) || 0;
         lista.push({
           numero_guia: e.guide,
           proveedor: nombreProveedor(e),
-          monto: montoCompraProveedor(e),
+          monto,
+          abonado,
+          saldo: Math.max(0, monto - abonado),
           chofer: CHOFER_OVERRIDE[gN] || (e.chofer || "").trim() || "Sin chofer",
           mes: mesKey,
           pagado: pagadoApp || pagadoDT,
@@ -1083,6 +1094,7 @@ export default function App() {
         proveedor: pagoModal.proveedor,
         chofer: pagoModal.chofer,
         monto: pagoModal.monto,
+        abonado: pagoModal.monto,
         mes: pagoModal.mes,
         origen: "dispatchtrack",
         pagado: true,
@@ -1109,6 +1121,83 @@ export default function App() {
       window.open(data.signedUrl, "_blank");
     } catch (e) {
       alert("No se pudo abrir el respaldo: " + (e.message || ""));
+    }
+  }
+
+  // ── Abonos parciales (cobro a cliente + deuda proveedor) ──
+  // Abre el modal de abono y carga el historial del ítem.
+  async function abrirAbono(tipo, data) {
+    setAbonoModal({ tipo, ...data });
+    setAbonoMonto("");
+    setErrorAbono("");
+    setAbonoHist([]);
+    try {
+      const tabla = tipo === "cobro" ? "abonos_cobro" : "abonos_proveedor";
+      const { data: hs } = await supabase
+        .from(tabla).select("*").eq("numero_guia", data.numero_guia)
+        .order("fecha", { ascending: false });
+      setAbonoHist(hs || []);
+    } catch { /* tabla aún no creada */ }
+  }
+
+  // Registra un abono. Cuando el saldo llega a 0, marca cobrado/pagado.
+  async function confirmarAbono() {
+    if (!abonoModal) return;
+    const monto = Math.round(Number(abonoMonto) || 0);
+    if (monto <= 0) { setErrorAbono("Ingresa un monto mayor a 0."); return; }
+    if (monto > abonoModal.saldo) { setErrorAbono(`El abono supera el saldo (${CLP(abonoModal.saldo)}).`); return; }
+    setGuardandoAbono(true); setErrorAbono("");
+    try {
+      if (abonoModal.tipo === "cobro") {
+        const ins = await supabase.from("abonos_cobro").insert({
+          numero_guia: abonoModal.numero_guia,
+          monto,
+          registrado_por: perfilNombre || null,
+        });
+        if (ins.error) throw ins.error;
+        const nuevoAbonado = (Number(abonoModal.cobro_abonado) || 0) + monto;
+        const total = Number(abonoModal.monto_total) || 0;
+        const completo = total > 0 && nuevoAbonado >= total;
+        const patch = {
+          cobro_abonado: nuevoAbonado,
+          cobro_at: new Date().toISOString(),
+          cobro_por: perfilNombre || null,
+          ...(completo ? { cobro_cobrado: true } : {}),
+        };
+        const { error } = await supabase.from("pedidos").update(patch).eq("id", abonoModal.pedidoId);
+        if (error) throw error;
+        actualizarCobranzaLocal(abonoModal.pedidoId, patch);
+        setOkCob(`${abonoModal.numero_guia || ""}: abono de ${CLP(monto)} registrado.${completo ? " Saldo saldado → marcado Cobrado." : ` Saldo: ${CLP(total - nuevoAbonado)}.`}`);
+      } else {
+        const ins = await supabase.from("abonos_proveedor").insert({
+          numero_guia: abonoModal.numero_guia,
+          mes: abonoModal.mes,
+          monto,
+          registrado_por: perfilNombre || null,
+        });
+        if (ins.error) throw ins.error;
+        const nuevoAbonado = (Number(abonoModal.abonado) || 0) + monto;
+        const total = Number(abonoModal.monto) || 0;
+        const completo = total > 0 && nuevoAbonado >= total;
+        const up = await supabase.from("pagos_proveedor").upsert({
+          numero_guia: abonoModal.numero_guia,
+          proveedor: abonoModal.proveedor,
+          chofer: abonoModal.chofer,
+          monto: total,
+          mes: abonoModal.mes,
+          origen: "abono",
+          abonado: nuevoAbonado,
+          pagado: completo,
+          ...(completo ? { fecha_pago: new Date().toISOString(), pagado_por: perfilNombre || null } : {}),
+        }, { onConflict: "numero_guia" });
+        if (up.error) throw up.error;
+        await cargarDeudasProv();
+      }
+      setAbonoModal(null); setAbonoMonto("");
+    } catch (e) {
+      setErrorAbono(e.message || "No se pudo registrar el abono.");
+    } finally {
+      setGuardandoAbono(false);
     }
   }
 
@@ -2482,6 +2571,11 @@ export default function App() {
   // Resumen e índices de la ventana Cobranzas (histórico completo).
   const DIA_MS = 86400000;
   const montoCob = (o) => Number(o.pedido.monto_total) || montoEntrega(o.entrega) || 0;
+  const abonadoCob = (o) => Number(o.pedido.cobro_abonado) || 0;
+  // Saldo pendiente real de un pedido: monto − abonado (0 si ya está cobrado).
+  const saldoCob = (o) => (o.pedido.cobro_cobrado ? 0 : Math.max(0, montoCob(o) - abonadoCob(o)));
+  // Dinero efectivamente recaudado de un pedido (cobro total o suma de abonos).
+  const recaudadoCob = (o) => (o.pedido.cobro_cobrado ? montoCob(o) : abonadoCob(o));
   const diasDesdeEntrega = (o) => {
     const g = o.entrega?.gestionado_en ? new Date(o.entrega.gestionado_en).getTime() : null;
     return g ? Math.floor((Date.now() - g) / DIA_MS) : null;
@@ -2491,13 +2585,13 @@ export default function App() {
     const items = cobranzas || [];
     let generada = 0, cobrado = 0, pend = 0, pendCount = 0, venc = 0, vencCount = 0, recCount = 0;
     items.forEach((o) => {
-      const m = montoCob(o);
-      generada += m;
-      if (o.pedido.cobro_cobrado) cobrado += m;
-      else {
-        pend += m; pendCount++;
+      generada += montoCob(o);
+      cobrado += recaudadoCob(o);
+      const saldo = saldoCob(o);
+      if (saldo > 0) {
+        pend += saldo; pendCount++;
         const d = diasDesdeEntrega(o);
-        if (d != null && d > 30) { venc += m; vencCount++; }
+        if (d != null && d > 30) { venc += saldo; vencCount++; }
       }
       if (o.pedido.cobro_recuperado) recCount++;
     });
@@ -2509,6 +2603,7 @@ export default function App() {
     const items = (cobranzas || []).filter((x) => {
       if (filtroCob === "pendientes") return !x.pedido.cobro_cobrado;
       if (filtroCob === "gestionados") return !!x.pedido.cobro_cobrado;
+      if (filtroCob === "vencidos") return !x.pedido.cobro_cobrado;
       return true;
     });
     const map = {};
@@ -2517,15 +2612,31 @@ export default function App() {
       if (!map[cid]) map[cid] = { clienteId: cid, orders: [] };
       map[cid].orders.push(o);
     });
+    const q = buscarCob.trim().toLowerCase();
     return Object.values(map)
       .map((g) => {
-        const deuda = g.orders.filter((o) => !o.pedido.cobro_cobrado).reduce((s, o) => s + montoCob(o), 0);
-        const diasMax = g.orders.filter((o) => !o.pedido.cobro_cobrado).reduce((mx, o) => { const d = diasDesdeEntrega(o); return d != null && d > mx ? d : mx; }, 0);
+        const deuda = g.orders.reduce((s, o) => s + saldoCob(o), 0);
+        const diasMax = g.orders.filter((o) => saldoCob(o) > 0).reduce((mx, o) => { const d = diasDesdeEntrega(o); return d != null && d > mx ? d : mx; }, 0);
         return { ...g, deuda, count: g.orders.length, diasMax };
+      })
+      .filter((g) => {
+        if (filtroCob === "vencidos" && !(g.diasMax > 30)) return false;
+        if (!q) return true;
+        const cli = clientePorId[g.clienteId];
+        if ((cli?.nombre || "").toLowerCase().includes(q)) return true;
+        if ((cli?.rut || "").toLowerCase().includes(q)) return true;
+        return g.orders.some((o) => {
+          const dom = domPorId[o.pedido.domicilio_id];
+          return (
+            (o.pedido.numero_guia || "").toLowerCase().includes(q) ||
+            (dom?.comuna || "").toLowerCase().includes(q) ||
+            (o.entrega?.contact_name || "").toLowerCase().includes(q)
+          );
+        });
       })
       .sort((a, b) => b.deuda - a.deuda);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cobranzas, filtroCob]);
+  }, [cobranzas, filtroCob, buscarCob, clientePorId, domPorId]);
 
   const pedidosFiltrados = useMemo(() => {
     const q = buscarPedido.trim().toLowerCase();
@@ -3338,26 +3449,32 @@ export default function App() {
             {!cargandoDeudas && deudasProv && deudasProv.length > 0 && (() => {
               const pendientes = deudasProv.filter((d) => !d.pagado);
               const pagadas = deudasProv.filter((d) => d.pagado);
-              const totPend = pendientes.reduce((s, d) => s + d.monto, 0);
-              const totPag = pagadas.reduce((s, d) => s + d.monto, 0);
+              const totGen = deudasProv.reduce((s, d) => s + d.monto, 0);
+              const totSaldo = pendientes.reduce((s, d) => s + (d.saldo ?? d.monto), 0);
+              const totPagado = totGen - totSaldo; // pagos completos + abonos parciales
               return (
                 <>
                   <div className="aq-desglose" style={{ marginBottom: 12 }}>
-                    <div className="aq-desglose-row"><span>Generado en el mes</span><strong>{CLP(totPend + totPag)}</strong></div>
-                    <div className="aq-desglose-row"><span>Pagado</span><strong className="pos">{CLP(totPag)}</strong></div>
-                    <div className="aq-desglose-row total"><span>Pendiente</span><strong className="neg">{CLP(totPend)}</strong></div>
+                    <div className="aq-desglose-row"><span>Generado en el mes</span><strong>{CLP(totGen)}</strong></div>
+                    <div className="aq-desglose-row"><span>Pagado / abonado</span><strong className="pos">{CLP(totPagado)}</strong></div>
+                    <div className="aq-desglose-row total"><span>Saldo pendiente</span><strong className="neg">{CLP(totSaldo)}</strong></div>
                   </div>
 
                   {pendientes.length > 0 && <strong>Pendientes</strong>}
-                  {pendientes.map((d, i) => (
-                    <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center" }}>
-                      <span>{d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.chofer}</em></span>
-                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        {CLP(d.monto)}
-                        <button className="aq-btn-sec" onClick={() => { setPagoModal(d); setPagoFoto(null); setErrorPago(""); }}>Marcar pagado</button>
-                      </span>
-                    </div>
-                  ))}
+                  {pendientes.map((d, i) => {
+                    const ab = Number(d.abonado) || 0;
+                    const saldo = d.saldo ?? d.monto;
+                    return (
+                      <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center" }}>
+                        <span>{d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em></span>
+                        <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          {CLP(d.monto)}
+                          <button className="aq-btn-sec" onClick={() => abrirAbono("proveedor", { numero_guia: d.numero_guia, mes: d.mes, proveedor: d.proveedor, chofer: d.chofer, monto: d.monto, abonado: ab, saldo, titulo: d.proveedor })}>Abonar</button>
+                          <button className="aq-btn-sec" onClick={() => { setPagoModal(d); setPagoFoto(null); setErrorPago(""); }}>Marcar pagado</button>
+                        </span>
+                      </div>
+                    );
+                  })}
 
                   {pagadas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Pagadas</strong>}
                   {pagadas.map((d, i) => (
@@ -3408,6 +3525,66 @@ export default function App() {
                     {subiendoPago ? "Registrando…" : "Confirmar pago"}
                   </button>
                   <button className="aq-btn-sec" disabled={subiendoPago} onClick={() => setPagoModal(null)}>Cancelar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: registrar abono parcial (cobro cliente o deuda proveedor) */}
+        {abonoModal && (
+          <div className="aq-modal-ov" onClick={() => !guardandoAbono && setAbonoModal(null)}>
+            <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="aq-modal-head">
+                <div>
+                  <strong>Registrar abono</strong>
+                  <span className="aq-muted">
+                    {abonoModal.titulo || abonoModal.numero_guia} · Guía {abonoModal.numero_guia}
+                  </span>
+                </div>
+                <button className="aq-link" disabled={guardandoAbono} onClick={() => setAbonoModal(null)}>Cerrar ✕</button>
+              </div>
+              <div className="aq-modal-edit">
+                <div className="aq-desglose" style={{ marginBottom: 10 }}>
+                  <div className="aq-desglose-row"><span>Monto total</span><strong>{CLP(abonoModal.tipo === "cobro" ? abonoModal.monto_total : abonoModal.monto)}</strong></div>
+                  <div className="aq-desglose-row"><span>Abonado</span><strong className="pos">{CLP(abonoModal.tipo === "cobro" ? abonoModal.cobro_abonado : abonoModal.abonado)}</strong></div>
+                  <div className="aq-desglose-row total"><span>Saldo pendiente</span><strong className="neg">{CLP(abonoModal.saldo)}</strong></div>
+                </div>
+                <label className="aq-mini">Monto del abono (CLP)</label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max={abonoModal.saldo}
+                  value={abonoMonto}
+                  onChange={(e) => { setAbonoMonto(e.target.value); setErrorAbono(""); }}
+                  placeholder={`Máx. ${abonoModal.saldo}`}
+                />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button className="aq-link" type="button" onClick={() => setAbonoMonto(String(abonoModal.saldo))}>Abonar saldo completo</button>
+                </div>
+                {errorAbono && <div className="aq-error" style={{ marginTop: 8 }}>{errorAbono}</div>}
+
+                {abonoHist.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <strong className="aq-mini">Historial de abonos</strong>
+                    {abonoHist.map((h) => (
+                      <div className="aq-det-line" key={h.id}>
+                        <span className="aq-tr-sub">
+                          {h.fecha ? new Date(h.fecha).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "2-digit" }) : ""}
+                          {h.registrado_por ? " · " + h.registrado_por : ""}
+                        </span>
+                        <span>{CLP(h.monto)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <button className="aq-btn" style={{ marginTop: 0 }} disabled={guardandoAbono || !(Number(abonoMonto) > 0)} onClick={confirmarAbono}>
+                    {guardandoAbono ? "Registrando…" : "Confirmar abono"}
+                  </button>
+                  <button className="aq-btn-sec" disabled={guardandoAbono} onClick={() => setAbonoModal(null)}>Cancelar</button>
                 </div>
               </div>
             </div>
@@ -3727,7 +3904,9 @@ export default function App() {
                                           {p.cobro_cobrado ? (
                                             <div>✓ Pagado{p.cobro_at ? " el " + new Date(p.cobro_at).toLocaleDateString("es-CL") : ""}{p.cobro_por ? " · " + p.cobro_por : ""} · {CLP(p.monto_total)}</div>
                                           ) : esPagoNo(entrega) ? (
-                                            <div>Pendiente de cobro · {CLP(p.monto_total)}</div>
+                                            (Number(p.cobro_abonado) || 0) > 0
+                                              ? <div>Abonado {CLP(p.cobro_abonado)} · Saldo {CLP(Math.max(0, (Number(p.monto_total) || 0) - (Number(p.cobro_abonado) || 0)))}</div>
+                                              : <div>Pendiente de cobro · {CLP(p.monto_total)}</div>
                                           ) : null}
                                           {p.cobro_recuperado && <div>✓ Bidón recuperado</div>}
                                           {(Number(p.cobro_intentos) || 0) > 0 && <div>Intentos de cobro: {p.cobro_intentos}</div>}
@@ -3911,8 +4090,17 @@ export default function App() {
             <div className="aq-subtabs" style={{ marginTop: 4 }}>
               <button className={filtroCob === "pendientes" ? "on" : ""} onClick={() => setFiltroCob("pendientes")}>Pendientes</button>
               <button className={filtroCob === "gestionados" ? "on" : ""} onClick={() => setFiltroCob("gestionados")}>Cobrados</button>
+              <button className={filtroCob === "vencidos" ? "on" : ""} onClick={() => setFiltroCob("vencidos")}>+30 días</button>
               <button className={filtroCob === "todos" ? "on" : ""} onClick={() => setFiltroCob("todos")}>Todos</button>
             </div>
+
+            <input
+              className="aq-buscar-ped"
+              style={{ marginTop: 8 }}
+              placeholder="Buscar por cliente, RUT, guía o comuna…"
+              value={buscarCob}
+              onChange={(e) => setBuscarCob(e.target.value)}
+            />
 
             {errorCob && <div className="aq-result bad" style={{ marginTop: 10 }}>{errorCob}</div>}
             {okCob && <div className="aq-result ok" style={{ marginTop: 10 }}>{okCob}</div>}
@@ -3975,6 +4163,9 @@ export default function App() {
                             const intentos = Number(p.cobro_intentos) || 0;
                             const enProceso = guardandoCob === p.id;
                             const dias = e?.gestionado_en ? Math.floor((Date.now() - new Date(e.gestionado_en).getTime()) / 86400000) : null;
+                            const montoP = Number(p.monto_total) || montoEntrega(e) || 0;
+                            const abonadoP = Number(p.cobro_abonado) || 0;
+                            const saldoP = p.cobro_cobrado ? 0 : Math.max(0, montoP - abonadoP);
                             return (
                               <div className="aq-cob" key={p.id}>
                                 <div className="aq-cob-head">
@@ -3986,16 +4177,25 @@ export default function App() {
                                       {dias != null ? " · " + dias + " días" : ""}
                                     </span>
                                   </div>
-                                  <span className="aq-tr-monto">{CLP(p.monto_total || montoEntrega(e))}</span>
+                                  <div style={{ textAlign: "right" }}>
+                                    <span className="aq-tr-monto">{CLP(montoP)}</span>
+                                    {abonadoP > 0 && !p.cobro_cobrado && (
+                                      <div className="aq-tr-sub">Abonado {CLP(abonadoP)} · Saldo {CLP(saldoP)}</div>
+                                    )}
+                                  </div>
                                 </div>
                                 <div className="aq-cob-badges">
                                   <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
+                                  {abonadoP > 0 && !p.cobro_cobrado && <span className="aq-badge">Saldo {CLP(saldoP)}</span>}
                                   <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
                                   <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
                                 </div>
                                 <div className="aq-cob-acts">
                                   <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
                                     {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
+                                  </button>
+                                  <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado || saldoP <= 0} onClick={() => abrirAbono("cobro", { numero_guia: p.numero_guia, pedidoId: p.id, monto_total: montoP, cobro_abonado: abonadoP, saldo: saldoP, titulo: clientePorId[p.cliente_id]?.nombre || p.numero_guia })}>
+                                    + Abono
                                   </button>
                                   <button className={"aq-btn-sec" + (p.cobro_recuperado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_recuperado")}>
                                     {p.cobro_recuperado ? "✓ Recuperado" : "Marcar recuperado"}
