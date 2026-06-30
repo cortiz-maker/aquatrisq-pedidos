@@ -56,6 +56,20 @@ const COORDS_POR_CLAVE = Object.fromEntries(
   Object.entries(COMUNA_COORDS).map(([nom, xy]) => [claveComuna(nom), xy])
 );
 
+// Convierte cualquier error capturado (Error normal, PostgrestError de Supabase,
+// fallo de red, u objeto/array inesperado) en un texto corto y legible para la UI.
+// Nunca debe mostrarse JSON crudo ni datos de tablas al usuario, así que si el
+// mensaje no es un string razonable, se descarta y se usa el texto de respaldo.
+function mensajeError(e, fallback) {
+  if (!e) return fallback;
+  if (typeof e === "string") return e.length < 200 ? e : fallback;
+  const msg = e.message || e.details || e.hint || "";
+  if (typeof msg === "string" && msg && msg.length < 200 && !/^[\[{]/.test(msg.trim())) {
+    return msg;
+  }
+  return fallback;
+}
+
 // Mapa de la Región Metropolitana con un PIN por comuna, dimensionado por nº de pedidos.
 // Carga Leaflet desde CDN en tiempo de ejecución (sin dependencias en el repo).
 function MapaComunasRM({ comunas }) {
@@ -775,26 +789,26 @@ export default function App() {
     }
     setCargando(true);
     (async () => {
-      try {
-        // Supabase devuelve máximo 1000 filas por consulta. clientes y
-        // domicilios superan eso, así que los traemos paginando en bloques.
-        const traerTodo = async (tabla, columnas) => {
-          const PAGE = 1000;
-          let desde = 0;
-          let acumulado = [];
-          for (;;) {
-            const { data, error } = await supabase
-              .from(tabla)
-              .select(columnas)
-              .range(desde, desde + PAGE - 1);
-            if (error) throw error;
-            acumulado = acumulado.concat(data || []);
-            if (!data || data.length < PAGE) break;
-            desde += PAGE;
-          }
-          return acumulado;
-        };
+      // Supabase devuelve máximo 1000 filas por consulta. clientes y
+      // domicilios superan eso, así que los traemos paginando en bloques.
+      const traerTodo = async (tabla, columnas) => {
+        const PAGE = 1000;
+        let desde = 0;
+        let acumulado = [];
+        for (;;) {
+          const { data, error } = await supabase
+            .from(tabla)
+            .select(columnas)
+            .range(desde, desde + PAGE - 1);
+          if (error) throw error;
+          acumulado = acumulado.concat(data || []);
+          if (!data || data.length < PAGE) break;
+          desde += PAGE;
+        }
+        return acumulado;
+      };
 
+      const intentarCarga = async () => {
         const [cli, dom, p, t] = await Promise.all([
           traerTodo("clientes", "*"),
           traerTodo("domicilios", "id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal"),
@@ -808,11 +822,27 @@ export default function App() {
         setProductos(p.data || []);
         setTramos(t.data || []);
         setTodosDomicilios(dom);
-      } catch (e) {
-        setErrorCarga(e.message || "No se pudieron cargar los catálogos.");
-      } finally {
-        setCargando(false);
+      };
+
+      // La carga inicial hace varias llamadas en paralelo; un hipo de red
+      // intermitente puede tumbar una sola de ellas. Antes de mostrarle un
+      // error al usuario, reintentamos un par de veces (lo mismo que lograba
+      // recargar la página a mano, pero automático).
+      const REINTENTOS = 2;
+      for (let intento = 0; intento <= REINTENTOS; intento++) {
+        try {
+          await intentarCarga();
+          setErrorCarga("");
+          break;
+        } catch (e) {
+          if (intento === REINTENTOS) {
+            setErrorCarga(mensajeError(e, "No se pudieron cargar los catálogos. Verifica tu conexión e intenta de nuevo."));
+          } else {
+            await new Promise((res) => setTimeout(res, 800 * (intento + 1)));
+          }
+        }
       }
+      setCargando(false);
     })();
   }, [credsListas, session]);
 
@@ -852,7 +882,7 @@ export default function App() {
       // Caja del mes (Efectivo a Rendir + Pendiente proveedor + Costo recargas).
       try { setCajaMes(await calcularCajaMes(per)); } catch { setCajaMes(null); }
     } catch (e) {
-      setErrorDash(e.message || "No se pudo cargar el período.");
+      setErrorDash(mensajeError(e, "No se pudo cargar el período."));
       setPedidosMes([]);
     } finally {
       setCargandoDash(false);
@@ -989,7 +1019,7 @@ export default function App() {
 
       setGer({ meses, mix, comunas, mesActual, porCobrarMes, ticket, venc30, efectivo, provPendiente, provResumen });
     } catch (e) {
-      setErrorGer(e.message || "No se pudo cargar el panel gerencial.");
+      setErrorGer(mensajeError(e, "No se pudo cargar el panel gerencial."));
       setGer(null);
     } finally {
       setCargandoGer(false);
@@ -1065,7 +1095,7 @@ export default function App() {
       lista.sort((a, b) => Number(a.pagado) - Number(b.pagado) || b.monto - a.monto);
       setDeudasProv(lista);
     } catch (e) {
-      setErrorDeudas(e.message || "No se pudieron cargar las deudas.");
+      setErrorDeudas(mensajeError(e, "No se pudieron cargar las deudas."));
       setDeudasProv(null);
     } finally {
       setCargandoDeudas(false);
@@ -1106,7 +1136,7 @@ export default function App() {
       setPagoModal(null); setPagoFoto(null);
       await cargarDeudasProv();
     } catch (e) {
-      setErrorPago(e.message || "No se pudo registrar el pago.");
+      setErrorPago(mensajeError(e, "No se pudo registrar el pago."));
     } finally {
       setSubiendoPago(false);
     }
@@ -1120,7 +1150,7 @@ export default function App() {
       if (error) throw error;
       window.open(data.signedUrl, "_blank");
     } catch (e) {
-      alert("No se pudo abrir el respaldo: " + (e.message || ""));
+      alert("No se pudo abrir el respaldo: " + mensajeError(e, "error desconocido"));
     }
   }
 
@@ -1195,7 +1225,7 @@ export default function App() {
       }
       setAbonoModal(null); setAbonoMonto("");
     } catch (e) {
-      setErrorAbono(e.message || "No se pudo registrar el abono.");
+      setErrorAbono(mensajeError(e, "No se pudo registrar el abono."));
     } finally {
       setGuardandoAbono(false);
     }
@@ -1260,7 +1290,7 @@ export default function App() {
       if (error) setLoginError("Email o contraseña incorrectos.");
       else setLoginPass("");
     } catch (e) {
-      setLoginError(e.message || "No se pudo iniciar sesión.");
+      setLoginError(mensajeError(e, "No se pudo iniciar sesión."));
     } finally {
       setLogueando(false);
     }
@@ -1507,7 +1537,7 @@ export default function App() {
         // Si eEnt existe (p.ej. RLS), no rompemos el historial: solo no se muestra el estado de entrega.
       }
     } catch (e) {
-      setErrorHist(e.message || "No se pudo cargar el historial.");
+      setErrorHist(mensajeError(e, "No se pudo cargar el historial."));
       setHistPedidos([]);
     } finally {
       setCargandoHist(false);
@@ -1575,7 +1605,7 @@ export default function App() {
       setPedidosMes((prev) => prev.map((p) => p.id === pedActualizado.id ? pedActualizado : p));
       setOkPed("Pedido e items actualizados.");
     } catch (e) {
-      setErrPed(e.message || "No se pudo guardar.");
+      setErrPed(mensajeError(e, "No se pudo guardar."));
     } finally {
       setGuardandoPed(false);
     }
@@ -1611,7 +1641,7 @@ export default function App() {
       setPedidosMes((prev) => prev.map((x) => x.id === p.id ? pedActualizado : x));
       setOkPed("Enviado a DispatchTrack correctamente.");
     } catch (e) {
-      setErrPed(e.message || "No se pudo enviar a DispatchTrack.");
+      setErrPed(mensajeError(e, "No se pudo enviar a DispatchTrack."));
     } finally {
       setEnviandoDT(false);
     }
@@ -1649,7 +1679,7 @@ export default function App() {
         .sort((a, b) => new Date(b.entrega?.gestionado_en || 0) - new Date(a.entrega?.gestionado_en || 0));
       setCobranzas(lista);
     } catch (e) {
-      setErrorCob(e.message || "No se pudo cargar la gestión de cobro.");
+      setErrorCob(mensajeError(e, "No se pudo cargar la gestión de cobro."));
       setCobranzas([]);
     } finally {
       setCargandoCob(false);
@@ -1675,7 +1705,7 @@ export default function App() {
       actualizarCobranzaLocal(pedido.id, patch);
       setOkCob(`${pedido.numero_guia || ""}: ${campo === "cobro_cobrado" ? "Cobrado" : "Recuperado"} ${nuevo ? "marcado" : "desmarcado"}.`);
     } catch (e) {
-      setErrorCob(e.message || "No se pudo actualizar.");
+      setErrorCob(mensajeError(e, "No se pudo actualizar."));
     } finally {
       setGuardandoCob("");
     }
@@ -1707,7 +1737,7 @@ export default function App() {
         }
       }
     } catch (e) {
-      setErrorCob(e.message || "No se pudo registrar el intento.");
+      setErrorCob(mensajeError(e, "No se pudo registrar el intento."));
     } finally {
       setGuardandoCob("");
     }
@@ -1771,7 +1801,7 @@ export default function App() {
       });
       setDomEdit(null);
     } catch (e) {
-      setErrDom(e.message || "No se pudo guardar el domicilio.");
+      setErrDom(mensajeError(e, "No se pudo guardar el domicilio."));
     } finally {
       setGuardandoDom(false);
     }
@@ -1869,7 +1899,7 @@ export default function App() {
       if (error) throw error;
       setProductosAll(data || []);
     } catch (e) {
-      setErrorProd(e.message || "No se pudieron cargar los productos.");
+      setErrorProd(mensajeError(e, "No se pudieron cargar los productos."));
     } finally {
       setCargandoProd(false);
     }
@@ -1951,7 +1981,7 @@ export default function App() {
       if (error) throw error;
       setPerfiles(data || []);
     } catch (e) {
-      setErrorPerf(e.message || "No se pudieron cargar los perfiles.");
+      setErrorPerf(mensajeError(e, "No se pudieron cargar los perfiles."));
     } finally {
       setCargandoPerf(false);
     }
@@ -2114,7 +2144,7 @@ export default function App() {
       if (omitidos.length) msg += ` ⚠ No se cargaron (pausados/sin stock): ${omitidos.join(", ")}.`;
       setAvisoRepetir(msg);
     } catch (e) {
-      setAvisoRepetir("Error al repetir la compra: " + (e.message || e));
+      setAvisoRepetir("Error al repetir la compra: " + mensajeError(e, "error desconocido"));
     } finally {
       setRepitiendo(false);
     }
@@ -2272,7 +2302,7 @@ export default function App() {
       try { localStorage.setItem(LS_NUM_RESERVADO, num); } catch { /* noop */ }
       return num;
     } catch (e) {
-      setErrorReserva(e.message || "No se pudo reservar el número.");
+      setErrorReserva(mensajeError(e, "No se pudo reservar el número."));
       return null;
     } finally {
       setReservandoNum(false);
@@ -2492,7 +2522,7 @@ export default function App() {
       setNumeroReservado(null);
       try { localStorage.removeItem(LS_NUM_RESERVADO); } catch { /* noop */ }
     } catch (e) {
-      setResultado({ ok: false, msg: "No se pudo guardar: " + (e.message || e) });
+      setResultado({ ok: false, msg: "No se pudo guardar: " + mensajeError(e, "error desconocido") });
     } finally {
       setGuardando(false);
     }
