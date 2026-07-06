@@ -395,12 +395,12 @@ async function descargarResumenEjecutivo(ger) {
   const wb = XLSX.utils.book_new();
   const usados = new Set();
   const hoy = new Date();
-  const mesTxt = hoy.toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+  const corteTxt = hoy.toLocaleDateString("es-CL", { day: "2-digit", month: "long", year: "numeric" });
 
   // 1) Resumen general
   const resumen = [
     ["Resumen ejecutivo de caja", ""],
-    ["Periodo", mesTxt],
+    ["Corte al", corteTxt],
     ["Generado", hoy.toLocaleString("es-CL")],
     ["", ""],
     ["Concepto", "Monto"],
@@ -418,7 +418,7 @@ async function descargarResumenEjecutivo(ger) {
   (ef.choferes || []).forEach((c) => {
     const filas = [
       ["Chofer", c.chofer],
-      ["Periodo", mesTxt],
+      ["Corte al", corteTxt],
       ["", ""],
       ["Concepto", "Monto"],
       ["Recaudación", c.recaudacion],
@@ -457,7 +457,7 @@ async function descargarResumenEjecutivo(ger) {
   // 3) Pendiente de pago a proveedor
   const pend = [
     ["Pendiente de pago a proveedor", "", "", ""],
-    ["Periodo", mesTxt, "", ""],
+    ["Corte al", corteTxt, "", ""],
     ["", "", "", ""],
     ["Proveedor", "Guía", "Chofer", "Monto"],
   ];
@@ -472,6 +472,12 @@ async function descargarResumenEjecutivo(ger) {
 
 // ── Caja del mes (Efectivo a Rendir + Pendiente proveedor) para un mesKey ──
 // Reutilizable por el panel gerencial y por el dashboard admin/operador.
+//
+// IMPORTANTE: "Efectivo a Rendir" y "Pendiente pago proveedor" son SALDOS (estado actual),
+// no flujos del mes — por eso se calculan de forma ACUMULATIVA (todas las guías hasta el
+// fin del mes consultado), para que lo pendiente de un mes que se resuelve (rendición o
+// pago de factura) en un mes posterior se refleje correctamente y no quede "perdido".
+// "Costo recargas del mes" en cambio SÍ es un flujo y se mantiene acotado al mes exacto.
 async function calcularCajaMes(mesKey) {
   const efectivo = {
     recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
@@ -481,16 +487,24 @@ async function calcularCajaMes(mesKey) {
   let provResumen = { generado: 0, pagado: 0, pendiente: 0 };
   let costo = { total: 0, u20: 0, u12: 0, u10: 0, porDia: [] };
   try {
+    // Límite superior EXCLUSIVO = primer día del mes siguiente a mesKey.
+    const [ay, am] = mesKey.split("-").map(Number);
+    const limiteSup = new Date(ay, am, 1).toISOString().slice(0, 10);
+
+    // Todas las guías creadas hasta el fin de mesKey (acumulado, sin límite inferior).
     const { data: peds } = await supabase
-      .from("pedidos").select("created_at, numero_guia").gte("created_at", mesKey + "-01");
-    const guiasMes = [...new Set(
-      (peds || [])
-        .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
-        .map((p) => p.numero_guia)
-    )];
+      .from("pedidos").select("created_at, numero_guia").lt("created_at", limiteSup);
+    const guiasDelMesSet = new Set(); // sólo para "costo recargas": flujo exacto del mes.
+    const guiasHasta = [];
+    const vistos = new Set();
+    (peds || []).forEach((p) => {
+      if (!p.numero_guia) return;
+      if ((p.created_at || "").slice(0, 7) === mesKey) guiasDelMesSet.add(p.numero_guia);
+      if (!vistos.has(p.numero_guia)) { vistos.add(p.numero_guia); guiasHasta.push(p.numero_guia); }
+    });
     let entsMes = [];
-    for (let i = 0; i < guiasMes.length; i += 200) {
-      const lote = guiasMes.slice(i, i + 200);
+    for (let i = 0; i < guiasHasta.length; i += 200) {
+      const lote = guiasHasta.slice(i, i + 200);
       if (!lote.length) break;
       const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
       entsMes = entsMes.concat(data || []);
@@ -503,11 +517,13 @@ async function calcularCajaMes(mesKey) {
       const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
       if (!prev || t >= tp) porGuia[e.guide] = e;
     });
+    // Pagos a proveedor: acumulado (sin filtrar por mes) — un pago hecho en cualquier
+    // momento debe reflejarse siempre, sin importar en qué mes se generó la factura.
     const pagadosSet = new Set();
     try {
       const { data: pgs } = await supabase
         .from("pagos_proveedor").select("numero_guia, pagado")
-        .eq("mes", mesKey).eq("pagado", true);
+        .eq("pagado", true);
       (pgs || []).forEach((p) => pagadosSet.add(normGuia(p.numero_guia)));
     } catch { /* tabla aún no creada */ }
     let generadoProv = 0, pagadoProvTotal = 0;
@@ -540,15 +556,18 @@ async function calcularCajaMes(mesKey) {
       const esProv = esCompraProveedor(e);
       if (esProv) {
         // Costo real por unidades del formulario (20L $600 · 12/10L $300).
-        const un = unidadesCompraProveedor(e);
-        if (un.u20 || un.u12 || un.u10) {
-          const c = un.u20 * 600 + (un.u12 + un.u10) * 300;
-          costo.total += c; costo.u20 += un.u20; costo.u12 += un.u12; costo.u10 += un.u10;
-          const dia = (e.gestionado_en || "").slice(0, 10) || mesKey;
-          if (!diasCosto[dia]) diasCosto[dia] = { dia, total: 0, u20: 0, u12: 0, u10: 0, items: [] };
-          const d = diasCosto[dia];
-          d.total += c; d.u20 += un.u20; d.u12 += un.u12; d.u10 += un.u10;
-          d.items.push({ guide: e.guide, proveedor: nombreProveedor(e), u20: un.u20, u12: un.u12, u10: un.u10, costo: c });
+        // Flujo del mes exacto: sólo cuenta si la guía se creó dentro de mesKey.
+        if (guiasDelMesSet.has(e.guide)) {
+          const un = unidadesCompraProveedor(e);
+          if (un.u20 || un.u12 || un.u10) {
+            const c = un.u20 * 600 + (un.u12 + un.u10) * 300;
+            costo.total += c; costo.u20 += un.u20; costo.u12 += un.u12; costo.u10 += un.u10;
+            const dia = (e.gestionado_en || "").slice(0, 10) || mesKey;
+            if (!diasCosto[dia]) diasCosto[dia] = { dia, total: 0, u20: 0, u12: 0, u10: 0, items: [] };
+            const d = diasCosto[dia];
+            d.total += c; d.u20 += un.u20; d.u12 += un.u12; d.u10 += un.u10;
+            d.items.push({ guide: e.guide, proveedor: nombreProveedor(e), u20: un.u20, u12: un.u12, u10: un.u10, costo: c });
+          }
         }
         const m = montoCompraProveedor(e);
         generadoProv += m;
@@ -1031,24 +1050,33 @@ export default function App() {
   }, [rol, vista, session, todosDomicilios]);
 
   // ── Mantenedor de deudas a proveedor (admin/operador) ──────
+  // Muestra TODAS las facturas de proveedor pendientes, sin importar el mes en que se
+  // generaron (antes sólo mostraba las del mes en curso y las deudas de meses anteriores
+  // "desaparecían" de esta pantalla al cambiar de mes aunque siguieran sin pagarse).
+  // Ventana: últimos 12 meses hacia atrás desde hoy, para acotar el volumen de datos
+  // sin perder facturas pendientes recientes.
   async function cargarDeudasProv() {
     setCargandoDeudas(true); setErrorDeudas("");
     try {
-      const mesKey = hoyPeriodo();
-      const desdeMes = mesKey + "-01";
+      const hoy = new Date();
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
       const { data: peds, error: ePed } = await supabase
         .from("pedidos")
         .select("created_at, numero_guia")
-        .gte("created_at", desdeMes);
+        .gte("created_at", desde);
       if (ePed) throw ePed;
-      const guiasMes = [...new Set(
-        (peds || [])
-          .filter((p) => (p.created_at || "").slice(0, 7) === mesKey && p.numero_guia)
-          .map((p) => p.numero_guia)
-      )];
+      const mesPorGuia = {}; // guía → mes de origen (mes del pedido, no el mes actual)
+      const guias = [];
+      const vistos = new Set();
+      (peds || []).forEach((p) => {
+        if (!p.numero_guia) return;
+        const m = (p.created_at || "").slice(0, 7);
+        if (!mesPorGuia[p.numero_guia]) mesPorGuia[p.numero_guia] = m;
+        if (!vistos.has(p.numero_guia)) { vistos.add(p.numero_guia); guias.push(p.numero_guia); }
+      });
       let entsMes = [];
-      for (let i = 0; i < guiasMes.length; i += 200) {
-        const lote = guiasMes.slice(i, i + 200);
+      for (let i = 0; i < guias.length; i += 200) {
+        const lote = guias.slice(i, i + 200);
         if (!lote.length) break;
         const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
         entsMes = entsMes.concat(data || []);
@@ -1061,10 +1089,11 @@ export default function App() {
         const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
         if (!prev || t >= tp) porGuia[e.guide] = e;
       });
-      // Pagos ya registrados en la app (fuente de verdad del "pagado").
+      // Pagos ya registrados en la app (fuente de verdad del "pagado") — sin filtrar por
+      // mes: un pago o abono registrado en cualquier momento debe reflejarse siempre.
       const pagosMap = {};
       try {
-        const { data: pgs } = await supabase.from("pagos_proveedor").select("*").eq("mes", mesKey);
+        const { data: pgs } = await supabase.from("pagos_proveedor").select("*");
         (pgs || []).forEach((p) => { pagosMap[normGuia(p.numero_guia)] = p; });
       } catch { /* tabla aún no creada */ }
       const lista = [];
@@ -1084,7 +1113,7 @@ export default function App() {
           abonado,
           saldo: Math.max(0, monto - abonado),
           chofer: CHOFER_OVERRIDE[gN] || (e.chofer || "").trim() || "Sin chofer",
-          mes: mesKey,
+          mes: mesPorGuia[e.guide] || pago?.mes || hoyPeriodo(),
           pagado: pagadoApp || pagadoDT,
           origenPago: pagadoApp ? "app" : (pagadoDT ? "dispatchtrack" : null),
           fecha_pago: pago?.fecha_pago || null,
@@ -1092,7 +1121,7 @@ export default function App() {
           respaldo_path: pago?.respaldo_path || null,
         });
       });
-      lista.sort((a, b) => Number(a.pagado) - Number(b.pagado) || b.monto - a.monto);
+      lista.sort((a, b) => Number(a.pagado) - Number(b.pagado) || (a.mes < b.mes ? 1 : a.mes > b.mes ? -1 : 0) || b.monto - a.monto);
       setDeudasProv(lista);
     } catch (e) {
       setErrorDeudas(mensajeError(e, "No se pudieron cargar las deudas."));
@@ -3233,7 +3262,7 @@ export default function App() {
                       <div className="aq-modal-head">
                         <div>
                           <strong>Efectivo libre / a Rendir</strong>
-                          <span className="aq-muted">Mes en curso · sobre entregas de DispatchTrack</span>
+                          <span className="aq-muted">Saldo acumulado a la fecha · incluye meses anteriores no resueltos</span>
                         </div>
                         <button className="aq-link" onClick={() => setPopEfectivo(false)}>Cerrar ✕</button>
                       </div>
@@ -3343,7 +3372,7 @@ export default function App() {
                       <div className="aq-modal-head">
                         <div>
                           <strong>Pendiente de pago a proveedor</strong>
-                          <span className="aq-muted">Facturas con Estado = Pendiente · mes en curso</span>
+                          <span className="aq-muted">Facturas con Estado = Pendiente · saldo acumulado (todos los meses)</span>
                         </div>
                         <button className="aq-link" onClick={() => setPopProveedor(false)}>Cerrar ✕</button>
                       </div>
@@ -3358,7 +3387,7 @@ export default function App() {
                       {cajaView.provResumen && (
                         <div className="aq-desglose" style={{ marginTop: 8 }}>
                           <div className="aq-desglose-row">
-                            <span>Generado en el mes</span>
+                            <span>Generado (acumulado)</span>
                             <strong>{CLP(cajaView.provResumen.generado)}</strong>
                           </div>
                           <div className="aq-desglose-row">
@@ -3373,7 +3402,7 @@ export default function App() {
                       )}
 
                       {cajaView.provPendiente.proveedores.length === 0 ? (
-                        <p className="aq-muted">Sin facturas pendientes en el mes.</p>
+                        <p className="aq-muted">Sin facturas pendientes.</p>
                       ) : (
                         <div className="aq-modal-edit">
                           <strong>Desglose por proveedor</strong>
@@ -3465,7 +3494,7 @@ export default function App() {
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
               <div>
                 <h2 style={{ margin: 0 }}>Pagos a proveedor</h2>
-                <span className="aq-muted">Compras a proveedor del mes · marca cada una como pagada con su respaldo bancario.</span>
+                <span className="aq-muted">Compras a proveedor pendientes (últimos 12 meses) · marca cada una como pagada con su respaldo bancario.</span>
               </div>
               <button className="aq-btn-sec" onClick={cargarDeudasProv} disabled={cargandoDeudas}>↻ Actualizar</button>
             </div>
@@ -3473,7 +3502,7 @@ export default function App() {
             {errorDeudas && <div className="aq-error" style={{ marginBottom: 8 }}>{errorDeudas}</div>}
             {cargandoDeudas && <p className="aq-muted">Cargando deudas…</p>}
             {!cargandoDeudas && deudasProv && deudasProv.length === 0 && (
-              <p className="aq-muted">No hay compras a proveedor registradas este mes.</p>
+              <p className="aq-muted">No hay compras a proveedor registradas.</p>
             )}
 
             {!cargandoDeudas && deudasProv && deudasProv.length > 0 && (() => {
@@ -3485,7 +3514,7 @@ export default function App() {
               return (
                 <>
                   <div className="aq-desglose" style={{ marginBottom: 12 }}>
-                    <div className="aq-desglose-row"><span>Generado en el mes</span><strong>{CLP(totGen)}</strong></div>
+                    <div className="aq-desglose-row"><span>Generado (12 meses)</span><strong>{CLP(totGen)}</strong></div>
                     <div className="aq-desglose-row"><span>Pagado / abonado</span><strong className="pos">{CLP(totPagado)}</strong></div>
                     <div className="aq-desglose-row total"><span>Saldo pendiente</span><strong className="neg">{CLP(totSaldo)}</strong></div>
                   </div>
@@ -3496,7 +3525,7 @@ export default function App() {
                     const saldo = d.saldo ?? d.monto;
                     return (
                       <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center" }}>
-                        <span>{d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em></span>
+                        <span>{d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em></span>
                         <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                           {CLP(d.monto)}
                           <button className="aq-btn-sec" onClick={() => abrirAbono("proveedor", { numero_guia: d.numero_guia, mes: d.mes, proveedor: d.proveedor, chofer: d.chofer, monto: d.monto, abonado: ab, saldo, titulo: d.proveedor })}>Abonar</button>
@@ -3507,11 +3536,11 @@ export default function App() {
                   })}
 
                   {pagadas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Pagadas</strong>}
-                  {pagadas.map((d, i) => (
+                  {pagadas.slice(0, 40).map((d, i) => (
                     <div className="aq-det-line aq-prov-fact" key={"pag" + i}>
                       <span>{d.proveedor} · Guía {d.numero_guia}
                         <em className="aq-det-chofer">
-                          {d.origenPago === "app"
+                          {d.mes} · {d.origenPago === "app"
                             ? `Pagado por ${d.pagado_por || "—"}${d.fecha_pago ? " · " + new Date(d.fecha_pago).toLocaleDateString("es-CL") : ""}`
                             : "Pagado (DispatchTrack)"}
                         </em>
@@ -3524,6 +3553,11 @@ export default function App() {
                       </span>
                     </div>
                   ))}
+                  {pagadas.length > 40 && (
+                    <p className="aq-muted" style={{ marginTop: 8 }}>
+                      Mostrando 40 de {pagadas.length} pagadas (más recientes primero).
+                    </p>
+                  )}
                 </>
               );
             })()}
@@ -5202,3 +5236,4 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
+
