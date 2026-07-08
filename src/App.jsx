@@ -345,7 +345,7 @@ const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00006"]);
 // Chofer real cuando DispatchTrack dejó el campo vacío. Clave = guía sin guiones.
 const CHOFER_OVERRIDE = { "AQ00043": "Felipe Hernandez" };
 // Compras Proveedor mal marcadas "Pagado" en DispatchTrack y que están PENDIENTES.
-const FORZAR_PENDIENTE = new Set(["AQ00013"]);
+const FORZAR_PENDIENTE = new Set(["AQ00013", "AQ00193"]);
 
 // Lee del formulario de "Compra Proveedor" (DispatchTrack) las unidades por
 // formato. Tolerante a la grafía del nombre del campo: busca 20/12/10 + "lt".
