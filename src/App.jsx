@@ -1682,15 +1682,18 @@ export default function App() {
     setErrorCob("");
     setOkCob("");
     try {
-      // Entregas gestionadas (traen formulario) → filtramos las de Pago = No
+      // Entregas gestionadas (traen formulario) → filtramos las de Pago = No.
+      // Ojo: "gestionada" = gestionado_en seteado O status >= 2 (mismo criterio
+      // que estadoEntregaDT). Filtrar solo por gestionado_en en la query dejaba
+      // fuera entregas con status >= 2 pero gestionado_en aún nulo.
       const { data: ents, error: eEnt } = await supabase
         .from("dt_entregas")
         .select("*")
-        .not("gestionado_en", "is", null)
-        .order("gestionado_en", { ascending: false })
+        .order("gestionado_en", { ascending: false, nullsFirst: false })
         .limit(1000);
       if (eEnt) throw eEnt;
-      const pagoNo = (ents || []).filter((e) => esPagoNo(e));
+      const gestionadas = (ents || []).filter((e) => !!e.gestionado_en || Number(e.status) >= 2);
+      const pagoNo = gestionadas.filter((e) => esPagoNo(e));
       const guias = [...new Set(pagoNo.map((e) => e.guide).filter(Boolean))];
       let peds = [];
       if (guias.length) {
