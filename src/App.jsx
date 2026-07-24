@@ -2237,6 +2237,44 @@ export default function App() {
     }
   }
 
+  // dd-mm-aaaa a partir del input type="date" (yyyy-mm-dd), para que calce
+  // con el formato que ya usa César al redactar los correos a mano.
+  function formatearFechaCL(iso) {
+    if (!iso) return "-";
+    const [y, m, d] = iso.split("-");
+    if (!y || !m || !d) return iso;
+    return d + "-" + m + "-" + y;
+  }
+
+  // Texto de envío por correo para una cotización: mismo formato que el
+  // redactado manualmente (estimados + adjunto cotización + vigencia +
+  // medios de pago + recargo 30 días + cierre), pero armado con los datos
+  // reales de la cotización para copiar/pegar sin reescribirlo cada vez.
+  function textoEnvioCotiz(c, items) {
+    const nombreCli = c.cliente_id ? (c.cliente_nombre || c.razon_social || "") : (c.razon_social || "");
+    const productos = items.map((it) => it.nombre).filter(Boolean).join(", ");
+    const asunto = "Cotización " + (c.folio || "") + " – Aquatrisq";
+    const cuerpo =
+      "Estimados " + (nombreCli || "-") + "\n" +
+      "Adjunto cotización " + (c.folio || "") + " por " + (productos || "los productos cotizados") + ", válida hasta " + formatearFechaCL(c.fecha_vigencia) + ".\n" +
+      "Medios de pago: transferencia bancaria o pago online. Pagos a 30 días tienen un recargo del 30% sobre el valor cotizado (aplica a clientes con antigüedad superior a un año).\n" +
+      "Quedamos atentos a cualquier consulta para avanzar.\n" +
+      "Saludos,\n" +
+      "Aquatrisq";
+    return { asunto, cuerpo };
+  }
+
+  async function copiarTextoEnvioCotiz() {
+    if (!cotizEdit) return;
+    const { asunto, cuerpo } = textoEnvioCotiz(cotizEdit, itemsCotiz);
+    try {
+      await navigator.clipboard.writeText(cuerpo);
+      setOkCotiz('Texto copiado al portapapeles. Asunto sugerido: "' + asunto + '"');
+    } catch (e) {
+      setOkCotiz("Error: no se pudo copiar el texto (revisa permisos del navegador).");
+    }
+  }
+
   function nuevoCliente() {
     setOkCli("");
     setHistPedidos(null);
@@ -4582,6 +4620,9 @@ export default function App() {
                     <button className="aq-btn-sec" disabled={generandoPdfCotiz} onClick={() => descargarPdfCotizacion(cotizEdit, itemsCotiz)}>
                       {generandoPdfCotiz ? "Generando PDF…" : "Descargar PDF"}
                     </button>
+                  )}
+                  {!cotizEdit._nuevo && (
+                    <button className="aq-btn-sec" onClick={copiarTextoEnvioCotiz}>Copiar texto de envío</button>
                   )}
                   {!cotizEdit._nuevo && cotizEdit.estado !== "procesada" && (
                     <>
