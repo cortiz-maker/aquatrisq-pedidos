@@ -10,6 +10,54 @@ const CHOFERES = ["Felipe Hernandez", "Italo Loiza", "César Ortiz"];
 // Origen de un descuento manual en pedido_descuentos (texto libre, pero acotamos).
 const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 
+// Estados del ciclo de vida de una cotización.
+const ESTADOS_COTIZ = ["borrador", "enviada", "aceptada", "rechazada", "vencida", "procesada"];
+const ESTADO_COTIZ_LABEL = {
+  borrador: "Borrador", enviada: "Enviada", aceptada: "Aceptada",
+  rechazada: "Rechazada", vencida: "Vencida", procesada: "Procesada",
+};
+
+// Catálogo de equipos y planes que SOLO se cotizan (no viven en la tabla
+// `productos` de Supabase porque no forman parte del flujo operativo de
+// pedidos/DispatchTrack). ids con prefijo "eq-" para no chocar con las UUID
+// reales de `productos`. Actualiza precios aquí cuando cambien.
+const CATALOGO_EQUIPOS_COTIZ = [
+  // Planes Equipos Eléctricos Aqua TrisQ: arriendo 18 meses, opción de compra
+  // cuota 19, término anticipado acelera cuotas + costo pre-pago.
+  { id: "eq-plan-2", codigo: "PLAN-R2", nombre: "Plan Recarga 2 — 2 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 13990, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-3", codigo: "PLAN-R3", nombre: "Plan Recarga 3 — 3 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 16990, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-4", codigo: "PLAN-R4", nombre: "Plan Recarga 4 — 4 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 20990, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-5", codigo: "PLAN-R5", nombre: "Plan Recarga 5 — 5 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 24490, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-6", codigo: "PLAN-R6", nombre: "Plan Recarga 6 — 6 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 27990, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-7", codigo: "PLAN-R7", nombre: "Plan Recarga 7 — 7 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 31490, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-8", codigo: "PLAN-R8", nombre: "Plan Recarga 8 — 8 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 34990, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-9", codigo: "PLAN-R9", nombre: "Plan Recarga 9 — 9 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 38490, grupo: "Planes equipos eléctricos" },
+  { id: "eq-plan-10", codigo: "PLAN-R10", nombre: "Plan Recarga 10 — 10 Bidones 20L/mes (arriendo 18 meses)", precio_lista: 41990, grupo: "Planes equipos eléctricos" },
+
+  // Equipos y kits
+  { id: "eq-bomba-usb", codigo: "BOMBA-USB", nombre: "Bomba de agua USB", precio_lista: 14990, grupo: "Equipos y kits" },
+  { id: "eq-disp-pedestal-compresor", codigo: "DISP-PED-COMP", nombre: "Dispensador Pedestal Compresor (negro)", precio_lista: 129990, grupo: "Equipos y kits" },
+  { id: "eq-disp-pie-lb07b", codigo: "LB-07B", nombre: "Dispensador de Pie Compresor LB-07B (gris)", precio_lista: 109990, grupo: "Equipos y kits" },
+  { id: "eq-disp-bidon-oculto", codigo: "DISP-BIDON-OCULTO", nombre: "Dispensador Pedestal Bidón Oculto + 2 Bidones 20L", precio_lista: 189990, grupo: "Equipos y kits" },
+  { id: "eq-kit-hogar-2", codigo: "KH2", nombre: "Kit Hogar 2 — Dispensador básico + 2 Bidones PET 20L (agua incluida)", precio_lista: 13490, grupo: "Equipos y kits" },
+];
+
+// RUT chileno: valida formato y dígito verificador (acepta con o sin puntos, con guion).
+function rutValido(rutSucio) {
+  const r = String(rutSucio || "").replace(/\./g, "").replace(/-/g, "").trim().toUpperCase();
+  if (!/^\d{7,8}[0-9K]$/.test(r)) return false;
+  const cuerpo = r.slice(0, -1);
+  const dv = r.slice(-1);
+  let suma = 0, mult = 2;
+  for (let i = cuerpo.length - 1; i >= 0; i--) {
+    suma += Number(cuerpo[i]) * mult;
+    mult = mult === 7 ? 2 : mult + 1;
+  }
+  const resto = 11 - (suma % 11);
+  const dvEsperado = resto === 11 ? "0" : resto === 10 ? "K" : String(resto);
+  return dv === dvEsperado;
+}
+
 // Comunas de la Región Metropolitana (52), con la grafía canónica. Se usa como
 // lista fija en el formulario de domicilio para evitar variantes ("providencia"
 // vs "Providencia") en el origen.
@@ -735,6 +783,24 @@ export default function App() {
   const [guardandoMant, setGuardandoMant] = useState(false);
   const [okMant, setOkMant] = useState("");
 
+  // ── Cotizaciones (admin/operador) ───────────────────────────
+  // Para clientes existentes y potenciales (persona/empresa aún no ingresada,
+  // solo con RUT de empresa). Al "procesar" una cotización de un potencial se
+  // crea recién ahí la ficha en `clientes` (es_empresa=true) y queda enlazada.
+  const [cotizaciones, setCotizaciones] = useState([]);
+  const [cargandoCotiz, setCargandoCotiz] = useState(false);
+  const [errorCotiz, setErrorCotiz] = useState("");
+  const [buscarCotiz, setBuscarCotiz] = useState("");
+  const [filtroEstadoCotiz, setFiltroEstadoCotiz] = useState("todas"); // todas | borrador | enviada | aceptada | rechazada | vencida | procesada
+  const [cotizEdit, setCotizEdit] = useState(null); // cotización en edición/alta (null = listado)
+  const [itemsCotiz, setItemsCotiz] = useState([]);
+  const [cotizClienteTipo, setCotizClienteTipo] = useState("existente"); // existente | potencial
+  const [buscarCotizCliente, setBuscarCotizCliente] = useState("");
+  const [guardandoCotiz, setGuardandoCotiz] = useState(false);
+  const [okCotiz, setOkCotiz] = useState("");
+  const [procesandoCotiz, setProcesandoCotiz] = useState(false);
+  const [generandoPdfCotiz, setGenerandoPdfCotiz] = useState(false);
+
   // ── Bloque 4: mantenedores (sub-pestañas) ──────────────────
   const [mantTab, setMantTab] = useState("clientes"); // clientes | productos | perfiles
 
@@ -1132,6 +1198,7 @@ export default function App() {
   }
   useEffect(() => {
     if ((rol === "admin" || rol === "operador") && vista === "deudasprov" && session) cargarDeudasProv();
+    if ((rol === "admin" || rol === "operador") && vista === "cotizaciones" && session) cargarCotizaciones();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rol, vista, session]);
 
@@ -1334,11 +1401,11 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones")) {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
-    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov")) {
+    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -1459,6 +1526,417 @@ export default function App() {
       }
     });
     return String(max + 1) + "-1";
+  }
+
+  // ── Cotizaciones ─────────────────────────────────────────────
+  async function cargarCotizaciones() {
+    setCargandoCotiz(true);
+    setErrorCotiz("");
+    try {
+      const { data, error } = await supabase
+        .from("cotizaciones")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(300);
+      if (error) throw error;
+      setCotizaciones(data || []);
+    } catch (e) {
+      setErrorCotiz(mensajeError(e, "No se pudieron cargar las cotizaciones."));
+    } finally {
+      setCargandoCotiz(false);
+    }
+  }
+
+  function fechaHoyISO() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+  function sumarDias(iso, dias) {
+    const d = new Date(iso + "T00:00:00");
+    d.setDate(d.getDate() + dias);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function nuevaCotizacion() {
+    setOkCotiz("");
+    setCotizClienteTipo("existente");
+    setBuscarCotizCliente("");
+    setItemsCotiz([]);
+    setCotizEdit({
+      _nuevo: true,
+      cliente_id: null,
+      cliente_nombre: "",
+      es_potencial: false,
+      rut_empresa: "",
+      razon_social: "",
+      contacto_nombre: "",
+      contacto_email: "",
+      contacto_telefono: "",
+      fecha_emision: fechaHoyISO(),
+      fecha_vigencia: sumarDias(fechaHoyISO(), 15),
+      estado: "borrador",
+      notas: "",
+    });
+  }
+
+  async function abrirCotizacion(c) {
+    setOkCotiz("");
+    setCotizClienteTipo(c.cliente_id ? "existente" : "potencial");
+    setBuscarCotizCliente("");
+    const cli = c.cliente_id ? clientes.find((x) => x.id === c.cliente_id) : null;
+    setCotizEdit({ ...c, _nuevo: false, cliente_nombre: cli ? cli.nombre : "" });
+    const { data } = await supabase.from("cotizacion_items").select("*").eq("cotizacion_id", c.id).order("orden");
+    setItemsCotiz(
+      (data || []).map((l) => {
+        // Los ítems del catálogo de equipos/planes se guardan con producto_id
+        // null (no tienen FK a productos); se re-vincula por nombre para que
+        // el <select> quede bien seleccionado al reabrir.
+        let producto_id = l.producto_id;
+        if (!producto_id) {
+          const match = CATALOGO_EQUIPOS_COTIZ.find((p) => p.nombre === l.nombre_producto);
+          if (match) producto_id = match.id;
+        }
+        return {
+          key: l.id,
+          producto_id,
+          nombre: l.nombre_producto,
+          cantidad: l.cantidad,
+          precio_unit: l.precio_unit,
+        };
+      })
+    );
+  }
+
+  function elegirClienteCotiz(c) {
+    setCotizEdit((prev) => ({
+      ...prev,
+      cliente_id: c.id,
+      cliente_nombre: c.nombre,
+      es_potencial: false,
+      rut_empresa: c.rut || "",
+      razon_social: c.razon_social || "",
+      contacto_email: c.email || "",
+      contacto_telefono: c.telefono || "",
+    }));
+    setBuscarCotizCliente("");
+  }
+
+  const resultadosCotizCliente = useMemo(() => {
+    const q = buscarCotizCliente.trim().toLowerCase();
+    if (!q) return [];
+    return clientes
+      .filter((c) => c.activo !== false)
+      .filter(
+        (c) =>
+          (c.nombre || "").toLowerCase().includes(q) ||
+          (c.rut || "").toLowerCase().includes(q) ||
+          (c.codigo_cliente || "").toLowerCase().includes(q)
+      )
+      .slice(0, 8);
+  }, [buscarCotizCliente, clientes]);
+
+  // Catálogo del selector de "Productos" en Cotizaciones: los productos reales
+  // (recargas/despacho, tal como en Nuevo pedido) + el catálogo de equipos y
+  // planes que solo se cotizan (CATALOGO_EQUIPOS_COTIZ, no vive en Supabase).
+  const catalogoCotiz = useMemo(() => {
+    const reales = productos.map((p) => ({ ...p, grupo: p.familia || "Recargas y despacho" }));
+    return [...reales, ...CATALOGO_EQUIPOS_COTIZ];
+  }, [productos]);
+  const catalogoCotizPorGrupo = useMemo(() => {
+    const mapa = {};
+    catalogoCotiz.forEach((p) => {
+      const g = p.grupo || "Otros";
+      if (!mapa[g]) mapa[g] = [];
+      mapa[g].push(p);
+    });
+    return mapa;
+  }, [catalogoCotiz]);
+
+  function agregarLineaCotiz() {
+    const prod = catalogoCotiz[0];
+    setItemsCotiz((prev) => [
+      ...prev,
+      {
+        key: crypto.randomUUID(),
+        producto_id: prod ? prod.id : null,
+        nombre: prod ? prod.nombre : "",
+        cantidad: 1,
+        precio_unit: prod ? precioSugerido(prod, 1, tramos) : 0,
+      },
+    ]);
+  }
+  function quitarLineaCotiz(key) {
+    setItemsCotiz((prev) => prev.filter((it) => it.key !== key));
+  }
+  function cambiarProductoCotizLinea(key, producto_id) {
+    setItemsCotiz((prev) =>
+      prev.map((it) => {
+        if (it.key !== key) return it;
+        const prod = catalogoCotiz.find((p) => p.id === producto_id);
+        return {
+          ...it,
+          producto_id,
+          nombre: prod ? prod.nombre : "",
+          precio_unit: prod ? precioSugerido(prod, it.cantidad, tramos) : it.precio_unit,
+        };
+      })
+    );
+  }
+  function cambiarCantidadCotizLinea(key, cantidad) {
+    setItemsCotiz((prev) =>
+      prev.map((it) => {
+        if (it.key !== key) return it;
+        const prod = catalogoCotiz.find((p) => p.id === it.producto_id);
+        return { ...it, cantidad, precio_unit: prod ? precioSugerido(prod, cantidad, tramos) : it.precio_unit };
+      })
+    );
+  }
+  function cambiarPrecioCotizLinea(key, precio_unit) {
+    setItemsCotiz((prev) => prev.map((it) => (it.key === key ? { ...it, precio_unit } : it)));
+  }
+
+  const totalCotiz = itemsCotiz.reduce((s, it) => s + Math.round((Number(it.cantidad) || 0) * (Number(it.precio_unit) || 0)), 0);
+
+  function validarCotiz() {
+    if (!cotizEdit) return "";
+    if (cotizClienteTipo === "existente" && !cotizEdit.cliente_id) return "Elige un cliente existente.";
+    if (cotizClienteTipo === "potencial") {
+      if (!cotizEdit.rut_empresa || !rutValido(cotizEdit.rut_empresa)) return "Ingresa un RUT de empresa válido.";
+      if (!(cotizEdit.razon_social || "").trim()) return "Ingresa la razón social del potencial cliente.";
+    }
+    if (itemsCotiz.length === 0) return "Agrega al menos un producto.";
+    if (itemsCotiz.some((it) => !it.producto_id || Number(it.cantidad) <= 0)) return "Revisa cantidades y productos de las líneas.";
+    return "";
+  }
+
+  async function guardarCotizacion() {
+    if (!cotizEdit) return;
+    const err = validarCotiz();
+    if (err) { setOkCotiz("Error: " + err); return; }
+    setGuardandoCotiz(true);
+    setOkCotiz("");
+    try {
+      let folio = cotizEdit.folio;
+      if (cotizEdit._nuevo) {
+        const { data: f, error: eFolio } = await supabase.rpc("siguiente_folio_cotizacion");
+        if (eFolio) throw eFolio;
+        folio = typeof f === "string" ? f : Array.isArray(f) ? f[0] : null;
+        if (!folio) throw new Error("La base no devolvió un folio.");
+      }
+      const patch = {
+        folio,
+        cliente_id: cotizClienteTipo === "existente" ? cotizEdit.cliente_id : null,
+        es_potencial: cotizClienteTipo === "potencial",
+        rut_empresa: cotizEdit.rut_empresa || null,
+        razon_social: cotizEdit.razon_social || null,
+        contacto_nombre: cotizEdit.contacto_nombre || null,
+        contacto_email: cotizEdit.contacto_email || null,
+        contacto_telefono: cotizEdit.contacto_telefono || null,
+        fecha_emision: cotizEdit.fecha_emision,
+        fecha_vigencia: cotizEdit.fecha_vigencia || null,
+        estado: cotizEdit.estado || "borrador",
+        notas: cotizEdit.notas || null,
+        subtotal: totalCotiz,
+        descuento_total: 0,
+        total: totalCotiz,
+        creado_por: perfilNombre || null,
+      };
+      let cotizId = cotizEdit.id;
+      if (cotizEdit._nuevo) {
+        const { data, error } = await supabase.from("cotizaciones").insert(patch).select().single();
+        if (error) throw error;
+        cotizId = data.id;
+      } else {
+        const { error } = await supabase.from("cotizaciones").update(patch).eq("id", cotizEdit.id);
+        if (error) throw error;
+      }
+      await supabase.from("cotizacion_items").delete().eq("cotizacion_id", cotizId);
+      const filas = itemsCotiz.map((it, i) => ({
+        cotizacion_id: cotizId,
+        // El catálogo de equipos/planes usa ids "eq-…" que no existen en la
+        // tabla productos (no tienen FK válida): se guarda null y el nombre
+        // queda igual como snapshot en nombre_producto.
+        producto_id: it.producto_id && !String(it.producto_id).startsWith("eq-") ? it.producto_id : null,
+        nombre_producto: it.nombre,
+        cantidad: Number(it.cantidad) || 0,
+        precio_unit: Number(it.precio_unit) || 0,
+        subtotal: Math.round((Number(it.cantidad) || 0) * (Number(it.precio_unit) || 0)),
+        orden: i,
+      }));
+      if (filas.length) {
+        const { error: eItems } = await supabase.from("cotizacion_items").insert(filas);
+        if (eItems) throw eItems;
+      }
+      setOkCotiz("Cotización " + folio + " guardada.");
+      setCotizEdit((prev) => ({ ...prev, _nuevo: false, id: cotizId, folio }));
+      await cargarCotizaciones();
+    } catch (e) {
+      setOkCotiz("Error: " + mensajeError(e, "No se pudo guardar la cotización."));
+    } finally {
+      setGuardandoCotiz(false);
+    }
+  }
+
+  async function cambiarEstadoCotiz(c, estado) {
+    try {
+      const { error } = await supabase.from("cotizaciones").update({ estado }).eq("id", c.id);
+      if (error) throw error;
+      setCotizaciones((prev) => prev.map((x) => (x.id === c.id ? { ...x, estado } : x)));
+      if (cotizEdit && cotizEdit.id === c.id) setCotizEdit((prev) => ({ ...prev, estado }));
+    } catch (e) {
+      setOkCotiz("Error: " + mensajeError(e, "No se pudo cambiar el estado."));
+    }
+  }
+
+  // Al procesar: si la cotización era de un potencial (sin cliente_id), recién
+  // aquí se crea la ficha real en `clientes` y queda enlazada; si ya tenía
+  // cliente existente, solo se marca como procesada.
+  async function procesarCotizacion(c) {
+    setProcesandoCotiz(true);
+    setOkCotiz("");
+    try {
+      let clienteId = c.cliente_id;
+      if (!clienteId) {
+        if (!c.rut_empresa || !c.razon_social) throw new Error("Falta RUT o razón social del potencial cliente.");
+        const nuevoCli = {
+          nombre: c.razon_social,
+          rut: c.rut_empresa,
+          codigo_cliente: siguienteCodigoCliente(),
+          telefono: c.contacto_telefono || null,
+          email: c.contacto_email || null,
+          es_empresa: true,
+          razon_social: c.razon_social,
+          activo: true,
+          notas: c.contacto_nombre ? "Contacto: " + c.contacto_nombre + " (desde cotización " + c.folio + ")" : ("Creado desde cotización " + c.folio),
+        };
+        const { data, error } = await supabase.from("clientes").insert(nuevoCli).select().single();
+        if (error) throw error;
+        clienteId = data.id;
+        setClientes((prev) => [...prev, data]);
+      }
+      const { error: eUp } = await supabase
+        .from("cotizaciones")
+        .update({ estado: "procesada", cliente_id: clienteId, procesada_at: new Date().toISOString() })
+        .eq("id", c.id);
+      if (eUp) throw eUp;
+      setCotizaciones((prev) => prev.map((x) => (x.id === c.id ? { ...x, estado: "procesada", cliente_id: clienteId } : x)));
+      if (cotizEdit && cotizEdit.id === c.id) setCotizEdit((prev) => ({ ...prev, estado: "procesada", cliente_id: clienteId, _nuevo: false }));
+      setOkCotiz("Cotización procesada" + (c.cliente_id ? "." : ": cliente creado en la ficha de Clientes."));
+    } catch (e) {
+      setOkCotiz("Error: " + mensajeError(e, "No se pudo procesar la cotización."));
+    } finally {
+      setProcesandoCotiz(false);
+    }
+  }
+
+  // Carga jsPDF desde CDN una sola vez (mismo patrón que el mapa con Leaflet).
+  function cargarJsPDF() {
+    return new Promise((resolve, reject) => {
+      if (window.jspdf && window.jspdf.jsPDF) return resolve(window.jspdf.jsPDF);
+      const existente = document.getElementById("jspdf-js");
+      if (existente) {
+        existente.addEventListener("load", () => resolve(window.jspdf.jsPDF));
+        existente.addEventListener("error", reject);
+        return;
+      }
+      const s = document.createElement("script");
+      s.id = "jspdf-js";
+      s.src = "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js";
+      s.onload = () => resolve(window.jspdf.jsPDF);
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  async function descargarPdfCotizacion(c, items) {
+    setGenerandoPdfCotiz(true);
+    try {
+      const jsPDF = await cargarJsPDF();
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
+      const M = 48;
+      let y = 56;
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(18);
+      doc.text("Aquatrisq", M, y);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90);
+      y += 16;
+      doc.text("Distribución de agua purificada · Región Metropolitana", M, y);
+      y += 12;
+      doc.text("Instagram @aquatrisq", M, y);
+      doc.setTextColor(0);
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+      doc.text("COTIZACIÓN " + (c.folio || ""), 595 - M, 56, { align: "right" });
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+      doc.text("Fecha emisión: " + (c.fecha_emision || "-"), 595 - M, 74, { align: "right" });
+      doc.text("Válida hasta: " + (c.fecha_vigencia || "-"), 595 - M, 88, { align: "right" });
+      doc.setFont("helvetica", "bold");
+      doc.text("Estado: " + (ESTADO_COTIZ_LABEL[c.estado] || c.estado || ""), 595 - M, 102, { align: "right" });
+
+      y = 128;
+      doc.setDrawColor(210); doc.line(M, y, 595 - M, y);
+      y += 22;
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(11);
+      doc.text("Cliente", M, y);
+      y += 16;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+      const nombreCli = c.cliente_id ? (c.cliente_nombre || c.razon_social || "") : (c.razon_social || "");
+      doc.text(nombreCli || "-", M, y); y += 14;
+      if (c.rut_empresa) { doc.text("RUT: " + c.rut_empresa, M, y); y += 14; }
+      if (c.contacto_nombre) { doc.text("Contacto: " + c.contacto_nombre, M, y); y += 14; }
+      if (c.contacto_email) { doc.text("Email: " + c.contacto_email, M, y); y += 14; }
+      if (c.contacto_telefono) { doc.text("Teléfono: " + c.contacto_telefono, M, y); y += 14; }
+
+      y += 12;
+      doc.setDrawColor(210); doc.line(M, y, 595 - M, y);
+      y += 24;
+
+      // Tabla de ítems (dibujada a mano: sin dependencias extra).
+      const colX = { desc: M, cant: 330, precio: 400, sub: 490 };
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9);
+      doc.text("Producto", colX.desc, y);
+      doc.text("Cant.", colX.cant, y);
+      doc.text("Precio unit.", colX.precio, y);
+      doc.text("Subtotal", colX.sub, y);
+      y += 8;
+      doc.setDrawColor(150); doc.line(M, y, 595 - M, y);
+      y += 16;
+
+      doc.setFont("helvetica", "normal");
+      items.forEach((it) => {
+        if (y > 720) { doc.addPage(); y = 56; }
+        const sub = Math.round((Number(it.cantidad) || 0) * (Number(it.precio_unit) || 0));
+        doc.text(String(it.nombre || ""), colX.desc, y, { maxWidth: 270 });
+        doc.text(String(it.cantidad), colX.cant, y);
+        doc.text(CLP(it.precio_unit), colX.precio, y);
+        doc.text(CLP(sub), colX.sub, y);
+        y += 18;
+      });
+
+      y += 10;
+      doc.setDrawColor(210); doc.line(M, y, 595 - M, y);
+      y += 22;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(12);
+      doc.text("Total: " + CLP(c.total), 595 - M, y, { align: "right" });
+
+      if (c.notas) {
+        y += 34;
+        doc.setFont("helvetica", "bold"); doc.setFontSize(10);
+        doc.text("Notas / condiciones", M, y); y += 14;
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+        const lineas = doc.splitTextToSize(c.notas, 595 - M * 2);
+        doc.text(lineas, M, y);
+      }
+
+      doc.save("Cotizacion-" + (c.folio || "sin-folio") + ".pdf");
+    } catch (e) {
+      setOkCotiz("Error: " + mensajeError(e, "No se pudo generar el PDF."));
+    } finally {
+      setGenerandoPdfCotiz(false);
+    }
   }
 
   function nuevoCliente() {
@@ -2811,6 +3289,9 @@ export default function App() {
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "deudasprov" ? "on" : ""} onClick={() => setVista("deudasprov")}>Pagos proveedor</button>
             )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "cotizaciones" ? "on" : ""} onClick={() => { setVista("cotizaciones"); setCotizEdit(null); }}>Cotizaciones</button>
+            )}
             <span className="aq-user" title={rol}>
               {perfilNombre} · {rol}
               <button className="aq-logout" onClick={cerrarSesion} aria-label="Cerrar sesión">Salir</button>
@@ -3564,6 +4045,249 @@ export default function App() {
                 </>
               );
             })()}
+          </section>
+        )}
+
+        {/* ===================== COTIZACIONES ===================== */}
+        {credsListas && vista === "cotizaciones" && (rol === "admin" || rol === "operador") && (
+          <section className="aq-card">
+            {!cotizEdit ? (
+              <>
+                <div className="aq-row-head">
+                  <h2>Cotizaciones</h2>
+                  <button className="aq-btn-sec" onClick={nuevaCotizacion}>+ Nueva cotización</button>
+                </div>
+                <div className="aq-search" style={{ marginBottom: 8 }}>
+                  <input
+                    placeholder="Buscar por folio, cliente o RUT…"
+                    value={buscarCotiz}
+                    onChange={(e) => setBuscarCotiz(e.target.value)}
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                  <button className={filtroEstadoCotiz === "todas" ? "aq-btn" : "aq-btn-sec"} onClick={() => setFiltroEstadoCotiz("todas")}>Todas</button>
+                  {ESTADOS_COTIZ.map((e) => (
+                    <button key={e} className={filtroEstadoCotiz === e ? "aq-btn" : "aq-btn-sec"} onClick={() => setFiltroEstadoCotiz(e)}>
+                      {ESTADO_COTIZ_LABEL[e]}
+                    </button>
+                  ))}
+                </div>
+
+                {errorCotiz && <div className="aq-error" style={{ marginBottom: 8 }}>{errorCotiz}</div>}
+                {cargandoCotiz && <p className="aq-muted">Cargando cotizaciones…</p>}
+
+                {!cargandoCotiz && (() => {
+                  const q = buscarCotiz.trim().toLowerCase();
+                  const lista = cotizaciones
+                    .filter((c) => filtroEstadoCotiz === "todas" || c.estado === filtroEstadoCotiz)
+                    .filter((c) => {
+                      if (!q) return true;
+                      const cli = c.cliente_id ? clientes.find((x) => x.id === c.cliente_id) : null;
+                      const nombre = (cli?.nombre || c.razon_social || "").toLowerCase();
+                      const rut = (c.rut_empresa || cli?.rut || "").toLowerCase();
+                      return (c.folio || "").toLowerCase().includes(q) || nombre.includes(q) || rut.includes(q);
+                    });
+                  if (lista.length === 0) return <p className="aq-muted">No hay cotizaciones para este filtro.</p>;
+                  return (
+                    <div className="aq-items">
+                      {lista.map((c) => {
+                        const cli = c.cliente_id ? clientes.find((x) => x.id === c.cliente_id) : null;
+                        const nombre = cli?.nombre || c.razon_social || "(sin nombre)";
+                        return (
+                          <div className="aq-det-line" key={c.id} style={{ cursor: "pointer" }} onClick={() => abrirCotizacion(c)}>
+                            <span>
+                              <strong>{c.folio}</strong> · {nombre}{!c.cliente_id ? " · potencial" : ""}
+                              <em className="aq-det-chofer">{c.fecha_emision} · {ESTADO_COTIZ_LABEL[c.estado] || c.estado}</em>
+                            </span>
+                            <span>{CLP(c.total)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </>
+            ) : (
+              <>
+                <div className="aq-row-head">
+                  <h2>{cotizEdit._nuevo ? "Nueva cotización" : "Cotización " + cotizEdit.folio}</h2>
+                  <button className="aq-link" onClick={() => { setCotizEdit(null); setOkCotiz(""); }}>Volver</button>
+                </div>
+
+                {okCotiz && <div className={"aq-result " + (okCotiz.startsWith("Error") ? "bad" : "ok")}>{okCotiz}</div>}
+                {!cotizEdit._nuevo && (
+                  <p className="aq-muted">Estado actual: <strong>{ESTADO_COTIZ_LABEL[cotizEdit.estado] || cotizEdit.estado}</strong></p>
+                )}
+
+                <div className="aq-row-head" style={{ marginTop: 4 }}>
+                  <strong className="aq-mini">Cliente</strong>
+                  {cotizEdit.estado !== "procesada" && (
+                    <span style={{ display: "flex", gap: 8 }}>
+                      <button className={cotizClienteTipo === "existente" ? "aq-btn" : "aq-btn-sec"} onClick={() => setCotizClienteTipo("existente")}>Cliente existente</button>
+                      <button className={cotizClienteTipo === "potencial" ? "aq-btn" : "aq-btn-sec"} onClick={() => setCotizClienteTipo("potencial")}>Potencial (solo RUT empresa)</button>
+                    </span>
+                  )}
+                </div>
+
+                {cotizClienteTipo === "existente" ? (
+                  <div className="aq-search" style={{ marginBottom: 8 }}>
+                    {cotizEdit.cliente_id ? (
+                      <p>
+                        <strong>{cotizEdit.cliente_nombre}</strong>{" "}
+                        {cotizEdit.estado !== "procesada" && (
+                          <button className="aq-link" onClick={() => setCotizEdit((prev) => ({ ...prev, cliente_id: null, cliente_nombre: "" }))}>cambiar</button>
+                        )}
+                      </p>
+                    ) : (
+                      <>
+                        <input
+                          placeholder="Buscar por nombre, RUT o código…"
+                          value={buscarCotizCliente}
+                          onChange={(e) => setBuscarCotizCliente(e.target.value)}
+                          autoFocus
+                        />
+                        {resultadosCotizCliente.length > 0 && (
+                          <ul className="aq-results">
+                            {resultadosCotizCliente.map((c) => (
+                              <li key={c.id} onClick={() => elegirClienteCotiz(c)}>
+                                <strong>{c.nombre}</strong>
+                                <span>{c.rut || c.codigo_cliente}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="aq-grid-2">
+                    <label>RUT empresa
+                      <input
+                        value={cotizEdit.rut_empresa || ""}
+                        disabled={cotizEdit.estado === "procesada"}
+                        onChange={(e) => setCotizEdit((prev) => ({ ...prev, rut_empresa: e.target.value }))}
+                        placeholder="76.123.456-7"
+                      />
+                    </label>
+                    <label>Razón social
+                      <input
+                        value={cotizEdit.razon_social || ""}
+                        disabled={cotizEdit.estado === "procesada"}
+                        onChange={(e) => setCotizEdit((prev) => ({ ...prev, razon_social: e.target.value }))}
+                      />
+                    </label>
+                    <label>Contacto (nombre)
+                      <input
+                        value={cotizEdit.contacto_nombre || ""}
+                        disabled={cotizEdit.estado === "procesada"}
+                        onChange={(e) => setCotizEdit((prev) => ({ ...prev, contacto_nombre: e.target.value }))}
+                      />
+                    </label>
+                    <label>Contacto (email)
+                      <input
+                        type="email"
+                        value={cotizEdit.contacto_email || ""}
+                        disabled={cotizEdit.estado === "procesada"}
+                        onChange={(e) => setCotizEdit((prev) => ({ ...prev, contacto_email: e.target.value }))}
+                      />
+                    </label>
+                    <label>Contacto (teléfono)
+                      <input
+                        value={cotizEdit.contacto_telefono || ""}
+                        disabled={cotizEdit.estado === "procesada"}
+                        onChange={(e) => setCotizEdit((prev) => ({ ...prev, contacto_telefono: e.target.value }))}
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <div className="aq-grid-2" style={{ marginTop: 12 }}>
+                  <label>Fecha emisión
+                    <input type="date" value={cotizEdit.fecha_emision || ""} onChange={(e) => setCotizEdit((prev) => ({ ...prev, fecha_emision: e.target.value }))} />
+                  </label>
+                  <label>Válida hasta
+                    <input type="date" value={cotizEdit.fecha_vigencia || ""} onChange={(e) => setCotizEdit((prev) => ({ ...prev, fecha_vigencia: e.target.value }))} />
+                  </label>
+                </div>
+
+                <div className="aq-row-head" style={{ marginTop: 16 }}>
+                  <h2>Productos</h2>
+                  <button className="aq-btn-sec" onClick={agregarLineaCotiz}>+ Agregar línea</button>
+                </div>
+                {itemsCotiz.length === 0 ? (
+                  <p className="aq-muted">Agrega los productos a cotizar.</p>
+                ) : (
+                  <div className="aq-items">
+                    {itemsCotiz.map((it) => (
+                      <div className="aq-item" key={it.key}>
+                        <select value={it.producto_id || ""} onChange={(e) => cambiarProductoCotizLinea(it.key, e.target.value)}>
+                          {Object.entries(catalogoCotizPorGrupo).map(([grupo, lista]) => (
+                            <optgroup key={grupo} label={grupo}>
+                              {lista.map((p) => (
+                                <option key={p.id} value={p.id}>{p.codigo} · {p.nombre}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                        <input
+                          className="aq-num"
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={it.cantidad}
+                          onChange={(e) => cambiarCantidadCotizLinea(it.key, Number(e.target.value))}
+                          aria-label="Cantidad"
+                        />
+                        <input
+                          className="aq-num"
+                          type="number"
+                          min="0"
+                          value={it.precio_unit}
+                          onChange={(e) => cambiarPrecioCotizLinea(it.key, Number(e.target.value))}
+                          aria-label="Precio unitario"
+                        />
+                        <span className="aq-sub">{CLP(Math.round((it.cantidad || 0) * (it.precio_unit || 0)))}</span>
+                        <button className="aq-x" onClick={() => quitarLineaCotiz(it.key)} aria-label="Quitar">×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <p style={{ textAlign: "right", marginTop: 8 }}><strong>Total: {CLP(totalCotiz)}</strong></p>
+
+                <label className="aq-full" style={{ marginTop: 8 }}>Notas / condiciones
+                  <textarea rows="3" value={cotizEdit.notas || ""} onChange={(e) => setCotizEdit((prev) => ({ ...prev, notas: e.target.value }))} placeholder="Ej: precios no incluyen IVA · válido para despacho en RM · forma de pago…" />
+                </label>
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 16 }}>
+                  <button className="aq-btn" onClick={guardarCotizacion} disabled={guardandoCotiz}>
+                    {guardandoCotiz ? "Guardando…" : "Guardar cotización"}
+                  </button>
+                  {!cotizEdit._nuevo && (
+                    <button className="aq-btn-sec" disabled={generandoPdfCotiz} onClick={() => descargarPdfCotizacion(cotizEdit, itemsCotiz)}>
+                      {generandoPdfCotiz ? "Generando PDF…" : "Descargar PDF"}
+                    </button>
+                  )}
+                  {!cotizEdit._nuevo && cotizEdit.estado !== "procesada" && (
+                    <>
+                      <select value={cotizEdit.estado} onChange={(e) => cambiarEstadoCotiz(cotizEdit, e.target.value)}>
+                        {ESTADOS_COTIZ.filter((e) => e !== "procesada").map((e) => (
+                          <option key={e} value={e}>{ESTADO_COTIZ_LABEL[e]}</option>
+                        ))}
+                      </select>
+                      <button className="aq-btn-sec" disabled={procesandoCotiz} onClick={() => procesarCotizacion(cotizEdit)}>
+                        {procesandoCotiz ? "Procesando…" : "Procesar cotización"}
+                      </button>
+                    </>
+                  )}
+                </div>
+                {cotizClienteTipo === "potencial" && cotizEdit.estado !== "procesada" && (
+                  <p className="aq-muted" style={{ marginTop: 8 }}>
+                    Este cliente aún no existe en la ficha de Clientes: se crea automáticamente al presionar "Procesar cotización".
+                  </p>
+                )}
+              </>
+            )}
           </section>
         )}
 
