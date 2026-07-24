@@ -1794,6 +1794,45 @@ export default function App() {
     setFichaEditDraft((prev) => ({ ...prev, specs: prev.specs.filter((_, idx) => idx !== i) }));
   }
 
+  // Imagen de la ficha técnica se guarda localmente (base64 en la propia
+  // fila de fichas_producto), sin depender de Storage externo: se lee el
+  // archivo elegido, se redimensiona a un máximo razonable con canvas para
+  // no inflar la base de datos, y se comprime a JPEG.
+  function elegirImagenFichaLocal(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // permite volver a elegir el mismo archivo si se quita y se re-agrega
+    if (!file) return;
+    setOkFicha("");
+    const lector = new FileReader();
+    lector.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 640;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          const ratio = Math.min(MAX / width, MAX / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        setFichaEditDraft((prev) => ({ ...prev, imagen_url: dataUrl }));
+      };
+      img.onerror = () => setOkFicha("Error: no se pudo leer la imagen elegida.");
+      img.src = lector.result;
+    };
+    lector.onerror = () => setOkFicha("Error: no se pudo leer el archivo.");
+    lector.readAsDataURL(file);
+  }
+  function quitarImagenFicha() {
+    setFichaEditDraft((prev) => ({ ...prev, imagen_url: "" }));
+  }
+
   async function guardarFicha() {
     if (!fichaEditDraft) return;
     setGuardandoFicha(true);
@@ -1815,7 +1854,12 @@ export default function App() {
         if (error) throw error;
         row = data;
       } else {
-        const { data, error } = await supabase.from("fichas_producto").upsert(patch, { onConflict: patch.producto_id ? "producto_id" : "producto_nombre" }).select().single();
+        // Ya se comprobó al abrir el editor (cargarFichaProducto) que no
+        // existía ficha previa para este producto_id/nombre, así que un
+        // insert directo es correcto; un upsert con onConflict no calza
+        // aquí porque los índices únicos son parciales (WHERE … IS NOT
+        // NULL) y Postgres no lo resuelve vía ON CONFLICT(columna).
+        const { data, error } = await supabase.from("fichas_producto").insert(patch).select().single();
         if (error) throw error;
         row = data;
       }
@@ -2134,13 +2178,17 @@ export default function App() {
         doc.text(String(it.nombre || ficha.producto_nombre || ""), M, fy);
         fy += 20;
 
-        // Imagen (opcional, mejor esfuerzo: si falla la carga por CORS u
-        // otro motivo, se omite y se sigue con el resto de la ficha).
+        // Imagen (opcional, mejor esfuerzo). La ficha guarda la imagen
+        // localmente como data URL base64 (elegida desde el computador), así
+        // que normalmente no hace falta red; si en algún caso quedó una URL
+        // http (ficha antigua), se intenta descargar igual.
         if (ficha.imagen_url) {
           try {
-            const b64Img = await imagenUrlABase64(ficha.imagen_url);
+            const esDataUrl = ficha.imagen_url.startsWith("data:");
+            const b64Img = esDataUrl ? ficha.imagen_url : await imagenUrlABase64(ficha.imagen_url);
             if (b64Img) {
-              doc.addImage(b64Img, M, fy, 160, 160);
+              const formato = /^data:image\/png/i.test(b64Img) ? "PNG" : "JPEG";
+              doc.addImage(b64Img, formato, M, fy, 160, 160);
             }
           } catch (eImg) { /* se omite la imagen si no se puede cargar */ }
         }
@@ -4582,12 +4630,8 @@ export default function App() {
                   />
                 </label>
                 <div className="aq-grid-2">
-                  <label>Imagen (URL)
-                    <input
-                      value={fichaEditDraft.imagen_url || ""}
-                      onChange={(e) => setFichaEditDraft((prev) => ({ ...prev, imagen_url: e.target.value }))}
-                      placeholder="https://…"
-                    />
+                  <label>Imagen
+                    <input type="file" accept="image/*" onChange={elegirImagenFichaLocal} />
                   </label>
                   <label>Garantía
                     <input
@@ -4597,6 +4641,12 @@ export default function App() {
                     />
                   </label>
                 </div>
+                {fichaEditDraft.imagen_url && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                    <img src={fichaEditDraft.imagen_url} alt="Vista previa" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 8, border: "1px solid var(--line)" }} />
+                    <button type="button" className="aq-link" onClick={quitarImagenFicha}>Quitar imagen</button>
+                  </div>
+                )}
               </div>
 
               <div className="aq-modal-edit">
