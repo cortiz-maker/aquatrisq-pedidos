@@ -813,6 +813,16 @@ export default function App() {
   const [procesandoCotiz, setProcesandoCotiz] = useState(false);
   const [generandoPdfCotiz, setGenerandoPdfCotiz] = useState(false);
 
+  // Fichas técnicas de producto (opcionales, se anexan a la cotización por
+  // línea). Cache en memoria por clave de producto: "id:<uuid>" para
+  // productos reales, "nom:<nombre>" para ítems del catálogo fijo de
+  // equipos/planes (sin FK a `productos`).
+  const [fichasProducto, setFichasProducto] = useState({}); // clave -> fila de fichas_producto | null (null = ya se buscó y no existe)
+  const [fichaEditKey, setFichaEditKey] = useState(null); // key del ítem (it.key) cuya ficha se está editando, o null
+  const [fichaEditDraft, setFichaEditDraft] = useState(null); // borrador { producto_id, producto_nombre, descripcion, imagen_url, garantia, specs: [{label,value}] }
+  const [guardandoFicha, setGuardandoFicha] = useState(false);
+  const [okFicha, setOkFicha] = useState("");
+
   // ── Bloque 4: mantenedores (sub-pestañas) ──────────────────
   const [mantTab, setMantTab] = useState("clientes"); // clientes | productos | perfiles
 
@@ -1616,6 +1626,7 @@ export default function App() {
           nombre: l.nombre_producto,
           cantidad: l.cantidad,
           precio_unit: l.precio_unit,
+          incluir_ficha: !!l.incluir_ficha,
         };
       })
     );
@@ -1676,6 +1687,7 @@ export default function App() {
         nombre: prod ? prod.nombre : "",
         cantidad: 1,
         precio_unit: prod ? precioSugerido(prod, 1, tramos) : 0,
+        incluir_ficha: false,
       },
     ]);
   }
@@ -1692,6 +1704,8 @@ export default function App() {
           producto_id,
           nombre: prod ? prod.nombre : "",
           precio_unit: prod ? precioSugerido(prod, it.cantidad, tramos) : it.precio_unit,
+          // Cambió el producto: la ficha técnica marcada correspondía al anterior.
+          incluir_ficha: false,
         };
       })
     );
@@ -1710,6 +1724,111 @@ export default function App() {
   }
 
   const totalCotiz = itemsCotiz.reduce((s, it) => s + Math.round((Number(it.cantidad) || 0) * (Number(it.precio_unit) || 0)), 0);
+
+  // ── Fichas técnicas de producto (opcionales por línea) ─────────
+  // Productos reales (con FK válida a `productos`) se identifican por
+  // producto_id; los ítems del catálogo fijo de equipos/planes ("eq-…", sin
+  // fila en `productos`) se identifican por nombre — mismo criterio que ya
+  // usa guardarCotizacion() para decidir qué producto_id persistir.
+  function refProductoFicha(it) {
+    const esCatalogoFijo = !it.producto_id || String(it.producto_id).startsWith("eq-");
+    return esCatalogoFijo
+      ? { producto_id: null, producto_nombre: it.nombre || "" }
+      : { producto_id: it.producto_id, producto_nombre: null };
+  }
+  function keyFicha(it) {
+    const { producto_id, producto_nombre } = refProductoFicha(it);
+    return producto_id ? "id:" + producto_id : "nom:" + producto_nombre;
+  }
+
+  async function cargarFichaProducto(it) {
+    const k = keyFicha(it);
+    if (fichasProducto[k] !== undefined) return fichasProducto[k];
+    const { producto_id, producto_nombre } = refProductoFicha(it);
+    try {
+      let q = supabase.from("fichas_producto").select("*").eq("activa", true);
+      q = producto_id ? q.eq("producto_id", producto_id) : q.eq("producto_nombre", producto_nombre);
+      const { data, error } = await q.maybeSingle();
+      if (error) throw error;
+      setFichasProducto((prev) => ({ ...prev, [k]: data || null }));
+      return data || null;
+    } catch (e) {
+      setFichasProducto((prev) => ({ ...prev, [k]: null }));
+      return null;
+    }
+  }
+
+  function toggleFichaCotizLinea(key, incluir) {
+    setItemsCotiz((prev) => prev.map((it) => (it.key === key ? { ...it, incluir_ficha: incluir } : it)));
+    if (incluir) {
+      const it = itemsCotiz.find((x) => x.key === key);
+      if (it) cargarFichaProducto(it);
+    }
+  }
+
+  async function abrirEditorFicha(it) {
+    setOkFicha("");
+    const existente = await cargarFichaProducto(it);
+    const { producto_id, producto_nombre } = refProductoFicha(it);
+    setFichaEditDraft(
+      existente
+        ? { ...existente, specs: Array.isArray(existente.specs) ? existente.specs : [] }
+        : { id: null, producto_id, producto_nombre: producto_nombre || it.nombre, descripcion: "", imagen_url: "", garantia: "", specs: [] }
+    );
+    setFichaEditKey(it.key);
+  }
+  function cerrarEditorFicha() {
+    setFichaEditKey(null);
+    setFichaEditDraft(null);
+  }
+  function agregarSpecFicha() {
+    setFichaEditDraft((prev) => ({ ...prev, specs: [...(prev.specs || []), { label: "", value: "" }] }));
+  }
+  function cambiarSpecFicha(i, campo, val) {
+    setFichaEditDraft((prev) => ({
+      ...prev,
+      specs: prev.specs.map((s, idx) => (idx === i ? { ...s, [campo]: val } : s)),
+    }));
+  }
+  function quitarSpecFicha(i) {
+    setFichaEditDraft((prev) => ({ ...prev, specs: prev.specs.filter((_, idx) => idx !== i) }));
+  }
+
+  async function guardarFicha() {
+    if (!fichaEditDraft) return;
+    setGuardandoFicha(true);
+    setOkFicha("");
+    try {
+      const specsLimpias = (fichaEditDraft.specs || []).filter((s) => (s.label || "").trim() || (s.value || "").trim());
+      const patch = {
+        producto_id: fichaEditDraft.producto_id || null,
+        producto_nombre: fichaEditDraft.producto_id ? null : (fichaEditDraft.producto_nombre || null),
+        descripcion: fichaEditDraft.descripcion || null,
+        imagen_url: fichaEditDraft.imagen_url || null,
+        garantia: fichaEditDraft.garantia || null,
+        specs: specsLimpias,
+        activa: true,
+      };
+      let row;
+      if (fichaEditDraft.id) {
+        const { data, error } = await supabase.from("fichas_producto").update(patch).eq("id", fichaEditDraft.id).select().single();
+        if (error) throw error;
+        row = data;
+      } else {
+        const { data, error } = await supabase.from("fichas_producto").upsert(patch, { onConflict: patch.producto_id ? "producto_id" : "producto_nombre" }).select().single();
+        if (error) throw error;
+        row = data;
+      }
+      const it = itemsCotiz.find((x) => x.key === fichaEditKey);
+      if (it) setFichasProducto((prev) => ({ ...prev, [keyFicha(it)]: row }));
+      setOkFicha("Ficha técnica guardada.");
+      cerrarEditorFicha();
+    } catch (e) {
+      setOkFicha("Error: " + mensajeError(e, "No se pudo guardar la ficha técnica."));
+    } finally {
+      setGuardandoFicha(false);
+    }
+  }
 
   function validarCotiz() {
     if (!cotizEdit) return "";
@@ -1775,6 +1894,7 @@ export default function App() {
         cantidad: Number(it.cantidad) || 0,
         precio_unit: Number(it.precio_unit) || 0,
         subtotal: Math.round((Number(it.cantidad) || 0) * (Number(it.precio_unit) || 0)),
+        incluir_ficha: !!it.incluir_ficha,
         orden: i,
       }));
       if (filas.length) {
@@ -1859,6 +1979,28 @@ export default function App() {
       s.onload = () => resolve(window.jspdf.jsPDF);
       s.onerror = reject;
       document.head.appendChild(s);
+    });
+  }
+
+  // Descarga una imagen (URL pública, ej. Supabase Storage) y la convierte a
+  // data URL base64 para poder insertarla con doc.addImage(). Si la URL no
+  // es accesible (CORS, 404, red), retorna null y la ficha se imprime sin
+  // imagen en vez de romper la generación del PDF completo.
+  function imagenUrlABase64(url) {
+    return new Promise((resolve) => {
+      fetch(url)
+        .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("fetch imagen falló"))))
+        .then(
+          (blob) =>
+            new Promise((res, rej) => {
+              const reader = new FileReader();
+              reader.onload = () => res(reader.result);
+              reader.onerror = rej;
+              reader.readAsDataURL(blob);
+            })
+        )
+        .then(resolve)
+        .catch(() => resolve(null));
     });
   }
 
@@ -1969,6 +2111,74 @@ export default function App() {
         doc.setFont("helvetica", "normal"); doc.setFontSize(9);
         const lineas = doc.splitTextToSize(c.notas, 595 - M * 2);
         doc.text(lineas, M, y);
+      }
+
+      // Fichas técnicas opcionales: una página por cada línea marcada con
+      // "Incluir ficha técnica en el PDF". Se buscan en fichas_producto (no
+      // se asume que ya estén en caché, por si la cotización se abrió y se
+      // descargó el PDF sin pasar por el checkbox en esta sesión).
+      const itemsConFicha = items.filter((it) => it.incluir_ficha);
+      for (const it of itemsConFicha) {
+        const ficha = await cargarFichaProducto(it);
+        if (!ficha) continue;
+
+        doc.addPage();
+        let fy = 56;
+        doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+        doc.text("Ficha técnica", M, fy);
+        fy += 8;
+        doc.setDrawColor(210); doc.line(M, fy, 595 - M, fy);
+        fy += 24;
+
+        doc.setFont("helvetica", "bold"); doc.setFontSize(13);
+        doc.text(String(it.nombre || ficha.producto_nombre || ""), M, fy);
+        fy += 20;
+
+        // Imagen (opcional, mejor esfuerzo: si falla la carga por CORS u
+        // otro motivo, se omite y se sigue con el resto de la ficha).
+        if (ficha.imagen_url) {
+          try {
+            const b64Img = await imagenUrlABase64(ficha.imagen_url);
+            if (b64Img) {
+              doc.addImage(b64Img, M, fy, 160, 160);
+            }
+          } catch (eImg) { /* se omite la imagen si no se puede cargar */ }
+        }
+        const specX = ficha.imagen_url ? M + 176 : M;
+        const specW = ficha.imagen_url ? 595 - M - specX : 595 - M * 2;
+        let sy = fy;
+
+        if (ficha.descripcion) {
+          doc.setFont("helvetica", "normal"); doc.setFontSize(9.5);
+          const lineasDesc = doc.splitTextToSize(ficha.descripcion, specW);
+          doc.text(lineasDesc, specX, sy);
+          sy += lineasDesc.length * 12 + 10;
+        }
+        if (ficha.garantia) {
+          doc.setFont("helvetica", "bold"); doc.setFontSize(9.5);
+          doc.text("Garantía: ", specX, sy);
+          doc.setFont("helvetica", "normal");
+          doc.text(String(ficha.garantia), specX + 52, sy);
+          sy += 16;
+        }
+        if (Array.isArray(ficha.specs) && ficha.specs.length) {
+          sy += 4;
+          doc.setFont("helvetica", "bold"); doc.setFontSize(9.5);
+          doc.text("Especificaciones", specX, sy); sy += 4;
+          doc.setDrawColor(210); doc.line(specX, sy + 4, specX + specW, sy + 4);
+          sy += 18;
+          doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+          ficha.specs.forEach((s) => {
+            if (!s.label && !s.value) return;
+            if (sy > 760) { doc.addPage(); sy = 56; }
+            doc.setFont("helvetica", "bold");
+            doc.text(String(s.label || ""), specX, sy);
+            doc.setFont("helvetica", "normal");
+            doc.text(String(s.value || ""), specX + 130, sy, { maxWidth: specW - 130 });
+            sy += 15;
+          });
+        }
+        fy = Math.max(fy + (ficha.imagen_url ? 172 : 0), sy);
       }
 
       doc.save("Cotizacion-" + (c.folio || "sin-folio") + ".pdf");
@@ -4259,35 +4469,52 @@ export default function App() {
                 ) : (
                   <div className="aq-items">
                     {itemsCotiz.map((it) => (
-                      <div className="aq-item" key={it.key}>
-                        <select value={it.producto_id || ""} onChange={(e) => cambiarProductoCotizLinea(it.key, e.target.value)}>
-                          {Object.entries(catalogoCotizPorGrupo).map(([grupo, lista]) => (
-                            <optgroup key={grupo} label={grupo}>
-                              {lista.map((p) => (
-                                <option key={p.id} value={p.id}>{p.codigo} · {p.nombre}</option>
-                              ))}
-                            </optgroup>
-                          ))}
-                        </select>
-                        <input
-                          className="aq-num"
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={it.cantidad}
-                          onChange={(e) => cambiarCantidadCotizLinea(it.key, Number(e.target.value))}
-                          aria-label="Cantidad"
-                        />
-                        <input
-                          className="aq-num"
-                          type="number"
-                          min="0"
-                          value={it.precio_unit}
-                          onChange={(e) => cambiarPrecioCotizLinea(it.key, Number(e.target.value))}
-                          aria-label="Precio unitario"
-                        />
-                        <span className="aq-sub">{CLP(Math.round((it.cantidad || 0) * (it.precio_unit || 0)))}</span>
-                        <button className="aq-x" onClick={() => quitarLineaCotiz(it.key)} aria-label="Quitar">×</button>
+                      <div key={it.key}>
+                        <div className="aq-item">
+                          <select value={it.producto_id || ""} onChange={(e) => cambiarProductoCotizLinea(it.key, e.target.value)}>
+                            {Object.entries(catalogoCotizPorGrupo).map(([grupo, lista]) => (
+                              <optgroup key={grupo} label={grupo}>
+                                {lista.map((p) => (
+                                  <option key={p.id} value={p.id}>{p.codigo} · {p.nombre}</option>
+                                ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                          <input
+                            className="aq-num"
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={it.cantidad}
+                            onChange={(e) => cambiarCantidadCotizLinea(it.key, Number(e.target.value))}
+                            aria-label="Cantidad"
+                          />
+                          <input
+                            className="aq-num"
+                            type="number"
+                            min="0"
+                            value={it.precio_unit}
+                            onChange={(e) => cambiarPrecioCotizLinea(it.key, Number(e.target.value))}
+                            aria-label="Precio unitario"
+                          />
+                          <span className="aq-sub">{CLP(Math.round((it.cantidad || 0) * (it.precio_unit || 0)))}</span>
+                          <button className="aq-x" onClick={() => quitarLineaCotiz(it.key)} aria-label="Quitar">×</button>
+                        </div>
+                        <div className="aq-item-ficha">
+                          <label className="aq-check">
+                            <input
+                              type="checkbox"
+                              checked={!!it.incluir_ficha}
+                              onChange={(e) => toggleFichaCotizLinea(it.key, e.target.checked)}
+                            />
+                            Incluir ficha técnica en el PDF
+                          </label>
+                          {it.incluir_ficha && (
+                            <button type="button" className="aq-link" onClick={() => abrirEditorFicha(it)}>
+                              {fichasProducto[keyFicha(it)] ? "Editar ficha" : "Crear ficha"}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -4329,6 +4556,85 @@ export default function App() {
               </>
             )}
           </section>
+        )}
+
+        {/* Modal: crear/editar ficha técnica de producto (se anexa opcionalmente al PDF de cotización) */}
+        {fichaEditKey && fichaEditDraft && (
+          <div className="aq-modal-ov" onClick={() => !guardandoFicha && cerrarEditorFicha()}>
+            <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="aq-modal-head">
+                <div>
+                  <strong>Ficha técnica</strong>
+                  <span className="aq-muted">{fichaEditDraft.producto_nombre || "Producto"}</span>
+                </div>
+                <button className="aq-link" disabled={guardandoFicha} onClick={cerrarEditorFicha}>Cerrar ✕</button>
+              </div>
+
+              {okFicha && <div className={"aq-result " + (okFicha.startsWith("Error") ? "bad" : "ok")}>{okFicha}</div>}
+
+              <div className="aq-modal-edit">
+                <label className="aq-full">Descripción
+                  <textarea
+                    rows="2"
+                    value={fichaEditDraft.descripcion || ""}
+                    onChange={(e) => setFichaEditDraft((prev) => ({ ...prev, descripcion: e.target.value }))}
+                    placeholder="Descripción breve del producto/equipo"
+                  />
+                </label>
+                <div className="aq-grid-2">
+                  <label>Imagen (URL)
+                    <input
+                      value={fichaEditDraft.imagen_url || ""}
+                      onChange={(e) => setFichaEditDraft((prev) => ({ ...prev, imagen_url: e.target.value }))}
+                      placeholder="https://…"
+                    />
+                  </label>
+                  <label>Garantía
+                    <input
+                      value={fichaEditDraft.garantia || ""}
+                      onChange={(e) => setFichaEditDraft((prev) => ({ ...prev, garantia: e.target.value }))}
+                      placeholder="Ej: 12 meses"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="aq-modal-edit">
+                <div className="aq-row-head">
+                  <strong>Especificaciones</strong>
+                  <button className="aq-btn-sec" type="button" onClick={agregarSpecFicha}>+ Agregar</button>
+                </div>
+                {(fichaEditDraft.specs || []).length === 0 ? (
+                  <p className="aq-muted">Sin especificaciones aún (ej: Capacidad, Dimensiones, Voltaje…).</p>
+                ) : (
+                  fichaEditDraft.specs.map((s, i) => (
+                    <div className="aq-items-edit-row" key={i}>
+                      <input
+                        style={{ flex: 1 }}
+                        value={s.label}
+                        onChange={(e) => cambiarSpecFicha(i, "label", e.target.value)}
+                        placeholder="Ej: Capacidad"
+                      />
+                      <input
+                        style={{ flex: 1 }}
+                        value={s.value}
+                        onChange={(e) => cambiarSpecFicha(i, "value", e.target.value)}
+                        placeholder="Ej: 20 litros"
+                      />
+                      <button className="aq-x" type="button" onClick={() => quitarSpecFicha(i)} aria-label="Quitar">×</button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                <button className="aq-btn" onClick={guardarFicha} disabled={guardandoFicha}>
+                  {guardandoFicha ? "Guardando…" : "Guardar ficha"}
+                </button>
+                <button className="aq-btn-sec" disabled={guardandoFicha} onClick={cerrarEditorFicha}>Cancelar</button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Modal: marcar pagado con respaldo bancario */}
@@ -5582,6 +5888,9 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--blue); outli
 .aq-check input { width:auto; }
 .aq-items { display:flex; flex-direction:column; gap:8px; }
 .aq-item { display:grid; grid-template-columns: 1fr 70px 92px 84px 28px; gap:8px; align-items:center; }
+.aq-item-ficha { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); margin:2px 0 6px; }
+.aq-item-ficha .aq-check { font-size:12px; }
+.aq-item-ficha .aq-link { font-size:12px; }
 .aq-num { text-align:right; }
 .aq-sub { font-size:14px; font-weight:600; text-align:right; }
 .aq-x { width:28px; height:28px; border-radius:7px; border:1px solid var(--line); background:#fff; color:var(--bad);
