@@ -883,14 +883,21 @@ export default function App() {
   const [facturasPend, setFacturasPend] = useState(null);
   const [cargandoFact, setCargandoFact] = useState(false);
   const [errorFact, setErrorFact] = useState("");
-  const [facturaInputs, setFacturaInputs] = useState({});     // numero_guia -> texto en edición
+  const [facturaInputs, setFacturaInputs] = useState({});     // clave (guías separadas por coma) -> texto en edición
+  const [facturaArchivos, setFacturaArchivos] = useState({}); // clave -> File (PDF) opcional
   const [guardandoFacturaGuia, setGuardandoFacturaGuia] = useState(null);
+  const [grupoAbierto, setGrupoAbierto] = useState({});       // "fact-<clienteId>" | "bid-<clienteId>" -> bool
 
   // ── Bidones pendientes de retiro (campo "Bidón Pendiente de Entrega") ──
   const [bidonesPend, setBidonesPend] = useState(null);
   const [cargandoBid, setCargandoBid] = useState(false);
   const [errorBid, setErrorBid] = useState("");
   const [guardandoBidonGuia, setGuardandoBidonGuia] = useState(null);
+  const [bidonesCorrelativo, setBidonesCorrelativo] = useState({}); // clienteId -> texto correlativo de retiro
+
+  // Aviso en "Nuevo pedido": el cliente elegido tiene bidones marcados para
+  // retirar en su próximo pedido.
+  const [avisoBidones, setAvisoBidones] = useState(null); // { cantidad, guias }
 
   // ── Cobranza / gestión de cobro (Pago = No en el formulario de entrega) ──
   const [entregasMap, setEntregasMap] = useState({});   // guide -> dt_entregas (pedidos del dashboard)
@@ -1337,51 +1344,63 @@ export default function App() {
     }
   }
   // ── Facturas por emitir: pedidos cerrados subestado "Venta" con Tipo de Documento = Factura ──
+  // Facturas por emitir: filtro server-side por substatus="Venta" y por fecha,
+  // en vez de traer TODAS las entregas de 12 meses (causa principal de la lentitud).
   async function cargarFacturasPend() {
     setCargandoFact(true); setErrorFact("");
     try {
       const hoy = new Date();
-      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
-      const { data: peds, error: ePed } = await supabase
-        .from("pedidos")
-        .select("id, numero_guia, cliente_id, domicilio_id, monto_total, numero_documento_emitido, documento_emitido_en")
-        .gte("created_at", desde);
-      if (ePed) throw ePed;
-      const pedPorGuia = {};
-      const guias = [];
-      (peds || []).forEach((p) => {
-        if (!p.numero_guia) return;
-        pedPorGuia[p.numero_guia] = p;
-        guias.push(p.numero_guia);
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 5, 1).toISOString();
+      const { data: ents, error: eEnt } = await supabase
+        .from("dt_entregas")
+        .select("guide, substatus, gestionado_en, raw")
+        .eq("substatus", "Venta")
+        .gte("gestionado_en", desde);
+      if (eEnt) throw eEnt;
+      const ventas = (ents || []).filter((e) => esVentaConFactura(e));
+      const entPorGuia = {};
+      ventas.forEach((e) => {
+        if (!e.guide) return;
+        const prev = entPorGuia[e.guide];
+        const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+        const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+        if (!prev || t >= tp) entPorGuia[e.guide] = e;
       });
-      let ents = [];
+      const guias = Object.keys(entPorGuia);
+      let peds = [];
       for (let i = 0; i < guias.length; i += 200) {
         const lote = guias.slice(i, i + 200);
         if (!lote.length) break;
-        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
-        ents = ents.concat(data || []);
+        const { data } = await supabase
+          .from("pedidos")
+          .select("id, numero_guia, cliente_id, domicilio_id, monto_total, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida, factura_diferida")
+          .in("numero_guia", lote);
+        peds = peds.concat(data || []);
       }
       const lista = [];
-      ents.forEach((e) => {
-        if (!e.guide || !esVentaConFactura(e)) return;
-        const p = pedPorGuia[e.guide];
-        if (!p) return;
+      peds.forEach((p) => {
+        const e = entPorGuia[p.numero_guia];
+        if (!e) return;
         const gestionadoEn = e.gestionado_en ? new Date(e.gestionado_en) : null;
         const dias = gestionadoEn ? Math.floor((Date.now() - gestionadoEn.getTime()) / 86400000) : 0;
         lista.push({
-          numero_guia: e.guide,
+          numero_guia: p.numero_guia,
           pedidoId: p.id,
           cliente_id: p.cliente_id,
           domicilio_id: p.domicilio_id,
           monto: montoEntrega(e) || Number(p.monto_total) || 0,
           numeroRef: numeroDocRefDT(e),
+          rutFactura: p.rut_factura || "",
           gestionadoEn,
           dias,
           numero_documento_emitido: p.numero_documento_emitido || "",
           documento_emitido_en: p.documento_emitido_en || null,
+          documento_emitido_url: p.documento_emitido_url || null,
+          factura_no_requerida: !!p.factura_no_requerida,
+          factura_diferida: !!p.factura_diferida,
         });
       });
-      lista.sort((a, b) => Number(!!b.numero_documento_emitido) - Number(!!a.numero_documento_emitido) || b.dias - a.dias);
+      lista.sort((a, b) => b.dias - a.dias);
       setFacturasPend(lista);
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudieron cargar las facturas por emitir."));
@@ -1390,18 +1409,32 @@ export default function App() {
       setCargandoFact(false);
     }
   }
-  async function guardarDocumentoEmitido(guia, valor) {
+  // Guarda el N° de documento (y opcionalmente el PDF emitido) para todas las
+  // guías indicadas de una sola vez — cubre el caso de un cliente que acumula
+  // varios pedidos y recibe una sola factura consolidada. El archivo es opcional.
+  async function guardarDocumentoEmitidoGrupo(guias, valor, archivo) {
     const v = (valor || "").trim();
-    if (!v) return;
-    setGuardandoFacturaGuia(guia);
+    if (!v || !guias.length) return;
+    const clave = guias.join(",");
+    setGuardandoFacturaGuia(clave);
     try {
-      const { error } = await supabase
-        .from("pedidos")
-        .update({ numero_documento_emitido: v, documento_emitido_en: new Date().toISOString() })
-        .eq("numero_guia", guia);
+      let url = null;
+      if (archivo) {
+        const ext = (archivo.name.split(".").pop() || "pdf").toLowerCase();
+        const path = `${guias[0]}-${Date.now()}.${ext}`;
+        const up = await supabase.storage
+          .from("documentos-facturas")
+          .upload(path, archivo, { upsert: false, contentType: archivo.type || "application/pdf" });
+        if (up.error) throw up.error;
+        url = path;
+      }
+      const patch = { numero_documento_emitido: v, documento_emitido_en: new Date().toISOString() };
+      if (url) patch.documento_emitido_url = url;
+      const { error } = await supabase.from("pedidos").update(patch).in("numero_guia", guias);
       if (error) throw error;
       await cargarFacturasPend();
-      setFacturaInputs((prev) => { const n = { ...prev }; delete n[guia]; return n; });
+      setFacturaInputs((prev) => { const n = { ...prev }; delete n[clave]; return n; });
+      setFacturaArchivos((prev) => { const n = { ...prev }; delete n[clave]; return n; });
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo guardar el número de documento."));
     } finally {
@@ -1414,7 +1447,7 @@ export default function App() {
     try {
       const { error } = await supabase
         .from("pedidos")
-        .update({ numero_documento_emitido: null, documento_emitido_en: null })
+        .update({ numero_documento_emitido: null, documento_emitido_en: null, documento_emitido_url: null })
         .eq("numero_guia", guia);
       if (error) throw error;
       await cargarFacturasPend();
@@ -1424,42 +1457,109 @@ export default function App() {
       setGuardandoFacturaGuia(null);
     }
   }
+  // "Emitir al cierre de mes": queda pendiente pero deja de contar como atrasada.
+  async function marcarFacturaDiferidaGrupo(guias) {
+    const clave = guias.join(",");
+    setGuardandoFacturaGuia(clave);
+    try {
+      const { error } = await supabase.from("pedidos").update({ factura_diferida: true }).in("numero_guia", guias);
+      if (error) throw error;
+      await cargarFacturasPend();
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoFacturaGuia(null);
+    }
+  }
+  async function deshacerFacturaDiferida(guia) {
+    setGuardandoFacturaGuia(guia);
+    try {
+      const { error } = await supabase.from("pedidos").update({ factura_diferida: false }).eq("numero_guia", guia);
+      if (error) throw error;
+      await cargarFacturasPend();
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoFacturaGuia(null);
+    }
+  }
+  async function marcarFacturaNoRequeridaGrupo(guias) {
+    if (!window.confirm(`¿Marcar ${guias.length} pedido(s) como "no requiere factura"? Dejarán de contar como pendientes.`)) return;
+    const clave = guias.join(",");
+    setGuardandoFacturaGuia(clave);
+    try {
+      const { error } = await supabase.from("pedidos").update({ factura_no_requerida: true }).in("numero_guia", guias);
+      if (error) throw error;
+      await cargarFacturasPend();
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoFacturaGuia(null);
+    }
+  }
+  async function deshacerFacturaNoRequerida(guia) {
+    setGuardandoFacturaGuia(guia);
+    try {
+      const { error } = await supabase.from("pedidos").update({ factura_no_requerida: false }).eq("numero_guia", guia);
+      if (error) throw error;
+      await cargarFacturasPend();
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoFacturaGuia(null);
+    }
+  }
+  async function verDocumentoEmitido(path) {
+    try {
+      const { data, error } = await supabase.storage.from("documentos-facturas").createSignedUrl(path, 60);
+      if (error) throw error;
+      window.open(data.signedUrl, "_blank");
+    } catch (e) {
+      alert("No se pudo abrir el documento: " + mensajeError(e, "error desconocido"));
+    }
+  }
 
-  // ── Bidones pendientes de retiro ──
+  // ── Bidones pendientes de retiro (filtro server-side por bidon_pendiente>0) ──
   async function cargarBidonesPend() {
     setCargandoBid(true); setErrorBid("");
     try {
       const hoy = new Date();
-      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
-      const { data: peds, error: ePed } = await supabase
-        .from("pedidos")
-        .select("id, numero_guia, cliente_id, domicilio_id, bidones_retirados_en")
-        .gte("created_at", desde);
-      if (ePed) throw ePed;
-      const pedPorGuia = {};
-      const guias = [];
-      (peds || []).forEach((p) => {
-        if (!p.numero_guia) return;
-        pedPorGuia[p.numero_guia] = p;
-        guias.push(p.numero_guia);
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 5, 1).toISOString();
+      const { data: ents, error: eEnt } = await supabase
+        .from("dt_entregas")
+        .select("guide, gestionado_en, chofer, bidon_pendiente")
+        .gt("bidon_pendiente", 0)
+        .gte("gestionado_en", desde);
+      if (eEnt) throw eEnt;
+      const entPorGuia = {};
+      (ents || []).forEach((e) => {
+        if (!e.guide) return;
+        const prev = entPorGuia[e.guide];
+        const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+        const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+        if (!prev || t >= tp) entPorGuia[e.guide] = e;
       });
-      let ents = [];
+      const guias = Object.keys(entPorGuia);
+      let peds = [];
       for (let i = 0; i < guias.length; i += 200) {
         const lote = guias.slice(i, i + 200);
         if (!lote.length) break;
-        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
-        ents = ents.concat(data || []);
+        const { data } = await supabase
+          .from("pedidos")
+          .select("id, numero_guia, cliente_id, domicilio_id, bidones_retirados_en, bidones_proximo_pedido, bidones_retiro_guia")
+          .in("numero_guia", lote);
+        peds = peds.concat(data || []);
       }
       const lista = [];
-      ents.forEach((e) => {
-        const cant = bidonesPendientesDT(e);
-        if (!e.guide || !cant) return;
-        const p = pedPorGuia[e.guide];
-        if (!p) return;
+      peds.forEach((p) => {
+        const e = entPorGuia[p.numero_guia];
+        if (!e) return;
+        const cant = Number(e.bidon_pendiente) || 0;
+        if (!cant) return;
         const gestionadoEn = e.gestionado_en ? new Date(e.gestionado_en) : null;
         const dias = gestionadoEn ? Math.floor((Date.now() - gestionadoEn.getTime()) / 86400000) : 0;
         lista.push({
-          numero_guia: e.guide,
+          numero_guia: p.numero_guia,
           pedidoId: p.id,
           cliente_id: p.cliente_id,
           domicilio_id: p.domicilio_id,
@@ -1468,9 +1568,11 @@ export default function App() {
           gestionadoEn,
           dias,
           bidones_retirados_en: p.bidones_retirados_en || null,
+          bidones_proximo_pedido: !!p.bidones_proximo_pedido,
+          bidones_retiro_guia: p.bidones_retiro_guia || "",
         });
       });
-      lista.sort((a, b) => Number(!!b.bidones_retirados_en) - Number(!!a.bidones_retirados_en) || b.dias - a.dias);
+      lista.sort((a, b) => b.dias - a.dias);
       setBidonesPend(lista);
     } catch (e) {
       setErrorBid(mensajeError(e, "No se pudieron cargar los bidones pendientes."));
@@ -1479,15 +1581,30 @@ export default function App() {
       setCargandoBid(false);
     }
   }
-  async function marcarBidonRetirado(guia) {
-    setGuardandoBidonGuia(guia);
+  async function marcarBidonesProximoPedidoGrupo(guias, valor) {
+    setGuardandoBidonGuia(guias.join(","));
+    try {
+      const { error } = await supabase.from("pedidos").update({ bidones_proximo_pedido: valor }).in("numero_guia", guias);
+      if (error) throw error;
+      await cargarBidonesPend();
+    } catch (e) {
+      setErrorBid(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoBidonGuia(null);
+    }
+  }
+  async function marcarBidonesRetiradosGrupo(guias, correlativo) {
+    const c = (correlativo || "").trim();
+    if (!c) { setErrorBid("Indica el pedido o correlativo usado para el retiro."); return; }
+    setGuardandoBidonGuia(guias.join(","));
     try {
       const { error } = await supabase
         .from("pedidos")
-        .update({ bidones_retirados_en: new Date().toISOString() })
-        .eq("numero_guia", guia);
+        .update({ bidones_retirados_en: new Date().toISOString(), bidones_retiro_guia: c, bidones_proximo_pedido: false })
+        .in("numero_guia", guias);
       if (error) throw error;
       await cargarBidonesPend();
+      setBidonesCorrelativo((prev) => { const n = { ...prev }; guias.forEach((g) => delete n[g]); return n; });
     } catch (e) {
       setErrorBid(mensajeError(e, "No se pudo actualizar."));
     } finally {
@@ -1498,10 +1615,7 @@ export default function App() {
     if (!window.confirm("¿Marcar los bidones de este pedido nuevamente como pendientes de retiro?")) return;
     setGuardandoBidonGuia(guia);
     try {
-      const { error } = await supabase
-        .from("pedidos")
-        .update({ bidones_retirados_en: null })
-        .eq("numero_guia", guia);
+      const { error } = await supabase.from("pedidos").update({ bidones_retirados_en: null, bidones_retiro_guia: null }).eq("numero_guia", guia);
       if (error) throw error;
       await cargarBidonesPend();
     } catch (e) {
@@ -3171,6 +3285,7 @@ export default function App() {
     setConsumePlan(false);
     setAvisoRepetir("");
     setAvisoDeuda(null);
+    setAvisoBidones(null);
     setSemaforoCli(null);
     setMarca(c.marca || "TrisQ");
     setRutFactura(c.rut || "");
@@ -3214,6 +3329,24 @@ export default function App() {
             .reduce((s, x) => s + (Number(x.monto_total) || 0), 0);
           setAvisoDeuda({ guias: deudaGuias, monto });
         }
+      }
+    } catch { /* si falla (RLS), no bloqueamos el flujo */ }
+
+    // Aviso de bidones pendientes marcados para retirar en el próximo pedido.
+    setAvisoBidones(null);
+    try {
+      const { data: pp2 } = await supabase
+        .from("pedidos")
+        .select("numero_guia")
+        .eq("cliente_id", c.id)
+        .eq("bidones_proximo_pedido", true)
+        .is("bidones_retirados_en", null);
+      const guiasBid = (pp2 || []).map((x) => x.numero_guia).filter(Boolean);
+      if (guiasBid.length) {
+        const { data: entsBid } = await supabase
+          .from("dt_entregas").select("guide, bidon_pendiente").in("guide", guiasBid).gt("bidon_pendiente", 0);
+        const total = (entsBid || []).reduce((s, e) => s + (Number(e.bidon_pendiente) || 0), 0);
+        if (total > 0) setAvisoBidones({ cantidad: total, guias: guiasBid });
       }
     } catch { /* si falla (RLS), no bloqueamos el flujo */ }
 
@@ -3929,16 +4062,16 @@ export default function App() {
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "facturas" ? "on" : ""} onClick={() => setVista("facturas")}>
                 Facturas
-                {facturasPend && facturasPend.filter((f) => !f.numero_documento_emitido).length > 0 && (
-                  <span className="aq-nav-alert">{facturasPend.filter((f) => !f.numero_documento_emitido).length}</span>
+                {facturasPend && facturasPend.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida).length > 0 && (
+                  <span className="aq-nav-alert">{facturasPend.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida).length}</span>
                 )}
               </button>
             )}
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "bidones" ? "on" : ""} onClick={() => setVista("bidones")}>
                 Bidones
-                {bidonesPend && bidonesPend.filter((b) => !b.bidones_retirados_en).length > 0 && (
-                  <span className="aq-nav-alert">{bidonesPend.filter((b) => !b.bidones_retirados_en).length}</span>
+                {bidonesPend && bidonesPend.filter((b) => !b.bidones_retirados_en).reduce((s, b) => s + b.cantidad, 0) > 0 && (
+                  <span className="aq-nav-alert">{bidonesPend.filter((b) => !b.bidones_retirados_en).reduce((s, b) => s + b.cantidad, 0)}</span>
                 )}
               </button>
             )}
@@ -4169,11 +4302,11 @@ export default function App() {
                 )}
 
                 {(() => {
-                  const factPend = (facturasPend || []).filter((f) => !f.numero_documento_emitido);
+                  const factPend = (facturasPend || []).filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
                   const bidPend = (bidonesPend || []).filter((b) => !b.bidones_retirados_en);
-                  if (!factPend.length && !bidPend.length) return null;
+                  const bidTotal = bidPend.reduce((s, b) => s + b.cantidad, 0);
+                  if (!factPend.length && !bidTotal) return null;
                   const factCrit = factPend.filter((f) => f.dias >= 5).length;
-                  const bidCrit = bidPend.filter((b) => b.dias >= 10).length;
                   return (
                     <div className="aq-gestion-alerts">
                       {factPend.length > 0 && (
@@ -4183,11 +4316,11 @@ export default function App() {
                           <em className="aq-money-sub">{factCrit > 0 ? `${factCrit} con 5+ días de atraso` : "Dentro de plazo"}</em>
                         </button>
                       )}
-                      {bidPend.length > 0 && (
+                      {bidTotal > 0 && (
                         <button className="aq-alert-card warn" onClick={() => setVista("bidones")}>
                           <span>Bidones pendientes de retiro</span>
-                          <strong>{bidPend.length}</strong>
-                          <em className="aq-money-sub">{bidCrit > 0 ? `${bidCrit} con 10+ días de atraso` : "Retiro sin resolver"}</em>
+                          <strong>{bidTotal}</strong>
+                          <em className="aq-money-sub">En poder de {new Set(bidPend.map((b) => b.cliente_id)).size} cliente(s)</em>
                         </button>
                       )}
                     </div>
@@ -4838,70 +4971,150 @@ export default function App() {
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
               <div>
                 <h2 style={{ margin: 0 }}>Facturas por emitir</h2>
-                <span className="aq-muted">Pedidos cerrados subestado Venta con Tipo de Documento = Factura (últimos 12 meses).</span>
+                <span className="aq-muted">Agrupado por cliente · pedidos cerrados subestado Venta con Tipo de Documento = Factura (últimos 6 meses).</span>
               </div>
               <button className="aq-btn-sec" onClick={cargarFacturasPend} disabled={cargandoFact}>↻ Actualizar</button>
             </div>
 
             {errorFact && <div className="aq-error" style={{ marginBottom: 8 }}>{errorFact}</div>}
             {cargandoFact && <p className="aq-muted">Cargando facturas…</p>}
-            {!cargandoFact && facturasPend && facturasPend.length === 0 && (
-              <p className="aq-muted">No hay pedidos con Factura pendiente en el período.</p>
-            )}
 
             {!cargandoFact && facturasPend && facturasPend.length > 0 && (() => {
-              const pendientes = facturasPend.filter((f) => !f.numero_documento_emitido);
-              const emitidas = facturasPend.filter((f) => f.numero_documento_emitido);
+              const grupos = {};
+              facturasPend.forEach((f) => {
+                const cid = f.cliente_id || "sin-cliente";
+                if (!grupos[cid]) grupos[cid] = { cliente_id: f.cliente_id, guias: [] };
+                grupos[cid].guias.push(f);
+              });
+              const lista = Object.values(grupos).map((g) => {
+                const cli = clientePorId[g.cliente_id];
+                const pend = g.guias.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
+                const dif = g.guias.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && f.factura_diferida);
+                const noReq = g.guias.filter((f) => f.factura_no_requerida);
+                const emit = g.guias.filter((f) => f.numero_documento_emitido);
+                const maxDias = pend.length ? Math.max(...pend.map((f) => f.dias)) : 0;
+                const totalPend = [...pend, ...dif].reduce((s, f) => s + f.monto, 0);
+                const rut = g.guias.find((f) => f.rutFactura)?.rutFactura || cli?.rut || "";
+                return { cliente_id: g.cliente_id, nombre: cli?.nombre || "Cliente", rut, pend, dif, noReq, emit, maxDias, totalPend };
+              });
+              lista.sort((a, b) => (b.pend.length > 0) - (a.pend.length > 0) || b.maxDias - a.maxDias);
+              const conPendientes = lista.filter((g) => g.pend.length || g.dif.length);
+              const soloResueltos = lista.filter((g) => !g.pend.length && !g.dif.length && (g.emit.length || g.noReq.length));
+
+              if (!conPendientes.length && !soloResueltos.length) {
+                return <p className="aq-muted">No hay pedidos con Factura pendiente en el período.</p>;
+              }
               return (
                 <>
-                  {pendientes.length > 0 && <strong>Pendientes ({pendientes.length})</strong>}
-                  {pendientes.map((f) => {
-                    const info = infoPedido(f);
-                    const cls = f.dias >= 5 ? "bad" : f.dias >= 2 ? "warn" : "ok";
+                  {conPendientes.map((g) => {
+                    const claveG = "fact-" + (g.cliente_id || "sc");
+                    const abierto = !!grupoAbierto[claveG];
+                    const guiasPend = g.pend.map((f) => f.numero_guia);
+                    const guiasAccion = [...guiasPend, ...g.dif.map((f) => f.numero_guia)];
+                    const clave = guiasAccion.join(",");
+                    const cls = g.maxDias >= 5 ? "bad" : g.maxDias >= 2 ? "warn" : "ok";
                     return (
-                      <div className="aq-det-line aq-prov-cab" key={f.numero_guia} style={{ alignItems: "center", flexWrap: "wrap" }}>
-                        <span>
-                          Guía {f.numero_guia} · {info.nombre}
-                          <em className="aq-det-chofer">
-                            {info.comuna} · {CLP(f.monto)}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}
-                          </em>
-                        </span>
-                        <span style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                          <span className={"aq-badge " + cls}>{f.dias} día(s)</span>
-                          <input
-                            type="text"
-                            placeholder="N° documento"
-                            value={facturaInputs[f.numero_guia] ?? ""}
-                            onChange={(e) => setFacturaInputs((prev) => ({ ...prev, [f.numero_guia]: e.target.value }))}
-                            style={{ width: 130 }}
-                          />
-                          <button
-                            className="aq-btn-sec"
-                            disabled={guardandoFacturaGuia === f.numero_guia || !(facturaInputs[f.numero_guia] || "").trim()}
-                            onClick={() => guardarDocumentoEmitido(f.numero_guia, facturaInputs[f.numero_guia])}
-                          >
-                            {guardandoFacturaGuia === f.numero_guia ? "Guardando…" : "Guardar"}
-                          </button>
-                        </span>
+                      <div className="aq-fact-grupo" key={g.cliente_id || "sc"}>
+                        <div className="aq-det-line aq-prov-cab aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
+                          <span>
+                            {g.nombre}{g.rut ? " · " + g.rut : ""}
+                            <em className="aq-det-chofer">
+                              {g.pend.length + g.dif.length} pedido(s){g.dif.length ? ` · ${g.dif.length} a cierre de mes` : ""} · {CLP(g.totalPend)}
+                            </em>
+                          </span>
+                          <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            {g.pend.length > 0 && <span className={"aq-badge " + cls}>{g.maxDias} día(s)</span>}
+                            <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
+                          </span>
+                        </div>
+
+                        {abierto && (
+                          <div className="aq-fact-detalle">
+                            {[...g.pend, ...g.dif].map((f) => (
+                              <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
+                                <span>
+                                  Guía {f.numero_guia}{f.factura_diferida ? " · A cierre de mes" : ""}
+                                  <em className="aq-det-chofer">{f.dias} día(s){f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
+                                </span>
+                                <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                  {CLP(f.monto)}
+                                  {f.factura_diferida && (
+                                    <button className="aq-link" onClick={() => deshacerFacturaDiferida(f.numero_guia)}>Deshacer diferido</button>
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+
+                            <div className="aq-fact-acciones">
+                              <input
+                                type="text"
+                                placeholder="N° documento"
+                                value={facturaInputs[clave] ?? ""}
+                                onChange={(e) => setFacturaInputs((prev) => ({ ...prev, [clave]: e.target.value }))}
+                                style={{ width: 130 }}
+                              />
+                              <input
+                                type="file"
+                                accept="application/pdf"
+                                title="PDF del documento emitido (opcional)"
+                                onChange={(e) => setFacturaArchivos((prev) => ({ ...prev, [clave]: e.target.files?.[0] || null }))}
+                              />
+                              <button
+                                className="aq-btn-sec"
+                                disabled={guardandoFacturaGuia === clave || !(facturaInputs[clave] || "").trim()}
+                                onClick={() => guardarDocumentoEmitidoGrupo(guiasAccion, facturaInputs[clave], facturaArchivos[clave])}
+                              >
+                                {guardandoFacturaGuia === clave ? "Guardando…" : "Guardar"}
+                              </button>
+                              {guiasPend.length > 0 && (
+                                <button className="aq-link" onClick={() => marcarFacturaDiferidaGrupo(guiasPend)}>Emitir al cierre de mes</button>
+                              )}
+                              <button className="aq-link" onClick={() => marcarFacturaNoRequeridaGrupo(guiasAccion)}>No requiere factura</button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
 
-                  {emitidas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Emitidas ({emitidas.length})</strong>}
-                  {emitidas.map((f) => {
-                    const info = infoPedido(f);
+                  {soloResueltos.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Resueltas ({soloResueltos.length})</strong>}
+                  {soloResueltos.map((g) => {
+                    const claveG = "fact-r-" + (g.cliente_id || "sc");
+                    const abierto = !!grupoAbierto[claveG];
                     return (
-                      <div className="aq-det-line aq-prov-fact" key={"em" + f.numero_guia}>
-                        <span>
-                          Guía {f.numero_guia} · {info.nombre}
-                          <em className="aq-det-chofer">
-                            Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}
-                          </em>
-                        </span>
-                        <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                          {CLP(f.monto)}
-                          <button className="aq-link" onClick={() => deshacerDocumentoEmitido(f.numero_guia)}>Deshacer</button>
-                        </span>
+                      <div className="aq-fact-grupo" key={"r" + (g.cliente_id || "sc")}>
+                        <div className="aq-det-line aq-prov-fact aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
+                          <span>
+                            {g.nombre}{g.rut ? " · " + g.rut : ""}
+                            <em className="aq-det-chofer">
+                              {g.emit.length > 0 ? `${g.emit.length} emitida(s)` : ""}{g.noReq.length > 0 ? `${g.emit.length ? " · " : ""}${g.noReq.length} sin factura requerida` : ""}
+                            </em>
+                          </span>
+                          <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
+                        </div>
+                        {abierto && (
+                          <div className="aq-fact-detalle">
+                            {g.emit.map((f) => (
+                              <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
+                                <span>
+                                  Guía {f.numero_guia}
+                                  <em className="aq-det-chofer">Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}</em>
+                                </span>
+                                <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                  {CLP(f.monto)}
+                                  {f.documento_emitido_url && <button className="aq-link" onClick={() => verDocumentoEmitido(f.documento_emitido_url)}>Ver PDF</button>}
+                                  <button className="aq-link" onClick={() => deshacerDocumentoEmitido(f.numero_guia)}>Deshacer</button>
+                                </span>
+                              </div>
+                            ))}
+                            {g.noReq.map((f) => (
+                              <div className="aq-det-line aq-prov-fact" key={"nr" + f.numero_guia}>
+                                <span>Guía {f.numero_guia}<em className="aq-det-chofer">Marcada sin factura requerida</em></span>
+                                <button className="aq-link" onClick={() => deshacerFacturaNoRequerida(f.numero_guia)}>Deshacer</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -4917,58 +5130,127 @@ export default function App() {
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
               <div>
                 <h2 style={{ margin: 0 }}>Bidones pendientes de retiro</h2>
-                <span className="aq-muted">Pedidos con bidones vacíos pendientes según el formulario de entrega (últimos 12 meses).</span>
+                <span className="aq-muted">Agrupado por cliente · lo relevante es la cantidad en su poder, no los días (últimos 6 meses).</span>
               </div>
               <button className="aq-btn-sec" onClick={cargarBidonesPend} disabled={cargandoBid}>↻ Actualizar</button>
             </div>
 
             {errorBid && <div className="aq-error" style={{ marginBottom: 8 }}>{errorBid}</div>}
             {cargandoBid && <p className="aq-muted">Cargando bidones pendientes…</p>}
-            {!cargandoBid && bidonesPend && bidonesPend.length === 0 && (
-              <p className="aq-muted">No hay bidones pendientes de retiro en el período.</p>
-            )}
 
             {!cargandoBid && bidonesPend && bidonesPend.length > 0 && (() => {
-              const pendientes = bidonesPend.filter((b) => !b.bidones_retirados_en);
-              const resueltos = bidonesPend.filter((b) => b.bidones_retirados_en);
+              const grupos = {};
+              bidonesPend.forEach((b) => {
+                const cid = b.cliente_id || "sin-cliente";
+                if (!grupos[cid]) grupos[cid] = { cliente_id: b.cliente_id, guias: [] };
+                grupos[cid].guias.push(b);
+              });
+              const lista = Object.values(grupos).map((g) => {
+                const cli = clientePorId[g.cliente_id];
+                const pend = g.guias.filter((b) => !b.bidones_retirados_en);
+                const resueltos = g.guias.filter((b) => b.bidones_retirados_en);
+                const totalPend = pend.reduce((s, b) => s + b.cantidad, 0);
+                const proximoPedido = pend.length > 0 && pend.every((b) => b.bidones_proximo_pedido);
+                const maxDias = pend.length ? Math.max(...pend.map((b) => b.dias)) : 0;
+                return { cliente_id: g.cliente_id, nombre: cli?.nombre || "Cliente", pend, resueltos, totalPend, proximoPedido, maxDias };
+              });
+              lista.sort((a, b) => (b.pend.length > 0) - (a.pend.length > 0) || b.totalPend - a.totalPend);
+              const conPend = lista.filter((g) => g.pend.length > 0);
+              const soloResueltos = lista.filter((g) => !g.pend.length && g.resueltos.length > 0);
+
+              if (!conPend.length && !soloResueltos.length) {
+                return <p className="aq-muted">No hay bidones pendientes de retiro en el período.</p>;
+              }
               return (
                 <>
-                  {pendientes.length > 0 && <strong>Pendientes ({pendientes.length})</strong>}
-                  {pendientes.map((b) => {
-                    const info = infoPedido(b);
-                    const cls = b.dias >= 10 ? "bad" : b.dias >= 4 ? "warn" : "ok";
+                  {conPend.map((g) => {
+                    const claveG = "bid-" + (g.cliente_id || "sc");
+                    const abierto = !!grupoAbierto[claveG];
+                    const guiasPend = g.pend.map((b) => b.numero_guia);
+                    const clave = guiasPend.join(",");
+                    const cls = g.totalPend >= 10 ? "bad" : g.totalPend >= 4 ? "warn" : "ok";
                     return (
-                      <div className="aq-det-line aq-prov-cab" key={b.numero_guia} style={{ alignItems: "center", flexWrap: "wrap" }}>
-                        <span>
-                          Guía {b.numero_guia} · {info.nombre}
-                          <em className="aq-det-chofer">{info.comuna} · Chofer {b.chofer} · {b.cantidad} bidón(es)</em>
-                        </span>
-                        <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          <span className={"aq-badge " + cls}>{b.dias} día(s)</span>
-                          <button
-                            className="aq-btn-sec"
-                            disabled={guardandoBidonGuia === b.numero_guia}
-                            onClick={() => marcarBidonRetirado(b.numero_guia)}
-                          >
-                            {guardandoBidonGuia === b.numero_guia ? "Guardando…" : "Marcar retirado"}
-                          </button>
-                        </span>
+                      <div className="aq-fact-grupo" key={g.cliente_id || "sc"}>
+                        <div className="aq-det-line aq-prov-cab aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
+                          <span>
+                            {g.nombre}
+                            <em className="aq-det-chofer">{g.pend.length} pedido(s) con bidones · hasta {g.maxDias} día(s) de antigüedad{g.proximoPedido ? " · retiro agendado" : ""}</em>
+                          </span>
+                          <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <span className={"aq-badge " + cls}>{g.totalPend} bidón(es)</span>
+                            <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
+                          </span>
+                        </div>
+
+                        {abierto && (
+                          <div className="aq-fact-detalle">
+                            {g.pend.map((b) => (
+                              <div className="aq-det-line aq-prov-fact" key={b.numero_guia}>
+                                <span>
+                                  Guía {b.numero_guia}
+                                  <em className="aq-det-chofer">Chofer {b.chofer} · {b.dias} día(s)</em>
+                                </span>
+                                <span>{b.cantidad} bidón(es)</span>
+                              </div>
+                            ))}
+
+                            <label className="aq-check-inline">
+                              <input
+                                type="checkbox"
+                                checked={g.proximoPedido}
+                                disabled={guardandoBidonGuia === clave}
+                                onChange={(e) => marcarBidonesProximoPedidoGrupo(guiasPend, e.target.checked)}
+                              />
+                              Se retiran en el próximo pedido que realicen (avisa al tomar el pedido)
+                            </label>
+
+                            <div className="aq-fact-acciones">
+                              <input
+                                type="text"
+                                placeholder="Pedido / correlativo del retiro"
+                                value={bidonesCorrelativo[g.cliente_id] ?? ""}
+                                onChange={(e) => setBidonesCorrelativo((prev) => ({ ...prev, [g.cliente_id]: e.target.value }))}
+                                style={{ width: 190 }}
+                              />
+                              <button
+                                className="aq-btn-sec"
+                                disabled={guardandoBidonGuia === clave || !(bidonesCorrelativo[g.cliente_id] || "").trim()}
+                                onClick={() => marcarBidonesRetiradosGrupo(guiasPend, bidonesCorrelativo[g.cliente_id])}
+                              >
+                                {guardandoBidonGuia === clave ? "Guardando…" : "Marcar retirado"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
 
-                  {resueltos.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Retirados ({resueltos.length})</strong>}
-                  {resueltos.map((b) => {
-                    const info = infoPedido(b);
+                  {soloResueltos.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Retirados ({soloResueltos.length})</strong>}
+                  {soloResueltos.map((g) => {
+                    const claveG = "bid-r-" + (g.cliente_id || "sc");
+                    const abierto = !!grupoAbierto[claveG];
                     return (
-                      <div className="aq-det-line aq-prov-fact" key={"re" + b.numero_guia}>
-                        <span>
-                          Guía {b.numero_guia} · {info.nombre}
-                          <em className="aq-det-chofer">
-                            {b.cantidad} bidón(es) · Retirado {new Date(b.bidones_retirados_en).toLocaleDateString("es-CL")}
-                          </em>
-                        </span>
-                        <button className="aq-link" onClick={() => deshacerBidonRetirado(b.numero_guia)}>Deshacer</button>
+                      <div className="aq-fact-grupo" key={"r" + (g.cliente_id || "sc")}>
+                        <div className="aq-det-line aq-prov-fact aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
+                          <span>{g.nombre}<em className="aq-det-chofer">{g.resueltos.length} retiro(s) registrado(s)</em></span>
+                          <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
+                        </div>
+                        {abierto && (
+                          <div className="aq-fact-detalle">
+                            {g.resueltos.map((b) => (
+                              <div className="aq-det-line aq-prov-fact" key={b.numero_guia}>
+                                <span>
+                                  Guía {b.numero_guia}
+                                  <em className="aq-det-chofer">
+                                    {b.cantidad} bidón(es) · Retirado {new Date(b.bidones_retirados_en).toLocaleDateString("es-CL")}{b.bidones_retiro_guia ? " · Con pedido " + b.bidones_retiro_guia : ""}
+                                  </em>
+                                </span>
+                                <button className="aq-link" onClick={() => deshacerBidonRetirado(b.numero_guia)}>Deshacer</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -6103,7 +6385,7 @@ export default function App() {
                       )}
                     </div>
                     {rol !== "distribuidor" && (
-                      <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); setAvisoDeuda(null); setSemaforoCli(null); }}>
+                      <button className="aq-link" onClick={() => { setCliente(null); setItems([]); setDescuentos([]); setAvisoRepetir(""); setAvisoDeuda(null); setSemaforoCli(null); setAvisoBidones(null); }}>
                         Cambiar
                       </button>
                     )}
@@ -6142,6 +6424,14 @@ export default function App() {
                 <strong>⚠ Deuda pendiente</strong>
                 <p>Este cliente tiene {avisoDeuda.guias.length} entrega(s) sin pagar por {CLP(avisoDeuda.monto)} (guía(s): {avisoDeuda.guias.join(", ")}).</p>
                 <span>Puedes continuar, pero conviene gestionarlo en Cobranzas.</span>
+              </div>
+            )}
+
+            {cliente && avisoBidones && (
+              <div className="aq-alerta-bidon">
+                <strong>🧴 Bidones pendientes de retiro</strong>
+                <p>Este cliente tiene {avisoBidones.cantidad} bidón(es) vacío(s) marcados para retirar en su próximo pedido (guía(s): {avisoBidones.guias.join(", ")}).</p>
+                <span>Coordina el retiro con el chofer en esta entrega.</span>
               </div>
             )}
 
@@ -6864,6 +7154,10 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-alerta-deuda strong { color:#8a6400; display:block; }
 .aq-alerta-deuda p { margin:4px 0; color:var(--ink); }
 .aq-alerta-deuda span { font-size:13px; color:#a07a2a; }
+.aq-alerta-bidon { background:#e6f1fb; border:1px solid #85b7eb; border-radius:12px; padding:14px 16px; margin-bottom:14px; }
+.aq-alerta-bidon strong { color:#0c447c; display:block; }
+.aq-alerta-bidon p { margin:4px 0; color:var(--ink); }
+.aq-alerta-bidon span { font-size:13px; color:#185fa5; }
 
 /* Popup detalle de entrega */
 .aq-modal-ov { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:18px; z-index:50; }
@@ -6932,6 +7226,16 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-prov-fact span:first-child { font-size:12px; }
 /* Subtotal a rendir por chofer */
 .aq-chofer-box { padding:6px 0; border-bottom:1px dashed var(--line); }
+/* Agrupación por cliente (Facturas por emitir / Bidones pendientes) */
+.aq-fact-grupo { border-bottom:1px solid var(--line); padding:6px 0; }
+.aq-fact-grupo:last-child { border-bottom:none; }
+.aq-fact-head { cursor:pointer; align-items:center; flex-wrap:wrap; }
+.aq-fact-detalle { padding:6px 0 10px 12px; }
+.aq-fact-acciones { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+.aq-fact-acciones input[type="text"] { font-size:13px; padding:7px 10px; }
+.aq-fact-acciones input[type="file"] { font-size:12px; max-width:180px; }
+.aq-check-inline { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink); margin-top:10px; cursor:pointer; }
+.aq-check-inline input { width:auto; margin:0; }
 .aq-chofer-box:last-child { border-bottom:none; }
 .aq-chofer-cab { border-bottom:none; font-weight:600; }
 .aq-chofer-cab span:last-child { font-family:'Fraunces',serif; font-size:16px; color:var(--navy); }
