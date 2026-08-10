@@ -5064,15 +5064,16 @@ export default function App() {
                     const ab = Number(d.abonado) || 0;
                     const saldo = d.saldo ?? d.monto;
                     return (
-                      <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center" }}>
-                        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          {rol === "admin" && (
-                            <input
-                              type="checkbox"
-                              checked={!!seleccionPago[d.numero_guia]}
-                              onChange={(e) => setSeleccionPago((prev) => ({ ...prev, [d.numero_guia]: e.target.checked }))}
-                            />
-                          )}
+                      <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center", gap: 8 }}>
+                        {rol === "admin" && (
+                          <input
+                            type="checkbox"
+                            checked={!!seleccionPago[d.numero_guia]}
+                            onChange={(e) => setSeleccionPago((prev) => ({ ...prev, [d.numero_guia]: e.target.checked }))}
+                            style={{ width: "auto", flex: "0 0 auto", padding: 0 }}
+                          />
+                        )}
+                        <span style={{ flex: 1 }}>
                           {d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
                         </span>
                         <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
