@@ -789,6 +789,8 @@ export default function App() {
   const [pagoFoto, setPagoFoto] = useState(null);           // File del respaldo bancario
   const [subiendoPago, setSubiendoPago] = useState(false);
   const [errorPago, setErrorPago] = useState("");
+  const [seleccionPago, setSeleccionPago] = useState({});   // numero_guia -> bool (marca masiva, solo admin)
+  const [guardandoPagoMasivo, setGuardandoPagoMasivo] = useState(false);
   // ── Abonos parciales (cobro a cliente + deuda proveedor) ──
   const [abonoModal, setAbonoModal] = useState(null);       // { tipo:"cobro"|"proveedor", ...datos, saldo }
   const [abonoMonto, setAbonoMonto] = useState("");         // input monto del abono
@@ -1685,6 +1687,37 @@ export default function App() {
       setErrorPago(mensajeError(e, "No se pudo registrar el pago."));
     } finally {
       setSubiendoPago(false);
+    }
+  }
+
+  // Marca varias deudas a proveedor como pagadas de una vez, sin exigir
+  // respaldo (solo admin — para cierres masivos ya conciliados por otra vía).
+  async function marcarPagadasMasivo(items) {
+    if (!items.length) return;
+    if (!window.confirm(`¿Marcar ${items.length} pago(s) a proveedor como pagados, sin respaldo adjunto, por un total de ${CLP(items.reduce((s, d) => s + (d.saldo ?? d.monto), 0))}?`)) return;
+    setGuardandoPagoMasivo(true); setErrorDeudas("");
+    try {
+      for (const d of items) {
+        const { error } = await supabase.from("pagos_proveedor").upsert({
+          numero_guia: d.numero_guia,
+          proveedor: d.proveedor,
+          chofer: d.chofer,
+          monto: d.monto,
+          abonado: d.monto,
+          mes: d.mes,
+          origen: "dispatchtrack",
+          pagado: true,
+          fecha_pago: new Date().toISOString(),
+          pagado_por: perfilNombre || null,
+        }, { onConflict: "numero_guia" });
+        if (error) throw error;
+      }
+      setSeleccionPago({});
+      await cargarDeudasProv();
+    } catch (e) {
+      setErrorDeudas(mensajeError(e, "No se pudo completar la marca masiva."));
+    } finally {
+      setGuardandoPagoMasivo(false);
     }
   }
 
@@ -4998,12 +5031,50 @@ export default function App() {
                   </div>
 
                   {pendientes.length > 0 && <strong>Pendientes</strong>}
+                  {rol === "admin" && pendientes.length > 0 && (() => {
+                    const seleccionadas = pendientes.filter((d) => seleccionPago[d.numero_guia]);
+                    const totalSel = seleccionadas.reduce((s, d) => s + (d.saldo ?? d.monto), 0);
+                    const todasMarcadas = pendientes.every((d) => seleccionPago[d.numero_guia]);
+                    return (
+                      <div className="aq-fact-acciones" style={{ margin: "8px 0" }}>
+                        <label className="aq-check-inline" style={{ marginTop: 0 }}>
+                          <input
+                            type="checkbox"
+                            checked={todasMarcadas}
+                            onChange={(e) => {
+                              const on = e.target.checked;
+                              setSeleccionPago(on ? Object.fromEntries(pendientes.map((d) => [d.numero_guia, true])) : {});
+                            }}
+                          />
+                          Seleccionar todas ({pendientes.length})
+                        </label>
+                        {seleccionadas.length > 0 && (
+                          <button
+                            className="aq-btn-sec"
+                            disabled={guardandoPagoMasivo}
+                            onClick={() => marcarPagadasMasivo(seleccionadas)}
+                          >
+                            {guardandoPagoMasivo ? "Guardando…" : `Marcar ${seleccionadas.length} pagadas (${CLP(totalSel)}) sin respaldo`}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {pendientes.map((d, i) => {
                     const ab = Number(d.abonado) || 0;
                     const saldo = d.saldo ?? d.monto;
                     return (
                       <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center" }}>
-                        <span>{d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em></span>
+                        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {rol === "admin" && (
+                            <input
+                              type="checkbox"
+                              checked={!!seleccionPago[d.numero_guia]}
+                              onChange={(e) => setSeleccionPago((prev) => ({ ...prev, [d.numero_guia]: e.target.checked }))}
+                            />
+                          )}
+                          {d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
+                        </span>
                         <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                           {CLP(d.monto)}
                           <button className="aq-btn-sec" onClick={() => abrirAbono("proveedor", { numero_guia: d.numero_guia, mes: d.mes, proveedor: d.proveedor, chofer: d.chofer, monto: d.monto, abonado: ab, saldo, titulo: d.proveedor })}>Abonar</button>
