@@ -1052,7 +1052,9 @@ export default function App() {
 
   // ── Carga del dashboard gerencial (últimos 6 meses) ────────
   // Evolución mensual (últimos 6 meses) — versión liviana para admin/operador,
-  // misma agregación que la sección "Evolución" del panel gerencial.
+  // misma agregación que la sección "Evolución" del panel gerencial, más la
+  // sumatoria de Compras (operativa) + Compra Proveedor por mes (línea, en vez
+  // de conteo de pedidos).
   async function cargarEvolucion() {
     if (!credsListas || !session) return;
     setCargandoEvo(true); setErrorEvo("");
@@ -1062,7 +1064,7 @@ export default function App() {
       const desde = ini.toISOString();
       const { data: peds, error: ePed } = await supabase
         .from("pedidos")
-        .select("created_at, monto_total")
+        .select("created_at, monto_total, numero_guia")
         .gte("created_at", desde);
       if (ePed) throw ePed;
       const pedidos = peds || [];
@@ -1071,7 +1073,7 @@ export default function App() {
         const d = new Date(ahora.getFullYear(), ahora.getMonth() - k, 1);
         const key = d.toISOString().slice(0, 7);
         const lab = d.toLocaleDateString("es-CL", { month: "short" });
-        meses.push({ key, label: lab.charAt(0).toUpperCase() + lab.slice(1, 3), count: 0, monto: 0 });
+        meses.push({ key, label: lab.charAt(0).toUpperCase() + lab.slice(1, 3), count: 0, monto: 0, compras: 0 });
       }
       const idxMes = Object.fromEntries(meses.map((m, i) => [m.key, i]));
       pedidos.forEach((p) => {
@@ -1081,7 +1083,34 @@ export default function App() {
           meses[idxMes[key]].monto += Number(p.monto_total) || 0;
         }
       });
-      const mesActual = meses[meses.length - 1] || { count: 0, monto: 0 };
+      // Compras (operativa) + Compra Proveedor por mes, según la fecha en que el
+      // chofer gestionó la entrega en DispatchTrack.
+      const guias = [...new Set(pedidos.map((p) => p.numero_guia).filter(Boolean))];
+      let ents = [];
+      for (let i = 0; i < guias.length; i += 200) {
+        const lote = guias.slice(i, i + 200);
+        if (!lote.length) break;
+        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+        ents = ents.concat(data || []);
+      }
+      const porGuia = {};
+      ents.forEach((e) => {
+        if (!e.guide) return;
+        const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+        const prev = porGuia[e.guide];
+        const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+        if (!prev || t >= tp) porGuia[e.guide] = e;
+      });
+      Object.values(porGuia).forEach((e) => {
+        if (!e.gestionado_en) return;
+        const key = new Date(e.gestionado_en).toISOString().slice(0, 7);
+        if (!(key in idxMes)) return;
+        let m = 0;
+        if (esCompraNoRendicion(e)) m += montoCompra(e);
+        if (esCompraProveedor(e)) m += montoCompraProveedor(e);
+        if (m) meses[idxMes[key]].compras += m;
+      });
+      const mesActual = meses[meses.length - 1] || { count: 0, monto: 0, compras: 0 };
       setEvolucion({ meses, mesActual });
     } catch (e) {
       setErrorEvo(mensajeError(e, "No se pudo cargar la evolución mensual."));
@@ -4038,55 +4067,57 @@ export default function App() {
                   <div className="aq-card">Cargando evolución…</div>
                 ) : evolucion && (
                   <>
-                    {/* Evolución mensual (idéntico al panel gerencial) */}
-                    <section className="aq-card">
-                      <h2>Evolución (últimos 6 meses)</h2>
-                      {(() => {
-                        const M = evolucion.meses;
-                        const n = Math.max(1, M.length);
-                        const W = 560, H = 220, padL = 10, padR = 10, padT = 24, padB = 42;
-                        const plotW = W - padL - padR, plotH = H - padT - padB;
-                        const band = plotW / n, barW = Math.min(46, band * 0.5);
-                        const maxM = Math.max(1, ...M.map((m) => m.monto));
-                        const maxC = Math.max(1, ...M.map((m) => m.count));
-                        const cx = (i) => padL + band * i + band / 2;
-                        const yBar = (v) => padT + plotH - (v / maxM) * plotH;
-                        const yLine = (v) => padT + plotH - (v / maxC) * plotH;
-                        const corto = (v) => v >= 1000000
-                          ? "$" + (v / 1e6).toFixed(1).replace(".", ",") + "M"
-                          : v >= 1000 ? "$" + Math.round(v / 1000) + "k" : "$" + v;
-                        const linea = M.map((m, i) => `${cx(i)},${yLine(m.count)}`).join(" ");
-                        return (
-                          <div className="aq-evol">
-                            <div className="aq-evol-leg">
-                              <span className="aq-evol-leg-i"><span className="aq-evol-sw bar" /> Ingresos (barras)</span>
-                              <span className="aq-evol-leg-i"><span className="aq-evol-sw line" /> Pedidos (línea)</span>
+                    {/* Evolución mensual — solo administración (idéntico al panel gerencial, línea = Compras + Compra Proveedor) */}
+                    {rol === "admin" && (
+                      <section className="aq-card">
+                        <h2>Evolución (últimos 6 meses)</h2>
+                        {(() => {
+                          const M = evolucion.meses;
+                          const n = Math.max(1, M.length);
+                          const W = 560, H = 220, padL = 10, padR = 10, padT = 24, padB = 42;
+                          const plotW = W - padL - padR, plotH = H - padT - padB;
+                          const band = plotW / n, barW = Math.min(46, band * 0.5);
+                          const maxM = Math.max(1, ...M.map((m) => m.monto));
+                          const maxC = Math.max(1, ...M.map((m) => m.compras));
+                          const cx = (i) => padL + band * i + band / 2;
+                          const yBar = (v) => padT + plotH - (v / maxM) * plotH;
+                          const yLine = (v) => padT + plotH - (v / maxC) * plotH;
+                          const corto = (v) => v >= 1000000
+                            ? "$" + (v / 1e6).toFixed(1).replace(".", ",") + "M"
+                            : v >= 1000 ? "$" + Math.round(v / 1000) + "k" : "$" + v;
+                          const linea = M.map((m, i) => `${cx(i)},${yLine(m.compras)}`).join(" ");
+                          return (
+                            <div className="aq-evol">
+                              <div className="aq-evol-leg">
+                                <span className="aq-evol-leg-i"><span className="aq-evol-sw bar" /> Ingresos (barras)</span>
+                                <span className="aq-evol-leg-i"><span className="aq-evol-sw line" /> Compras + Compra proveedor (línea)</span>
+                              </div>
+                              <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="aq-evol-svg" role="img"
+                                aria-label="Evolución de ingresos (barras) y de compras más compra proveedor (línea) en los últimos 6 meses.">
+                                <line x1={padL} y1={padT + plotH} x2={W - padR} y2={padT + plotH} className="aq-evol-axis" />
+                                {M.map((m, i) => (
+                                  <g key={m.key}>
+                                    <rect x={cx(i) - barW / 2} y={yBar(m.monto)} width={barW}
+                                      height={Math.max(0, padT + plotH - yBar(m.monto))} rx="4" className="aq-evol-bar">
+                                      <title>{m.label}: {CLP(m.monto)} · Compras {CLP(m.compras)}</title>
+                                    </rect>
+                                    <text x={cx(i)} y={yBar(m.monto) - 6} className="aq-evol-vbar">{m.monto ? corto(m.monto) : ""}</text>
+                                    <text x={cx(i)} y={padT + plotH + 17} className="aq-evol-xlab">{m.label}</text>
+                                    <text x={cx(i)} y={padT + plotH + 31} className="aq-evol-xsub">{CLP(m.compras)}</text>
+                                  </g>
+                                ))}
+                                <polyline points={linea} className="aq-evol-pline" />
+                                {M.map((m, i) => (
+                                  <circle key={"p" + m.key} cx={cx(i)} cy={yLine(m.compras)} r="3.6" className="aq-evol-dot">
+                                    <title>{m.label}: Compras + Compra proveedor {CLP(m.compras)}</title>
+                                  </circle>
+                                ))}
+                              </svg>
                             </div>
-                            <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="aq-evol-svg" role="img"
-                              aria-label="Evolución de ingresos (barras) y pedidos (línea) en los últimos 6 meses.">
-                              <line x1={padL} y1={padT + plotH} x2={W - padR} y2={padT + plotH} className="aq-evol-axis" />
-                              {M.map((m, i) => (
-                                <g key={m.key}>
-                                  <rect x={cx(i) - barW / 2} y={yBar(m.monto)} width={barW}
-                                    height={Math.max(0, padT + plotH - yBar(m.monto))} rx="4" className="aq-evol-bar">
-                                    <title>{m.label}: {CLP(m.monto)} · {m.count} ped.</title>
-                                  </rect>
-                                  <text x={cx(i)} y={yBar(m.monto) - 6} className="aq-evol-vbar">{m.monto ? corto(m.monto) : ""}</text>
-                                  <text x={cx(i)} y={padT + plotH + 17} className="aq-evol-xlab">{m.label}</text>
-                                  <text x={cx(i)} y={padT + plotH + 31} className="aq-evol-xsub">{m.count} ped.</text>
-                                </g>
-                              ))}
-                              <polyline points={linea} className="aq-evol-pline" />
-                              {M.map((m, i) => (
-                                <circle key={"p" + m.key} cx={cx(i)} cy={yLine(m.count)} r="3.6" className="aq-evol-dot">
-                                  <title>{m.label}: {m.count} pedido(s)</title>
-                                </circle>
-                              ))}
-                            </svg>
-                          </div>
-                        );
-                      })()}
-                    </section>
+                          );
+                        })()}
+                      </section>
+                    )}
 
                     {/* Mejor mes como meta (idéntico al panel gerencial) */}
                     {(() => {
@@ -4163,6 +4194,7 @@ export default function App() {
                   );
                 })()}
 
+                {rol === "operador" && (
                 <section className="aq-card">
                   <div className="aq-row-head">
                     <h2>Pedidos del período</h2>
@@ -4220,6 +4252,7 @@ export default function App() {
                     </div>
                   )}
                 </section>
+                )}
 
                 {!dash.tieneEstado && (
                   <p className="aq-muted">
