@@ -917,6 +917,8 @@ export default function App() {
   const [guardandoCob, setGuardandoCob] = useState("");  // id del pedido en proceso
   const [avisoDeuda, setAvisoDeuda] = useState(null);    // { guias:[], monto } alerta en Nuevo pedido
   const [cobExpand, setCobExpand] = useState({});        // cliente_id -> grupo expandido en Cobranzas
+  const [cobroRespaldoPedido, setCobroRespaldoPedido] = useState(null); // id de pedido con panel de respaldo abierto
+  const [cobroRespaldoArchivo, setCobroRespaldoArchivo] = useState(null); // File del comprobante (opcional)
 
   // Mantenedor de productos (admin)
   const [productosAll, setProductosAll] = useState([]);
@@ -2966,12 +2968,22 @@ export default function App() {
 
   // Marca/desmarca Cobrado o Recuperado (estados independientes).
   async function marcarCobroCampo(pedido, campo) {
+    // Al marcar "Cobrado" abrimos el panel de respaldo (comprobante opcional)
+    // en vez de guardar directo — misma lógica de respaldos que Pagos a
+    // proveedor / Facturas por emitir. Desmarcar sigue siendo directo.
+    if (campo === "cobro_cobrado" && !pedido.cobro_cobrado) {
+      setCobroRespaldoPedido(pedido.id);
+      setCobroRespaldoArchivo(null);
+      setErrorCob("");
+      return;
+    }
     setGuardandoCob(pedido.id);
     setErrorCob("");
     setOkCob("");
     try {
       const nuevo = !pedido[campo];
       const patch = { [campo]: nuevo, cobro_at: new Date().toISOString(), cobro_por: perfilNombre || null };
+      if (campo === "cobro_cobrado" && !nuevo) patch.cobro_respaldo_path = null;
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
@@ -2980,6 +2992,48 @@ export default function App() {
       setErrorCob(mensajeError(e, "No se pudo actualizar."));
     } finally {
       setGuardandoCob("");
+    }
+  }
+  // Confirma el cobro, subiendo opcionalmente el comprobante (transferencia,
+  // voucher, etc.) a un bucket privado. Permite guardar sin adjuntar archivo.
+  async function marcarCobradoConRespaldo(pedido, archivo) {
+    setGuardandoCob(pedido.id);
+    setErrorCob(""); setOkCob("");
+    try {
+      let path = null;
+      if (archivo) {
+        const ext = (archivo.name.split(".").pop() || "jpg").toLowerCase();
+        path = `${pedido.numero_guia || pedido.id}-${Date.now()}.${ext}`;
+        const up = await supabase.storage
+          .from("respaldos-cobro")
+          .upload(path, archivo, { upsert: false, contentType: archivo.type || "application/octet-stream" });
+        if (up.error) throw up.error;
+      }
+      const patch = {
+        cobro_cobrado: true,
+        cobro_at: new Date().toISOString(),
+        cobro_por: perfilNombre || null,
+        ...(path ? { cobro_respaldo_path: path } : {}),
+      };
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
+      if (error) throw error;
+      actualizarCobranzaLocal(pedido.id, patch);
+      setOkCob(`${pedido.numero_guia || ""}: Cobrado marcado${archivo ? " con comprobante adjunto" : ""}.`);
+      setCobroRespaldoPedido(null);
+      setCobroRespaldoArchivo(null);
+    } catch (e) {
+      setErrorCob(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+  async function verRespaldoCobro(path) {
+    try {
+      const { data, error } = await supabase.storage.from("respaldos-cobro").createSignedUrl(path, 60);
+      if (error) throw error;
+      window.open(data.signedUrl, "_blank");
+    } catch (e) {
+      alert("No se pudo abrir el comprobante: " + mensajeError(e, "error desconocido"));
     }
   }
 
@@ -6314,10 +6368,27 @@ export default function App() {
                                   <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
                                   <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
                                 </div>
+                                {cobroRespaldoPedido === p.id && (
+                                  <div className="aq-fact-acciones" style={{ marginTop: 8 }}>
+                                    <input
+                                      type="file"
+                                      accept="image/*,application/pdf"
+                                      title="Comprobante de pago (opcional)"
+                                      onChange={(e) => setCobroRespaldoArchivo(e.target.files?.[0] || null)}
+                                    />
+                                    <button className="aq-btn-sec" disabled={enProceso} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo)}>
+                                      {enProceso ? "Guardando…" : "Confirmar cobrado"}
+                                    </button>
+                                    <button className="aq-link" onClick={() => { setCobroRespaldoPedido(null); setCobroRespaldoArchivo(null); }}>Cancelar</button>
+                                  </div>
+                                )}
                                 <div className="aq-cob-acts">
                                   <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
                                     {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
                                   </button>
+                                  {p.cobro_cobrado && p.cobro_respaldo_path && (
+                                    <button className="aq-link" onClick={() => verRespaldoCobro(p.cobro_respaldo_path)}>Ver comprobante</button>
+                                  )}
                                   <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado || saldoP <= 0} onClick={() => abrirAbono("cobro", { numero_guia: p.numero_guia, pedidoId: p.id, monto_total: montoP, cobro_abonado: abonadoP, saldo: saldoP, titulo: clientePorId[p.cliente_id]?.nombre || p.numero_guia })}>
                                     + Abono
                                   </button>
@@ -6833,6 +6904,9 @@ export default function App() {
                   <button className="aq-btn-sec" style={{ marginTop: 10 }} onClick={() => { setPedidoModal(null); abrirCobranzas(); }}>
                     Ir a gestión de cobro →
                   </button>
+                  {pedidoModal.pedido.cobro_cobrado && pedidoModal.pedido.cobro_respaldo_path && (
+                    <button className="aq-link" style={{ marginTop: 6, display: "block" }} onClick={() => verRespaldoCobro(pedidoModal.pedido.cobro_respaldo_path)}>Ver comprobante</button>
+                  )}
                 </div>
               )}
             </div>
