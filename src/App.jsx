@@ -815,6 +815,12 @@ export default function App() {
   const [cargandoDash, setCargandoDash] = useState(false);
   const [errorDash, setErrorDash] = useState("");
 
+  // Evolución mensual (últimos 6 meses) para el dashboard admin/operador —
+  // misma lógica y componente visual que usa el panel gerencial.
+  const [evolucion, setEvolucion] = useState(null);
+  const [cargandoEvo, setCargandoEvo] = useState(false);
+  const [errorEvo, setErrorEvo] = useState("");
+
   // Mantenedor de bloqueo
   const [buscarMant, setBuscarMant] = useState("");
   const [clienteMant, setClienteMant] = useState(null);
@@ -1040,10 +1046,50 @@ export default function App() {
   }
   useEffect(() => {
     if (vista === "inicio" && rol !== "distribuidor" && rol !== "gerencial") cargarDashboard(periodo);
+    if (vista === "inicio" && (rol === "admin" || rol === "operador") && session && credsListas) cargarEvolucion();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vista, periodo, credsListas, session, rol]);
 
   // ── Carga del dashboard gerencial (últimos 6 meses) ────────
+  // Evolución mensual (últimos 6 meses) — versión liviana para admin/operador,
+  // misma agregación que la sección "Evolución" del panel gerencial.
+  async function cargarEvolucion() {
+    if (!credsListas || !session) return;
+    setCargandoEvo(true); setErrorEvo("");
+    try {
+      const ahora = new Date();
+      const ini = new Date(ahora.getFullYear(), ahora.getMonth() - 5, 1);
+      const desde = ini.toISOString();
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("created_at, monto_total")
+        .gte("created_at", desde);
+      if (ePed) throw ePed;
+      const pedidos = peds || [];
+      const meses = [];
+      for (let k = 5; k >= 0; k--) {
+        const d = new Date(ahora.getFullYear(), ahora.getMonth() - k, 1);
+        const key = d.toISOString().slice(0, 7);
+        const lab = d.toLocaleDateString("es-CL", { month: "short" });
+        meses.push({ key, label: lab.charAt(0).toUpperCase() + lab.slice(1, 3), count: 0, monto: 0 });
+      }
+      const idxMes = Object.fromEntries(meses.map((m, i) => [m.key, i]));
+      pedidos.forEach((p) => {
+        const key = (p.created_at || "").slice(0, 7);
+        if (key in idxMes) {
+          meses[idxMes[key]].count += 1;
+          meses[idxMes[key]].monto += Number(p.monto_total) || 0;
+        }
+      });
+      const mesActual = meses[meses.length - 1] || { count: 0, monto: 0 };
+      setEvolucion({ meses, mesActual });
+    } catch (e) {
+      setErrorEvo(mensajeError(e, "No se pudo cargar la evolución mensual."));
+      setEvolucion(null);
+    } finally {
+      setCargandoEvo(false);
+    }
+  }
   async function cargarGerencial() {
     if (!credsListas || !session) return;
     setCargandoGer(true);
@@ -3986,6 +4032,110 @@ export default function App() {
                     <em className="aq-money-sub">Unidades Compra Proveedor (DT): 20L $600 · 12/10L $300</em>
                   </button>
                 </div>
+
+                {errorEvo && <div className="aq-card aq-error">No se pudo cargar la evolución: {errorEvo}</div>}
+                {cargandoEvo && !evolucion ? (
+                  <div className="aq-card">Cargando evolución…</div>
+                ) : evolucion && (
+                  <>
+                    {/* Evolución mensual (idéntico al panel gerencial) */}
+                    <section className="aq-card">
+                      <h2>Evolución (últimos 6 meses)</h2>
+                      {(() => {
+                        const M = evolucion.meses;
+                        const n = Math.max(1, M.length);
+                        const W = 560, H = 220, padL = 10, padR = 10, padT = 24, padB = 42;
+                        const plotW = W - padL - padR, plotH = H - padT - padB;
+                        const band = plotW / n, barW = Math.min(46, band * 0.5);
+                        const maxM = Math.max(1, ...M.map((m) => m.monto));
+                        const maxC = Math.max(1, ...M.map((m) => m.count));
+                        const cx = (i) => padL + band * i + band / 2;
+                        const yBar = (v) => padT + plotH - (v / maxM) * plotH;
+                        const yLine = (v) => padT + plotH - (v / maxC) * plotH;
+                        const corto = (v) => v >= 1000000
+                          ? "$" + (v / 1e6).toFixed(1).replace(".", ",") + "M"
+                          : v >= 1000 ? "$" + Math.round(v / 1000) + "k" : "$" + v;
+                        const linea = M.map((m, i) => `${cx(i)},${yLine(m.count)}`).join(" ");
+                        return (
+                          <div className="aq-evol">
+                            <div className="aq-evol-leg">
+                              <span className="aq-evol-leg-i"><span className="aq-evol-sw bar" /> Ingresos (barras)</span>
+                              <span className="aq-evol-leg-i"><span className="aq-evol-sw line" /> Pedidos (línea)</span>
+                            </div>
+                            <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="aq-evol-svg" role="img"
+                              aria-label="Evolución de ingresos (barras) y pedidos (línea) en los últimos 6 meses.">
+                              <line x1={padL} y1={padT + plotH} x2={W - padR} y2={padT + plotH} className="aq-evol-axis" />
+                              {M.map((m, i) => (
+                                <g key={m.key}>
+                                  <rect x={cx(i) - barW / 2} y={yBar(m.monto)} width={barW}
+                                    height={Math.max(0, padT + plotH - yBar(m.monto))} rx="4" className="aq-evol-bar">
+                                    <title>{m.label}: {CLP(m.monto)} · {m.count} ped.</title>
+                                  </rect>
+                                  <text x={cx(i)} y={yBar(m.monto) - 6} className="aq-evol-vbar">{m.monto ? corto(m.monto) : ""}</text>
+                                  <text x={cx(i)} y={padT + plotH + 17} className="aq-evol-xlab">{m.label}</text>
+                                  <text x={cx(i)} y={padT + plotH + 31} className="aq-evol-xsub">{m.count} ped.</text>
+                                </g>
+                              ))}
+                              <polyline points={linea} className="aq-evol-pline" />
+                              {M.map((m, i) => (
+                                <circle key={"p" + m.key} cx={cx(i)} cy={yLine(m.count)} r="3.6" className="aq-evol-dot">
+                                  <title>{m.label}: {m.count} pedido(s)</title>
+                                </circle>
+                              ))}
+                            </svg>
+                          </div>
+                        );
+                      })()}
+                    </section>
+
+                    {/* Mejor mes como meta (idéntico al panel gerencial) */}
+                    {(() => {
+                      const todosM = evolucion.meses;
+                      const mejor = todosM.reduce((mx, m) => m.monto > mx.monto ? m : mx, { monto: 0, label: "—" });
+                      const actual = evolucion.mesActual;
+                      const meta = mejor.monto;
+                      const pct = meta > 0 ? Math.min(100, Math.round((actual.monto / meta) * 100)) : 0;
+                      const superada = actual.monto >= meta && meta > 0;
+                      return (
+                        <section className="aq-card aq-meta-card">
+                          <div className="aq-meta-head">
+                            <div>
+                              <h2>Meta del año</h2>
+                              <p className="aq-muted" style={{ margin: "2px 0 0" }}>Mejor mes histórico como referencia: <strong>{mejor.label}</strong> · {CLP(meta)}</p>
+                            </div>
+                            <div className="aq-meta-badge" style={{ background: superada ? "#e7f6ee" : "#fff7e6", color: superada ? "#1a7a45" : "#8a6400", border: "1px solid " + (superada ? "#9bd5b4" : "#f0d8a0") }}>
+                              {superada ? "🏆 Meta superada" : pct + "% de la meta"}
+                            </div>
+                          </div>
+                          <div className="aq-meta-row">
+                            <span className="aq-meta-label">Este mes</span>
+                            <span className="aq-meta-val">{CLP(actual.monto)}</span>
+                            <span className="aq-meta-label">Meta</span>
+                            <span className="aq-meta-val">{CLP(meta)}</span>
+                            <span className="aq-meta-label">Diferencia</span>
+                            <span className="aq-meta-val" style={{ color: superada ? "#1a7a45" : "#b42318" }}>
+                              {superada ? "+" : ""}{CLP(actual.monto - meta)}
+                            </span>
+                          </div>
+                          <div className="aq-bullet">
+                            <div className="aq-bullet-track">
+                              <div className="aq-bullet-fill" style={{ width: pct + "%", background: superada ? "#1a9a52" : pct >= 75 ? "#00aeef" : pct >= 50 ? "#e0a400" : "#d92d20" }} />
+                              <div className="aq-bullet-goal" title={"Meta: " + CLP(meta)} />
+                            </div>
+                            <div className="aq-bullet-labels">
+                              <span>$0</span>
+                              <span style={{ position: "absolute", left: "50%", transform: "translateX(-50%)" }}>{CLP(meta / 2)}</span>
+                              <span>{CLP(meta)}</span>
+                            </div>
+                          </div>
+                          <p className="aq-mini" style={{ marginTop: 6, color: "var(--muted)" }}>
+                            La meta se actualiza automáticamente con el mes de mayor ingreso registrado. {superada ? "¡Nuevo récord este mes!" : `Faltan ${CLP(meta - actual.monto)} para superarla.`}
+                          </p>
+                        </section>
+                      );
+                    })()}
+                  </>
+                )}
 
                 {(() => {
                   const factPend = (facturasPend || []).filter((f) => !f.numero_documento_emitido);
