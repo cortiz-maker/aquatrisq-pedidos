@@ -5026,97 +5026,140 @@ export default function App() {
             )}
 
             {!cargandoDeudas && deudasProv && deudasProv.length > 0 && (() => {
-              const pendientes = deudasProv.filter((d) => !d.pagado);
-              const pagadas = deudasProv.filter((d) => d.pagado);
               const totGen = deudasProv.reduce((s, d) => s + d.monto, 0);
-              const totSaldo = pendientes.reduce((s, d) => s + (d.saldo ?? d.monto), 0);
+              const totSaldo = deudasProv.filter((d) => !d.pagado).reduce((s, d) => s + (d.saldo ?? d.monto), 0);
               const totPagado = totGen - totSaldo; // pagos completos + abonos parciales
+
+              const grupos = {};
+              deudasProv.forEach((d) => {
+                const key = d.proveedor || "Proveedor sin nombre";
+                if (!grupos[key]) grupos[key] = { proveedor: key, items: [] };
+                grupos[key].items.push(d);
+              });
+              const listaProv = Object.values(grupos).map((g) => {
+                const pendientes = g.items.filter((d) => !d.pagado);
+                const pagadas = g.items.filter((d) => d.pagado);
+                const gen = g.items.reduce((s, d) => s + d.monto, 0);
+                const pend = pendientes.reduce((s, d) => s + (d.saldo ?? d.monto), 0);
+                const pag = gen - pend;
+                const pct = gen > 0 ? Math.round((pag / gen) * 100) : 0;
+                return { proveedor: g.proveedor, pendientes, pagadas, gen, pend, pag, pct };
+              });
+              listaProv.sort((a, b) => b.pend - a.pend || b.gen - a.gen);
+
               return (
                 <>
-                  <div className="aq-desglose" style={{ marginBottom: 12 }}>
+                  <div className="aq-desglose" style={{ marginBottom: 16 }}>
                     <div className="aq-desglose-row"><span>Generado (12 meses)</span><strong>{CLP(totGen)}</strong></div>
                     <div className="aq-desglose-row"><span>Pagado / abonado</span><strong className="pos">{CLP(totPagado)}</strong></div>
                     <div className="aq-desglose-row total"><span>Saldo pendiente</span><strong className="neg">{CLP(totSaldo)}</strong></div>
                   </div>
 
-                  {pendientes.length > 0 && <strong>Pendientes</strong>}
-                  {rol === "admin" && pendientes.length > 0 && (() => {
-                    const seleccionadas = pendientes.filter((d) => seleccionPago[d.numero_guia]);
+                  {listaProv.map((g) => {
+                    const claveG = "prov-" + g.proveedor;
+                    const abierto = !!grupoAbierto[claveG];
+                    const seleccionadas = g.pendientes.filter((d) => seleccionPago[d.numero_guia]);
                     const totalSel = seleccionadas.reduce((s, d) => s + (d.saldo ?? d.monto), 0);
-                    const todasMarcadas = pendientes.every((d) => seleccionPago[d.numero_guia]);
+                    const todasMarcadas = g.pendientes.length > 0 && g.pendientes.every((d) => seleccionPago[d.numero_guia]);
                     return (
-                      <div className="aq-fact-acciones" style={{ margin: "8px 0" }}>
-                        <label className="aq-check-inline" style={{ marginTop: 0 }}>
-                          <input
-                            type="checkbox"
-                            checked={todasMarcadas}
-                            onChange={(e) => {
-                              const on = e.target.checked;
-                              setSeleccionPago(on ? Object.fromEntries(pendientes.map((d) => [d.numero_guia, true])) : {});
-                            }}
-                          />
-                          Seleccionar todas ({pendientes.length})
-                        </label>
-                        {seleccionadas.length > 0 && (
-                          <button
-                            className="aq-btn-sec"
-                            disabled={guardandoPagoMasivo}
-                            onClick={() => marcarPagadasMasivo(seleccionadas)}
-                          >
-                            {guardandoPagoMasivo ? "Guardando…" : `Marcar ${seleccionadas.length} pagadas (${CLP(totalSel)}) sin respaldo`}
-                          </button>
+                      <div className="aq-prov-tarjeta" key={g.proveedor}>
+                        <div className="aq-prov-tarjeta-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
+                          <div>
+                            <strong>{g.proveedor}</strong>
+                            <span className="aq-muted">
+                              {g.pendientes.length} pendiente(s) · {g.pagadas.length} pagada(s) · {CLP(g.gen)} generado
+                            </span>
+                          </div>
+                          <div className="aq-prov-tarjeta-nums">
+                            <span className="aq-prov-num pos">{CLP(g.pag)}</span>
+                            <span className="aq-prov-num neg">{CLP(g.pend)}</span>
+                            <span className="aq-muted" style={{ marginLeft: 4 }}>{abierto ? "▲" : "▼"}</span>
+                          </div>
+                        </div>
+                        <div className="aq-prov-bar">
+                          <div className="aq-prov-bar-pag" style={{ width: g.pct + "%" }} title={"Pagado: " + CLP(g.pag)} />
+                          <div className="aq-prov-bar-pend" style={{ width: (100 - g.pct) + "%" }} title={"Pendiente: " + CLP(g.pend)} />
+                        </div>
+
+                        {abierto && (
+                          <div className="aq-prov-detalle">
+                            {g.pendientes.length > 0 && <strong>Pendientes</strong>}
+                            {rol === "admin" && g.pendientes.length > 0 && (
+                              <div className="aq-fact-acciones" style={{ margin: "8px 0" }}>
+                                <label className="aq-check-inline" style={{ marginTop: 0 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={todasMarcadas}
+                                    onChange={(e) => {
+                                      const on = e.target.checked;
+                                      setSeleccionPago((prev) => {
+                                        const n = { ...prev };
+                                        g.pendientes.forEach((d) => { n[d.numero_guia] = on; });
+                                        return n;
+                                      });
+                                    }}
+                                  />
+                                  Seleccionar todas ({g.pendientes.length})
+                                </label>
+                                {seleccionadas.length > 0 && (
+                                  <button
+                                    className="aq-btn-sec"
+                                    disabled={guardandoPagoMasivo}
+                                    onClick={() => marcarPagadasMasivo(seleccionadas)}
+                                  >
+                                    {guardandoPagoMasivo ? "Guardando…" : `Marcar ${seleccionadas.length} pagadas (${CLP(totalSel)}) sin respaldo`}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                            {g.pendientes.map((d, i) => {
+                              const ab = Number(d.abonado) || 0;
+                              const saldo = d.saldo ?? d.monto;
+                              return (
+                                <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center", gap: 8 }}>
+                                  {rol === "admin" && (
+                                    <input
+                                      type="checkbox"
+                                      checked={!!seleccionPago[d.numero_guia]}
+                                      onChange={(e) => setSeleccionPago((prev) => ({ ...prev, [d.numero_guia]: e.target.checked }))}
+                                      style={{ width: "auto", flex: "0 0 auto", padding: 0 }}
+                                    />
+                                  )}
+                                  <span style={{ flex: 1 }}>
+                                    Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
+                                  </span>
+                                  <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                    {CLP(d.monto)}
+                                    <button className="aq-btn-sec" onClick={() => abrirAbono("proveedor", { numero_guia: d.numero_guia, mes: d.mes, proveedor: d.proveedor, chofer: d.chofer, monto: d.monto, abonado: ab, saldo, titulo: d.proveedor })}>Abonar</button>
+                                    <button className="aq-btn-sec" onClick={() => { setPagoModal(d); setPagoFoto(null); setErrorPago(""); }}>Marcar pagado</button>
+                                  </span>
+                                </div>
+                              );
+                            })}
+
+                            {g.pagadas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Pagadas</strong>}
+                            {g.pagadas.map((d, i) => (
+                              <div className="aq-det-line aq-prov-fact" key={"pag" + i}>
+                                <span>Guía {d.numero_guia}
+                                  <em className="aq-det-chofer">
+                                    {d.mes} · {d.origenPago === "app"
+                                      ? `Pagado por ${d.pagado_por || "—"}${d.fecha_pago ? " · " + new Date(d.fecha_pago).toLocaleDateString("es-CL") : ""}`
+                                      : "Pagado (DispatchTrack)"}
+                                  </em>
+                                </span>
+                                <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                  {CLP(d.monto)}
+                                  {d.respaldo_path && (
+                                    <button className="aq-link" onClick={() => verRespaldo(d.respaldo_path)}>Ver respaldo</button>
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         )}
-                      </div>
-                    );
-                  })()}
-                  {pendientes.map((d, i) => {
-                    const ab = Number(d.abonado) || 0;
-                    const saldo = d.saldo ?? d.monto;
-                    return (
-                      <div className="aq-det-line aq-prov-cab" key={"pend" + i} style={{ alignItems: "center", gap: 8 }}>
-                        {rol === "admin" && (
-                          <input
-                            type="checkbox"
-                            checked={!!seleccionPago[d.numero_guia]}
-                            onChange={(e) => setSeleccionPago((prev) => ({ ...prev, [d.numero_guia]: e.target.checked }))}
-                            style={{ width: "auto", flex: "0 0 auto", padding: 0 }}
-                          />
-                        )}
-                        <span style={{ flex: 1 }}>
-                          {d.proveedor} · Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
-                        </span>
-                        <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                          {CLP(d.monto)}
-                          <button className="aq-btn-sec" onClick={() => abrirAbono("proveedor", { numero_guia: d.numero_guia, mes: d.mes, proveedor: d.proveedor, chofer: d.chofer, monto: d.monto, abonado: ab, saldo, titulo: d.proveedor })}>Abonar</button>
-                          <button className="aq-btn-sec" onClick={() => { setPagoModal(d); setPagoFoto(null); setErrorPago(""); }}>Marcar pagado</button>
-                        </span>
                       </div>
                     );
                   })}
-
-                  {pagadas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Pagadas</strong>}
-                  {pagadas.slice(0, 40).map((d, i) => (
-                    <div className="aq-det-line aq-prov-fact" key={"pag" + i}>
-                      <span>{d.proveedor} · Guía {d.numero_guia}
-                        <em className="aq-det-chofer">
-                          {d.mes} · {d.origenPago === "app"
-                            ? `Pagado por ${d.pagado_por || "—"}${d.fecha_pago ? " · " + new Date(d.fecha_pago).toLocaleDateString("es-CL") : ""}`
-                            : "Pagado (DispatchTrack)"}
-                        </em>
-                      </span>
-                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        {CLP(d.monto)}
-                        {d.respaldo_path && (
-                          <button className="aq-link" onClick={() => verRespaldo(d.respaldo_path)}>Ver respaldo</button>
-                        )}
-                      </span>
-                    </div>
-                  ))}
-                  {pagadas.length > 40 && (
-                    <p className="aq-muted" style={{ marginTop: 8 }}>
-                      Mostrando 40 de {pagadas.length} pagadas (más recientes primero).
-                    </p>
-                  )}
                 </>
               );
             })()}
@@ -7408,6 +7451,17 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-prov-cab span:last-child { font-weight:700; }
 .aq-prov-fact { border-bottom:none; padding:2px 0 2px 12px; opacity:.85; }
 .aq-prov-fact span:first-child { font-size:12px; }
+/* Tarjetas de Pagos a proveedor agrupadas por proveedor */
+.aq-prov-tarjeta { border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
+.aq-prov-tarjeta-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; cursor:pointer; }
+.aq-prov-tarjeta-head strong { display:block; color:var(--navy); font-size:15px; }
+.aq-prov-tarjeta-nums { display:flex; align-items:center; gap:12px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.aq-prov-num.pos { color:var(--ok); }
+.aq-prov-num.neg { color:var(--bad); }
+.aq-prov-bar { display:flex; height:8px; border-radius:6px; overflow:hidden; margin-top:10px; background:#f1f3f8; }
+.aq-prov-bar-pag { background:var(--ok); }
+.aq-prov-bar-pend { background:var(--bad); }
+.aq-prov-detalle { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); cursor:default; }
 /* Subtotal a rendir por chofer */
 .aq-chofer-box { padding:6px 0; border-bottom:1px dashed var(--line); }
 /* Agrupación por cliente (Facturas por emitir / Bidones pendientes) */
