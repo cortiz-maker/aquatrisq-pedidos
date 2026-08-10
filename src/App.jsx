@@ -1350,37 +1350,44 @@ export default function App() {
     setCargandoFact(true); setErrorFact("");
     try {
       const hoy = new Date();
-      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 5, 1).toISOString();
-      const { data: ents, error: eEnt } = await supabase
-        .from("dt_entregas")
-        .select("guide, substatus, gestionado_en, raw")
-        .eq("substatus", "Venta")
-        .gte("gestionado_en", desde);
-      if (eEnt) throw eEnt;
-      const ventas = (ents || []).filter((e) => esVentaConFactura(e));
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 8, 1).toISOString().slice(0, 10);
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("id, numero_guia, cliente_id, domicilio_id, monto_total, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida, factura_diferida")
+        .gte("created_at", desde);
+      if (ePed) throw ePed;
+      const pedPorGuia = {};
+      const guias = [];
+      (peds || []).forEach((p) => {
+        if (!p.numero_guia) return;
+        pedPorGuia[p.numero_guia] = p;
+        guias.push(p.numero_guia);
+      });
+      // Solo pedimos las columnas que necesitamos (evitamos "select *" con el
+      // JSON completo de respuestas para todo lo que no sea Venta con factura).
+      let ents = [];
+      for (let i = 0; i < guias.length; i += 200) {
+        const lote = guias.slice(i, i + 200);
+        if (!lote.length) break;
+        const { data } = await supabase
+          .from("dt_entregas")
+          .select("guide, substatus, gestionado_en, raw")
+          .in("guide", lote);
+        ents = ents.concat(data || []);
+      }
       const entPorGuia = {};
-      ventas.forEach((e) => {
+      ents.forEach((e) => {
         if (!e.guide) return;
         const prev = entPorGuia[e.guide];
         const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
         const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
         if (!prev || t >= tp) entPorGuia[e.guide] = e;
       });
-      const guias = Object.keys(entPorGuia);
-      let peds = [];
-      for (let i = 0; i < guias.length; i += 200) {
-        const lote = guias.slice(i, i + 200);
-        if (!lote.length) break;
-        const { data } = await supabase
-          .from("pedidos")
-          .select("id, numero_guia, cliente_id, domicilio_id, monto_total, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida, factura_diferida")
-          .in("numero_guia", lote);
-        peds = peds.concat(data || []);
-      }
       const lista = [];
-      peds.forEach((p) => {
-        const e = entPorGuia[p.numero_guia];
-        if (!e) return;
+      Object.values(entPorGuia).forEach((e) => {
+        if (!esVentaConFactura(e)) return;
+        const p = pedPorGuia[e.guide];
+        if (!p) return;
         const gestionadoEn = e.gestionado_en ? new Date(e.gestionado_en) : null;
         const dias = gestionadoEn ? Math.floor((Date.now() - gestionadoEn.getTime()) / 86400000) : 0;
         lista.push({
@@ -1524,38 +1531,45 @@ export default function App() {
     setCargandoBid(true); setErrorBid("");
     try {
       const hoy = new Date();
-      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 5, 1).toISOString();
-      const { data: ents, error: eEnt } = await supabase
-        .from("dt_entregas")
-        .select("guide, gestionado_en, chofer, bidon_pendiente")
-        .gt("bidon_pendiente", 0)
-        .gte("gestionado_en", desde);
-      if (eEnt) throw eEnt;
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 8, 1).toISOString().slice(0, 10);
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("id, numero_guia, cliente_id, domicilio_id, bidones_retirados_en, bidones_proximo_pedido, bidones_retiro_guia")
+        .gte("created_at", desde);
+      if (ePed) throw ePed;
+      const pedPorGuia = {};
+      const guias = [];
+      (peds || []).forEach((p) => {
+        if (!p.numero_guia) return;
+        pedPorGuia[p.numero_guia] = p;
+        guias.push(p.numero_guia);
+      });
+      // No necesitamos la columna "raw" (JSON completo) para bidones — el dato
+      // vive en su propia columna, así que el fetch es mucho más liviano.
+      let ents = [];
+      for (let i = 0; i < guias.length; i += 200) {
+        const lote = guias.slice(i, i + 200);
+        if (!lote.length) break;
+        const { data } = await supabase
+          .from("dt_entregas")
+          .select("guide, status, gestionado_en, chofer, bidon_pendiente")
+          .in("guide", lote);
+        ents = ents.concat(data || []);
+      }
       const entPorGuia = {};
-      (ents || []).forEach((e) => {
+      ents.forEach((e) => {
         if (!e.guide) return;
         const prev = entPorGuia[e.guide];
         const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
         const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
         if (!prev || t >= tp) entPorGuia[e.guide] = e;
       });
-      const guias = Object.keys(entPorGuia);
-      let peds = [];
-      for (let i = 0; i < guias.length; i += 200) {
-        const lote = guias.slice(i, i + 200);
-        if (!lote.length) break;
-        const { data } = await supabase
-          .from("pedidos")
-          .select("id, numero_guia, cliente_id, domicilio_id, bidones_retirados_en, bidones_proximo_pedido, bidones_retiro_guia")
-          .in("numero_guia", lote);
-        peds = peds.concat(data || []);
-      }
       const lista = [];
-      peds.forEach((p) => {
-        const e = entPorGuia[p.numero_guia];
-        if (!e) return;
-        const cant = Number(e.bidon_pendiente) || 0;
+      Object.values(entPorGuia).forEach((e) => {
+        const cant = bidonesPendientesDT(e);
         if (!cant) return;
+        const p = pedPorGuia[e.guide];
+        if (!p) return;
         const gestionadoEn = e.gestionado_en ? new Date(e.gestionado_en) : null;
         const dias = gestionadoEn ? Math.floor((Date.now() - gestionadoEn.getTime()) / 86400000) : 0;
         lista.push({
@@ -4978,6 +4992,9 @@ export default function App() {
 
             {errorFact && <div className="aq-error" style={{ marginBottom: 8 }}>{errorFact}</div>}
             {cargandoFact && <p className="aq-muted">Cargando facturas…</p>}
+            {!cargandoFact && facturasPend && facturasPend.length === 0 && (
+              <p className="aq-muted">No hay pedidos con Factura pendiente en el período.</p>
+            )}
 
             {!cargandoFact && facturasPend && facturasPend.length > 0 && (() => {
               const grupos = {};
@@ -5137,6 +5154,9 @@ export default function App() {
 
             {errorBid && <div className="aq-error" style={{ marginBottom: 8 }}>{errorBid}</div>}
             {cargandoBid && <p className="aq-muted">Cargando bidones pendientes…</p>}
+            {!cargandoBid && bidonesPend && bidonesPend.length === 0 && (
+              <p className="aq-muted">No hay bidones pendientes de retiro en el período.</p>
+            )}
 
             {!cargandoBid && bidonesPend && bidonesPend.length > 0 && (() => {
               const grupos = {};
