@@ -398,6 +398,36 @@ function nombreProveedor(entrega) {
   return a && a.val ? String(a.val).trim() : "Proveedor sin nombre";
 }
 
+// ── Gestión de facturas y bidones pendientes (formulario "Recepción Pedido", substatus Venta) ──
+// ¿La fila de dt_entregas ya fue cerrada por el chofer? (mismo criterio que estadoEntregaDT).
+function entregaGestionada(entrega) {
+  return !!entrega && (!!entrega.gestionado_en || Number(entrega.status) >= 2);
+}
+// Campo "Tipo de Documento" (obligatorio en substatus Venta). Alternativas configuradas en DT:
+// "Boleta / Voucher" | "Factura / Guia Despacho".
+function tipoDocumentoEntregaDT(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /^tipo\s*de\s*documento$/i.test(x.name.trim()));
+  return a && a.val ? String(a.val).trim() : "";
+}
+// Pedido cerrado con subestado "Venta" cuyo Tipo de Documento indica Factura (requiere emisión).
+function esVentaConFactura(entrega) {
+  if (!entrega || !entregaGestionada(entrega)) return false;
+  if ((entrega.substatus || "").trim() !== "Venta") return false;
+  return /factura/i.test(tipoDocumentoEntregaDT(entrega));
+}
+// Campo "N° Boleta/Factura/Voucher" — número referencial que el chofer puede dejar en terreno
+// (no es necesariamente el folio tributario final, por eso la app permite registrar el propio).
+function numeroDocRefDT(entrega) {
+  const a = answersFromRaw(entrega).find((x) => /n.?\s*boleta.*factura.*voucher/i.test(x.name));
+  return a && a.val ? String(a.val).trim() : "";
+}
+// Bidones vacíos pendientes de retiro, según el campo numeral "Bidón Pendiente de Entrega".
+function bidonesPendientesDT(entrega) {
+  if (!entrega || !entregaGestionada(entrega)) return 0;
+  const n = Number(entrega.bidon_pendiente);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 // ── Reglas de caja compartidas (panel gerencial + mantenedor de deudas) ──
 const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 // Guías excluidas de todo cálculo de caja.
@@ -843,6 +873,19 @@ export default function App() {
   const [histAbierto, setHistAbierto] = useState(null);  // pedido_id expandido
   const [histEntregas, setHistEntregas] = useState({});  // numero_guia -> fila dt_entregas (retorno DispatchTrack)
 
+  // ── Facturas por emitir (Venta + Tipo de Documento = Factura) ──
+  const [facturasPend, setFacturasPend] = useState(null);
+  const [cargandoFact, setCargandoFact] = useState(false);
+  const [errorFact, setErrorFact] = useState("");
+  const [facturaInputs, setFacturaInputs] = useState({});     // numero_guia -> texto en edición
+  const [guardandoFacturaGuia, setGuardandoFacturaGuia] = useState(null);
+
+  // ── Bidones pendientes de retiro (campo "Bidón Pendiente de Entrega") ──
+  const [bidonesPend, setBidonesPend] = useState(null);
+  const [cargandoBid, setCargandoBid] = useState(false);
+  const [errorBid, setErrorBid] = useState("");
+  const [guardandoBidonGuia, setGuardandoBidonGuia] = useState(null);
+
   // ── Cobranza / gestión de cobro (Pago = No en el formulario de entrega) ──
   const [entregasMap, setEntregasMap] = useState({});   // guide -> dt_entregas (pedidos del dashboard)
   const [pedidoModal, setPedidoModal] = useState(null);  // { pedido, entrega } para el popup de detalle
@@ -1218,9 +1261,189 @@ export default function App() {
       setCargandoDeudas(false);
     }
   }
+  // ── Facturas por emitir: pedidos cerrados subestado "Venta" con Tipo de Documento = Factura ──
+  async function cargarFacturasPend() {
+    setCargandoFact(true); setErrorFact("");
+    try {
+      const hoy = new Date();
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("id, numero_guia, cliente_id, domicilio_id, monto_total, numero_documento_emitido, documento_emitido_en")
+        .gte("created_at", desde);
+      if (ePed) throw ePed;
+      const pedPorGuia = {};
+      const guias = [];
+      (peds || []).forEach((p) => {
+        if (!p.numero_guia) return;
+        pedPorGuia[p.numero_guia] = p;
+        guias.push(p.numero_guia);
+      });
+      let ents = [];
+      for (let i = 0; i < guias.length; i += 200) {
+        const lote = guias.slice(i, i + 200);
+        if (!lote.length) break;
+        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+        ents = ents.concat(data || []);
+      }
+      const lista = [];
+      ents.forEach((e) => {
+        if (!e.guide || !esVentaConFactura(e)) return;
+        const p = pedPorGuia[e.guide];
+        if (!p) return;
+        const gestionadoEn = e.gestionado_en ? new Date(e.gestionado_en) : null;
+        const dias = gestionadoEn ? Math.floor((Date.now() - gestionadoEn.getTime()) / 86400000) : 0;
+        lista.push({
+          numero_guia: e.guide,
+          pedidoId: p.id,
+          cliente_id: p.cliente_id,
+          domicilio_id: p.domicilio_id,
+          monto: montoEntrega(e) || Number(p.monto_total) || 0,
+          numeroRef: numeroDocRefDT(e),
+          gestionadoEn,
+          dias,
+          numero_documento_emitido: p.numero_documento_emitido || "",
+          documento_emitido_en: p.documento_emitido_en || null,
+        });
+      });
+      lista.sort((a, b) => Number(!!b.numero_documento_emitido) - Number(!!a.numero_documento_emitido) || b.dias - a.dias);
+      setFacturasPend(lista);
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudieron cargar las facturas por emitir."));
+      setFacturasPend(null);
+    } finally {
+      setCargandoFact(false);
+    }
+  }
+  async function guardarDocumentoEmitido(guia, valor) {
+    const v = (valor || "").trim();
+    if (!v) return;
+    setGuardandoFacturaGuia(guia);
+    try {
+      const { error } = await supabase
+        .from("pedidos")
+        .update({ numero_documento_emitido: v, documento_emitido_en: new Date().toISOString() })
+        .eq("numero_guia", guia);
+      if (error) throw error;
+      await cargarFacturasPend();
+      setFacturaInputs((prev) => { const n = { ...prev }; delete n[guia]; return n; });
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudo guardar el número de documento."));
+    } finally {
+      setGuardandoFacturaGuia(null);
+    }
+  }
+  async function deshacerDocumentoEmitido(guia) {
+    if (!window.confirm("¿Marcar esta factura nuevamente como pendiente de emitir?")) return;
+    setGuardandoFacturaGuia(guia);
+    try {
+      const { error } = await supabase
+        .from("pedidos")
+        .update({ numero_documento_emitido: null, documento_emitido_en: null })
+        .eq("numero_guia", guia);
+      if (error) throw error;
+      await cargarFacturasPend();
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoFacturaGuia(null);
+    }
+  }
+
+  // ── Bidones pendientes de retiro ──
+  async function cargarBidonesPend() {
+    setCargandoBid(true); setErrorBid("");
+    try {
+      const hoy = new Date();
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
+      const { data: peds, error: ePed } = await supabase
+        .from("pedidos")
+        .select("id, numero_guia, cliente_id, domicilio_id, bidones_retirados_en")
+        .gte("created_at", desde);
+      if (ePed) throw ePed;
+      const pedPorGuia = {};
+      const guias = [];
+      (peds || []).forEach((p) => {
+        if (!p.numero_guia) return;
+        pedPorGuia[p.numero_guia] = p;
+        guias.push(p.numero_guia);
+      });
+      let ents = [];
+      for (let i = 0; i < guias.length; i += 200) {
+        const lote = guias.slice(i, i + 200);
+        if (!lote.length) break;
+        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+        ents = ents.concat(data || []);
+      }
+      const lista = [];
+      ents.forEach((e) => {
+        const cant = bidonesPendientesDT(e);
+        if (!e.guide || !cant) return;
+        const p = pedPorGuia[e.guide];
+        if (!p) return;
+        const gestionadoEn = e.gestionado_en ? new Date(e.gestionado_en) : null;
+        const dias = gestionadoEn ? Math.floor((Date.now() - gestionadoEn.getTime()) / 86400000) : 0;
+        lista.push({
+          numero_guia: e.guide,
+          pedidoId: p.id,
+          cliente_id: p.cliente_id,
+          domicilio_id: p.domicilio_id,
+          chofer: (e.chofer || "").trim() || "Sin chofer",
+          cantidad: cant,
+          gestionadoEn,
+          dias,
+          bidones_retirados_en: p.bidones_retirados_en || null,
+        });
+      });
+      lista.sort((a, b) => Number(!!b.bidones_retirados_en) - Number(!!a.bidones_retirados_en) || b.dias - a.dias);
+      setBidonesPend(lista);
+    } catch (e) {
+      setErrorBid(mensajeError(e, "No se pudieron cargar los bidones pendientes."));
+      setBidonesPend(null);
+    } finally {
+      setCargandoBid(false);
+    }
+  }
+  async function marcarBidonRetirado(guia) {
+    setGuardandoBidonGuia(guia);
+    try {
+      const { error } = await supabase
+        .from("pedidos")
+        .update({ bidones_retirados_en: new Date().toISOString() })
+        .eq("numero_guia", guia);
+      if (error) throw error;
+      await cargarBidonesPend();
+    } catch (e) {
+      setErrorBid(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoBidonGuia(null);
+    }
+  }
+  async function deshacerBidonRetirado(guia) {
+    if (!window.confirm("¿Marcar los bidones de este pedido nuevamente como pendientes de retiro?")) return;
+    setGuardandoBidonGuia(guia);
+    try {
+      const { error } = await supabase
+        .from("pedidos")
+        .update({ bidones_retirados_en: null })
+        .eq("numero_guia", guia);
+      if (error) throw error;
+      await cargarBidonesPend();
+    } catch (e) {
+      setErrorBid(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoBidonGuia(null);
+    }
+  }
+
   useEffect(() => {
     if ((rol === "admin" || rol === "operador") && vista === "deudasprov" && session) cargarDeudasProv();
     if ((rol === "admin" || rol === "operador") && vista === "cotizaciones" && session) cargarCotizaciones();
+    if ((rol === "admin" || rol === "operador") && vista === "facturas" && session) cargarFacturasPend();
+    if ((rol === "admin" || rol === "operador") && vista === "bidones" && session) cargarBidonesPend();
+    // KPIs de Inicio: precargamos ambos conteos aunque el usuario no visite las pantallas.
+    if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && facturasPend === null) cargarFacturasPend();
+    if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && bidonesPend === null) cargarBidonesPend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rol, vista, session]);
 
@@ -1423,11 +1646,11 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "bidones")) {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
-    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones")) {
+    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "bidones")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -3628,6 +3851,22 @@ export default function App() {
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "cotizaciones" ? "on" : ""} onClick={() => { setVista("cotizaciones"); setCotizEdit(null); }}>Cotizaciones</button>
             )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "facturas" ? "on" : ""} onClick={() => setVista("facturas")}>
+                Facturas
+                {facturasPend && facturasPend.filter((f) => !f.numero_documento_emitido).length > 0 && (
+                  <span className="aq-nav-alert">{facturasPend.filter((f) => !f.numero_documento_emitido).length}</span>
+                )}
+              </button>
+            )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "bidones" ? "on" : ""} onClick={() => setVista("bidones")}>
+                Bidones
+                {bidonesPend && bidonesPend.filter((b) => !b.bidones_retirados_en).length > 0 && (
+                  <span className="aq-nav-alert">{bidonesPend.filter((b) => !b.bidones_retirados_en).length}</span>
+                )}
+              </button>
+            )}
             <span className="aq-user" title={rol}>
               {perfilNombre} · {rol}
               <button className="aq-logout" onClick={cerrarSesion} aria-label="Cerrar sesión">Salir</button>
@@ -3747,6 +3986,32 @@ export default function App() {
                     <em className="aq-money-sub">Unidades Compra Proveedor (DT): 20L $600 · 12/10L $300</em>
                   </button>
                 </div>
+
+                {(() => {
+                  const factPend = (facturasPend || []).filter((f) => !f.numero_documento_emitido);
+                  const bidPend = (bidonesPend || []).filter((b) => !b.bidones_retirados_en);
+                  if (!factPend.length && !bidPend.length) return null;
+                  const factCrit = factPend.filter((f) => f.dias >= 5).length;
+                  const bidCrit = bidPend.filter((b) => b.dias >= 10).length;
+                  return (
+                    <div className="aq-gestion-alerts">
+                      {factPend.length > 0 && (
+                        <button className="aq-alert-card bad" onClick={() => setVista("facturas")}>
+                          <span>Facturas por emitir</span>
+                          <strong>{factPend.length}</strong>
+                          <em className="aq-money-sub">{factCrit > 0 ? `${factCrit} con 5+ días de atraso` : "Dentro de plazo"}</em>
+                        </button>
+                      )}
+                      {bidPend.length > 0 && (
+                        <button className="aq-alert-card warn" onClick={() => setVista("bidones")}>
+                          <span>Bidones pendientes de retiro</span>
+                          <strong>{bidPend.length}</strong>
+                          <em className="aq-money-sub">{bidCrit > 0 ? `${bidCrit} con 10+ días de atraso` : "Retiro sin resolver"}</em>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <section className="aq-card">
                   <div className="aq-row-head">
@@ -4378,6 +4643,152 @@ export default function App() {
                       Mostrando 40 de {pagadas.length} pagadas (más recientes primero).
                     </p>
                   )}
+                </>
+              );
+            })()}
+          </section>
+        )}
+
+        {/* ===================== FACTURAS POR EMITIR (admin/operador) ===================== */}
+        {credsListas && vista === "facturas" && (rol === "admin" || rol === "operador") && (
+          <section className="aq-card">
+            <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Facturas por emitir</h2>
+                <span className="aq-muted">Pedidos cerrados subestado Venta con Tipo de Documento = Factura (últimos 12 meses).</span>
+              </div>
+              <button className="aq-btn-sec" onClick={cargarFacturasPend} disabled={cargandoFact}>↻ Actualizar</button>
+            </div>
+
+            {errorFact && <div className="aq-error" style={{ marginBottom: 8 }}>{errorFact}</div>}
+            {cargandoFact && <p className="aq-muted">Cargando facturas…</p>}
+            {!cargandoFact && facturasPend && facturasPend.length === 0 && (
+              <p className="aq-muted">No hay pedidos con Factura pendiente en el período.</p>
+            )}
+
+            {!cargandoFact && facturasPend && facturasPend.length > 0 && (() => {
+              const pendientes = facturasPend.filter((f) => !f.numero_documento_emitido);
+              const emitidas = facturasPend.filter((f) => f.numero_documento_emitido);
+              return (
+                <>
+                  {pendientes.length > 0 && <strong>Pendientes ({pendientes.length})</strong>}
+                  {pendientes.map((f) => {
+                    const info = infoPedido(f);
+                    const cls = f.dias >= 5 ? "bad" : f.dias >= 2 ? "warn" : "ok";
+                    return (
+                      <div className="aq-det-line aq-prov-cab" key={f.numero_guia} style={{ alignItems: "center", flexWrap: "wrap" }}>
+                        <span>
+                          Guía {f.numero_guia} · {info.nombre}
+                          <em className="aq-det-chofer">
+                            {info.comuna} · {CLP(f.monto)}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}
+                          </em>
+                        </span>
+                        <span style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <span className={"aq-badge " + cls}>{f.dias} día(s)</span>
+                          <input
+                            type="text"
+                            placeholder="N° documento"
+                            value={facturaInputs[f.numero_guia] ?? ""}
+                            onChange={(e) => setFacturaInputs((prev) => ({ ...prev, [f.numero_guia]: e.target.value }))}
+                            style={{ width: 130 }}
+                          />
+                          <button
+                            className="aq-btn-sec"
+                            disabled={guardandoFacturaGuia === f.numero_guia || !(facturaInputs[f.numero_guia] || "").trim()}
+                            onClick={() => guardarDocumentoEmitido(f.numero_guia, facturaInputs[f.numero_guia])}
+                          >
+                            {guardandoFacturaGuia === f.numero_guia ? "Guardando…" : "Guardar"}
+                          </button>
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {emitidas.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Emitidas ({emitidas.length})</strong>}
+                  {emitidas.map((f) => {
+                    const info = infoPedido(f);
+                    return (
+                      <div className="aq-det-line aq-prov-fact" key={"em" + f.numero_guia}>
+                        <span>
+                          Guía {f.numero_guia} · {info.nombre}
+                          <em className="aq-det-chofer">
+                            Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}
+                          </em>
+                        </span>
+                        <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          {CLP(f.monto)}
+                          <button className="aq-link" onClick={() => deshacerDocumentoEmitido(f.numero_guia)}>Deshacer</button>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </>
+              );
+            })()}
+          </section>
+        )}
+
+        {/* ===================== BIDONES PENDIENTES DE RETIRO (admin/operador) ===================== */}
+        {credsListas && vista === "bidones" && (rol === "admin" || rol === "operador") && (
+          <section className="aq-card">
+            <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Bidones pendientes de retiro</h2>
+                <span className="aq-muted">Pedidos con bidones vacíos pendientes según el formulario de entrega (últimos 12 meses).</span>
+              </div>
+              <button className="aq-btn-sec" onClick={cargarBidonesPend} disabled={cargandoBid}>↻ Actualizar</button>
+            </div>
+
+            {errorBid && <div className="aq-error" style={{ marginBottom: 8 }}>{errorBid}</div>}
+            {cargandoBid && <p className="aq-muted">Cargando bidones pendientes…</p>}
+            {!cargandoBid && bidonesPend && bidonesPend.length === 0 && (
+              <p className="aq-muted">No hay bidones pendientes de retiro en el período.</p>
+            )}
+
+            {!cargandoBid && bidonesPend && bidonesPend.length > 0 && (() => {
+              const pendientes = bidonesPend.filter((b) => !b.bidones_retirados_en);
+              const resueltos = bidonesPend.filter((b) => b.bidones_retirados_en);
+              return (
+                <>
+                  {pendientes.length > 0 && <strong>Pendientes ({pendientes.length})</strong>}
+                  {pendientes.map((b) => {
+                    const info = infoPedido(b);
+                    const cls = b.dias >= 10 ? "bad" : b.dias >= 4 ? "warn" : "ok";
+                    return (
+                      <div className="aq-det-line aq-prov-cab" key={b.numero_guia} style={{ alignItems: "center", flexWrap: "wrap" }}>
+                        <span>
+                          Guía {b.numero_guia} · {info.nombre}
+                          <em className="aq-det-chofer">{info.comuna} · Chofer {b.chofer} · {b.cantidad} bidón(es)</em>
+                        </span>
+                        <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <span className={"aq-badge " + cls}>{b.dias} día(s)</span>
+                          <button
+                            className="aq-btn-sec"
+                            disabled={guardandoBidonGuia === b.numero_guia}
+                            onClick={() => marcarBidonRetirado(b.numero_guia)}
+                          >
+                            {guardandoBidonGuia === b.numero_guia ? "Guardando…" : "Marcar retirado"}
+                          </button>
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {resueltos.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Retirados ({resueltos.length})</strong>}
+                  {resueltos.map((b) => {
+                    const info = infoPedido(b);
+                    return (
+                      <div className="aq-det-line aq-prov-fact" key={"re" + b.numero_guia}>
+                        <span>
+                          Guía {b.numero_guia} · {info.nombre}
+                          <em className="aq-det-chofer">
+                            {b.cantidad} bidón(es) · Retirado {new Date(b.bidones_retirados_en).toLocaleDateString("es-CL")}
+                          </em>
+                        </span>
+                        <button className="aq-link" onClick={() => deshacerBidonRetirado(b.numero_guia)}>Deshacer</button>
+                      </div>
+                    );
+                  })}
                 </>
               );
             })()}
@@ -6400,6 +6811,24 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-items-edit-row:last-of-type { border-bottom:none; }
 .aq-items-edit-row input { padding:6px 8px; border:1px solid var(--line); border-radius:7px; font-family:inherit; font-size:13px; background:var(--white); color:var(--ink); }
 .aq-items-edit-row input:focus { outline:none; border-color:var(--cyan); }
+
+/* Badge de alerta en botones de navegación (facturas / bidones pendientes) */
+.aq-nav button { position:relative; }
+.aq-nav-alert { display:inline-block; margin-left:6px; background:var(--bad); color:#fff; font-size:10px; font-weight:700;
+  padding:1px 6px; border-radius:20px; vertical-align:2px; }
+.aq-nav button.on .aq-nav-alert { background:var(--bad); color:#fff; }
+
+/* Tarjetas de alerta de gestión en el dashboard de Inicio (motivan a resolver pendientes) */
+.aq-gestion-alerts { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:10px; margin-top:10px; }
+.aq-alert-card { border-radius:14px; padding:16px 18px; text-align:left; cursor:pointer; font:inherit; display:flex;
+  flex-direction:column; gap:2px; border:1px solid; transition:transform .15s ease; }
+.aq-alert-card:hover { transform:translateY(-1px); }
+.aq-alert-card span { display:block; font-size:12px; margin-bottom:2px; font-weight:600; }
+.aq-alert-card strong { font-family:'Fraunces',serif; font-size:28px; line-height:1; }
+.aq-alert-card.bad { background:#fdecea; border-color:#f3b4ad; color:var(--bad); }
+.aq-alert-card.bad strong { color:var(--bad); }
+.aq-alert-card.warn { background:#fff7e6; border-color:#f0d8a0; color:#8a6400; }
+.aq-alert-card.warn strong { color:#8a6400; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `;
