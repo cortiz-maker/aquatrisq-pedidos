@@ -609,12 +609,18 @@ async function calcularCajaMes(mesKey) {
     });
     // Pagos a proveedor: acumulado (sin filtrar por mes) — un pago hecho en cualquier
     // momento debe reflejarse siempre, sin importar en qué mes se generó la factura.
+    // Traemos TODOS los registros (no solo pagado=true) para poder restar los
+    // abonos parciales del saldo pendiente — si no, el dashboard mostraba el
+    // monto completo de la factura aunque ya tuviera un abono registrado.
     const pagadosSet = new Set();
+    const abonadoMap = {};
     try {
       const { data: pgs } = await supabase
-        .from("pagos_proveedor").select("numero_guia, pagado")
-        .eq("pagado", true);
-      (pgs || []).forEach((p) => pagadosSet.add(normGuia(p.numero_guia)));
+        .from("pagos_proveedor").select("numero_guia, pagado, abonado");
+      (pgs || []).forEach((p) => {
+        if (p.pagado) pagadosSet.add(normGuia(p.numero_guia));
+        if (Number(p.abonado) > 0) abonadoMap[normGuia(p.numero_guia)] = Number(p.abonado);
+      });
     } catch { /* tabla aún no creada */ }
     let generadoProv = 0, pagadoProvTotal = 0;
     const diasCosto = {};
@@ -661,27 +667,30 @@ async function calcularCajaMes(mesKey) {
         }
         const m = montoCompraProveedor(e);
         generadoProv += m;
+        const abonado = abonadoMap[gN] || 0;
+        const saldo = Math.max(0, m - abonado);
         const pagadoApp = pagadosSet.has(gN);
         const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
         const pagada = pagadoApp || pagadoDT;
         if (pagada) pagadoProvTotal += m;
+        else pagadoProvTotal += abonado; // abono parcial también cuenta como "pagado/abonado" acumulado
         if (pagadoDT) {
           efectivo.compraProvPagado += m; sc.compraProvPagado += m;
           efectivo.compraProvPagadoDet.push({ guide: e.guide, monto: m, proveedor: nombreProveedor(e), chofer });
         }
-        if (!pagada) {
-          provPendiente.total += m;
+        if (!pagada && saldo > 0) {
+          provPendiente.total += saldo;
           provPendiente.count += 1;
           const nom = nombreProveedor(e);
           const slot = provPendiente.proveedores.find((x) => x.proveedor === nom);
           if (slot) {
-            slot.monto += m; slot.count += 1; slot.guias.push(e.guide);
+            slot.monto += saldo; slot.count += 1; slot.guias.push(e.guide);
             if (!slot.choferes.includes(chofer)) slot.choferes.push(chofer);
-            slot.facturas.push({ guide: e.guide, monto: m, chofer });
+            slot.facturas.push({ guide: e.guide, monto: saldo, chofer });
           } else {
             provPendiente.proveedores.push({
-              proveedor: nom, monto: m, count: 1, guias: [e.guide],
-              choferes: [chofer], facturas: [{ guide: e.guide, monto: m, chofer }],
+              proveedor: nom, monto: saldo, count: 1, guias: [e.guide],
+              choferes: [chofer], facturas: [{ guide: e.guide, monto: saldo, chofer }],
             });
           }
         }
