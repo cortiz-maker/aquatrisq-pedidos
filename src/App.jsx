@@ -5061,10 +5061,23 @@ export default function App() {
                     const seleccionadas = g.pendientes.filter((d) => seleccionPago[d.numero_guia]);
                     const totalSel = seleccionadas.reduce((s, d) => s + (d.saldo ?? d.monto), 0);
                     const todasMarcadas = g.pendientes.length > 0 && g.pendientes.every((d) => seleccionPago[d.numero_guia]);
+                    const rDona = 26, cDona = 2 * Math.PI * rDona;
+                    const largoPago = (g.pct / 100) * cDona;
                     return (
                       <div className="aq-prov-tarjeta" key={g.proveedor}>
                         <div className="aq-prov-tarjeta-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
-                          <div>
+                          <div className="aq-prov-dona">
+                            <svg viewBox="0 0 64 64" width="52" height="52" role="img" aria-label={`${g.proveedor}: ${g.pct}% pagado`}>
+                              <circle cx="32" cy="32" r={rDona} fill="none" stroke="var(--bad)" strokeWidth="10" />
+                              <circle cx="32" cy="32" r={rDona} fill="none" stroke="var(--ok)" strokeWidth="10"
+                                strokeDasharray={`${largoPago.toFixed(2)} ${(cDona - largoPago).toFixed(2)}`}
+                                transform="rotate(-90 32 32)">
+                                <title>{g.proveedor}: pagado {CLP(g.pag)} · pendiente {CLP(g.pend)}</title>
+                              </circle>
+                            </svg>
+                            <span className="aq-prov-dona-pct">{g.pct}%</span>
+                          </div>
+                          <div className="aq-prov-tarjeta-info">
                             <strong>{g.proveedor}</strong>
                             <span className="aq-muted">
                               {g.pendientes.length} pendiente(s) · {g.pagadas.length} pagada(s) · {CLP(g.gen)} generado
@@ -5075,10 +5088,6 @@ export default function App() {
                             <span className="aq-prov-num neg">{CLP(g.pend)}</span>
                             <span className="aq-muted" style={{ marginLeft: 4 }}>{abierto ? "▲" : "▼"}</span>
                           </div>
-                        </div>
-                        <div className="aq-prov-bar">
-                          <div className="aq-prov-bar-pag" style={{ width: g.pct + "%" }} title={"Pagado: " + CLP(g.pag)} />
-                          <div className="aq-prov-bar-pend" style={{ width: (100 - g.pct) + "%" }} title={"Pendiente: " + CLP(g.pend)} />
                         </div>
 
                         {abierto && (
@@ -7453,14 +7462,15 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-prov-fact span:first-child { font-size:12px; }
 /* Tarjetas de Pagos a proveedor agrupadas por proveedor */
 .aq-prov-tarjeta { border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
-.aq-prov-tarjeta-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; cursor:pointer; }
+.aq-prov-tarjeta-head { display:flex; align-items:center; gap:14px; flex-wrap:wrap; cursor:pointer; }
 .aq-prov-tarjeta-head strong { display:block; color:var(--navy); font-size:15px; }
+.aq-prov-tarjeta-info { flex:1; min-width:160px; }
+.aq-prov-dona { position:relative; width:52px; height:52px; flex:0 0 auto; }
+.aq-prov-dona-pct { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  font-size:11px; font-weight:700; color:var(--ink); }
 .aq-prov-tarjeta-nums { display:flex; align-items:center; gap:12px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .aq-prov-num.pos { color:var(--ok); }
 .aq-prov-num.neg { color:var(--bad); }
-.aq-prov-bar { display:flex; height:8px; border-radius:6px; overflow:hidden; margin-top:10px; background:#f1f3f8; }
-.aq-prov-bar-pag { background:var(--ok); }
-.aq-prov-bar-pend { background:var(--bad); }
 .aq-prov-detalle { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); cursor:default; }
 /* Subtotal a rendir por chofer */
 .aq-chofer-box { padding:6px 0; border-bottom:1px dashed var(--line); }
