@@ -2924,17 +2924,26 @@ export default function App() {
     setErrorCob("");
     setOkCob("");
     try {
-      // Entregas gestionadas (traen formulario) → filtramos las de Pago = No.
-      // Ojo: "gestionada" = gestionado_en seteado O status >= 2 (mismo criterio
-      // que estadoEntregaDT). Filtrar solo por gestionado_en en la query dejaba
-      // fuera entregas con status >= 2 pero gestionado_en aún nulo.
-      const { data: ents, error: eEnt } = await supabase
+      // Dos consultas en vez de una sola con .limit(1000) ordenada por
+      // gestionado_en: una entrega puede estar "gestionada" (status >= 2)
+      // sin tener aún gestionado_en seteado, y al ordenar con nulos al final
+      // esas filas quedaban fuera del límite y desaparecían de Cobranzas aun
+      // cuando en DispatchTrack sí figuraban como no pagadas (caso AQ-00526).
+      const { data: conFecha, error: e1 } = await supabase
         .from("dt_entregas")
         .select("*")
-        .order("gestionado_en", { ascending: false, nullsFirst: false })
-        .limit(1000);
-      if (eEnt) throw eEnt;
-      const gestionadas = (ents || []).filter((e) => !!e.gestionado_en || Number(e.status) >= 2);
+        .not("gestionado_en", "is", null)
+        .order("gestionado_en", { ascending: false })
+        .limit(3000);
+      if (e1) throw e1;
+      const { data: sinFecha, error: e2 } = await supabase
+        .from("dt_entregas")
+        .select("*")
+        .is("gestionado_en", null)
+        .limit(3000);
+      if (e2) throw e2;
+      const ents = [...(conFecha || []), ...(sinFecha || [])];
+      const gestionadas = ents.filter((e) => !!e.gestionado_en || Number(e.status) >= 2);
       const pagoNo = gestionadas.filter((e) => esPagoNo(e));
       const guias = [...new Set(pagoNo.map((e) => e.guide).filter(Boolean))];
       let peds = [];
