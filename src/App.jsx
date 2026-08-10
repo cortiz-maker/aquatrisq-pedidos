@@ -6,7 +6,7 @@ import { PUENTE_URL, SUPABASE_URL } from "./config.js";
 const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar", "Pedido Pagado"];
 const TIPOS_DOC = ["boleta", "factura", "sin_documento"];
 const MARCAS = ["TrisQ"];
-const CHOFERES = ["Felipe Hernandez", "Italo Loiza", "César Ortiz"];
+const CHOFERES = ["Italo Loiza", "César Ortiz"];
 // Origen de un descuento manual en pedido_descuentos (texto libre, pero acotamos).
 const ORIGENES_DESC = ["cliente", "volumen", "plan", "combo", "manual"];
 
