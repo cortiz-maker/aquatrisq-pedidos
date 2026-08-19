@@ -593,11 +593,13 @@ async function calcularCajaMes(mesKey) {
       if (!vistos.has(p.numero_guia)) { vistos.add(p.numero_guia); guiasHasta.push(p.numero_guia); }
     });
     let entsMes = [];
-    for (let i = 0; i < guiasHasta.length; i += 200) {
-      const lote = guiasHasta.slice(i, i + 200);
-      if (!lote.length) break;
-      const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
-      entsMes = entsMes.concat(data || []);
+    {
+      const lotes = [];
+      for (let i = 0; i < guiasHasta.length; i += 200) lotes.push(guiasHasta.slice(i, i + 200));
+      const resultados = await Promise.all(
+        lotes.map((lote) => supabase.from("dt_entregas").select("*").in("guide", lote))
+      );
+      resultados.forEach(({ data }) => { entsMes = entsMes.concat(data || []); });
     }
     const porGuia = {};
     entsMes.forEach((e) => {
@@ -1053,11 +1055,14 @@ export default function App() {
       if (guias.length) {
         const mapa = {};
         const CH = 200;
-        for (let i = 0; i < guias.length; i += CH) {
-          const lote = guias.slice(i, i + CH);
-          const { data: ents } = await supabase.from("dt_entregas").select("*").in("guide", lote);
+        const lotes = [];
+        for (let i = 0; i < guias.length; i += CH) lotes.push(guias.slice(i, i + CH));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("dt_entregas").select("*").in("guide", lote))
+        );
+        resultados.forEach(({ data: ents }) => {
           (ents || []).forEach((e) => { if (e.guide) mapa[e.guide] = e; });
-        }
+        });
         setEntregasMap(mapa);
       } else {
         setEntregasMap({});
@@ -1115,11 +1120,13 @@ export default function App() {
       // chofer gestionó la entrega en DispatchTrack.
       const guias = [...new Set(pedidos.map((p) => p.numero_guia).filter(Boolean))];
       let ents = [];
-      for (let i = 0; i < guias.length; i += 200) {
-        const lote = guias.slice(i, i + 200);
-        if (!lote.length) break;
-        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
-        ents = ents.concat(data || []);
+      {
+        const lotes = [];
+        for (let i = 0; i < guias.length; i += 200) lotes.push(guias.slice(i, i + 200));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("dt_entregas").select("*").in("guide", lote))
+        );
+        resultados.forEach(({ data }) => { ents = ents.concat(data || []); });
       }
       const porGuia = {};
       ents.forEach((e) => {
@@ -1169,15 +1176,15 @@ export default function App() {
       const ids = pedidos.map((p) => p.id);
       if (ids.length) {
         const CHUNK = 200;
-        for (let i = 0; i < ids.length; i += CHUNK) {
-          const lote = ids.slice(i, i + CHUNK);
-          const { data: it, error: eIt } = await supabase
-            .from("pedido_items")
-            .select("nombre, codigo, cantidad, subtotal, pedido_id")
-            .in("pedido_id", lote);
+        const lotes = [];
+        for (let i = 0; i < ids.length; i += CHUNK) lotes.push(ids.slice(i, i + CHUNK));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("pedido_items").select("nombre, codigo, cantidad, subtotal, pedido_id").in("pedido_id", lote))
+        );
+        resultados.forEach(({ data: it, error: eIt }) => {
           if (eIt) throw eIt;
           itemsMix = itemsMix.concat(it || []);
-        }
+        });
       }
 
       // 1) Evolución mensual: últimos 6 meses
@@ -1252,11 +1259,13 @@ export default function App() {
         const entByGuide = {};
         pagoNo.forEach((e) => { if (e.guide) entByGuide[e.guide] = e; });
         let pp = [];
-        for (let i = 0; i < guias.length; i += 200) {
-          const lote = guias.slice(i, i + 200);
-          if (!lote.length) break;
-          const { data } = await supabase.from("pedidos").select("numero_guia, monto_total, cobro_cobrado").in("numero_guia", lote);
-          pp = pp.concat(data || []);
+        {
+          const lotes = [];
+          for (let i = 0; i < guias.length; i += 200) lotes.push(guias.slice(i, i + 200));
+          const resultados = await Promise.all(
+            lotes.map((lote) => supabase.from("pedidos").select("numero_guia, monto_total, cobro_cobrado").in("numero_guia", lote))
+          );
+          resultados.forEach(({ data }) => { pp = pp.concat(data || []); });
         }
         const ahora = Date.now();
         pp.forEach((p) => {
@@ -1309,11 +1318,13 @@ export default function App() {
         if (!vistos.has(p.numero_guia)) { vistos.add(p.numero_guia); guias.push(p.numero_guia); }
       });
       let entsMes = [];
-      for (let i = 0; i < guias.length; i += 200) {
-        const lote = guias.slice(i, i + 200);
-        if (!lote.length) break;
-        const { data } = await supabase.from("dt_entregas").select("*").in("guide", lote);
-        entsMes = entsMes.concat(data || []);
+      {
+        const lotes = [];
+        for (let i = 0; i < guias.length; i += 200) lotes.push(guias.slice(i, i + 200));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("dt_entregas").select("*").in("guide", lote))
+        );
+        resultados.forEach(({ data }) => { entsMes = entsMes.concat(data || []); });
       }
       const porGuia = {};
       entsMes.forEach((e) => {
@@ -1387,14 +1398,13 @@ export default function App() {
       // Solo pedimos las columnas que necesitamos (evitamos "select *" con el
       // JSON completo de respuestas para todo lo que no sea Venta con factura).
       let ents = [];
-      for (let i = 0; i < guias.length; i += 200) {
-        const lote = guias.slice(i, i + 200);
-        if (!lote.length) break;
-        const { data } = await supabase
-          .from("dt_entregas")
-          .select("guide, substatus, gestionado_en, raw")
-          .in("guide", lote);
-        ents = ents.concat(data || []);
+      {
+        const lotes = [];
+        for (let i = 0; i < guias.length; i += 200) lotes.push(guias.slice(i, i + 200));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("dt_entregas").select("guide, substatus, gestionado_en, raw").in("guide", lote))
+        );
+        resultados.forEach(({ data }) => { ents = ents.concat(data || []); });
       }
       const entPorGuia = {};
       ents.forEach((e) => {
@@ -1568,14 +1578,13 @@ export default function App() {
       // No necesitamos la columna "raw" (JSON completo) para bidones — el dato
       // vive en su propia columna, así que el fetch es mucho más liviano.
       let ents = [];
-      for (let i = 0; i < guias.length; i += 200) {
-        const lote = guias.slice(i, i + 200);
-        if (!lote.length) break;
-        const { data } = await supabase
-          .from("dt_entregas")
-          .select("guide, status, gestionado_en, chofer, bidon_pendiente")
-          .in("guide", lote);
-        ents = ents.concat(data || []);
+      {
+        const lotes = [];
+        for (let i = 0; i < guias.length; i += 200) lotes.push(guias.slice(i, i + 200));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("dt_entregas").select("guide, status, gestionado_en, chofer, bidon_pendiente").in("guide", lote))
+        );
+        resultados.forEach(({ data }) => { ents = ents.concat(data || []); });
       }
       const entPorGuia = {};
       ents.forEach((e) => {
@@ -2998,18 +3007,20 @@ export default function App() {
       // sin tener aún gestionado_en seteado, y al ordenar con nulos al final
       // esas filas quedaban fuera del límite y desaparecían de Cobranzas aun
       // cuando en DispatchTrack sí figuraban como no pagadas (caso AQ-00526).
-      const { data: conFecha, error: e1 } = await supabase
-        .from("dt_entregas")
-        .select("*")
-        .not("gestionado_en", "is", null)
-        .order("gestionado_en", { ascending: false })
-        .limit(3000);
+      const [{ data: conFecha, error: e1 }, { data: sinFecha, error: e2 }] = await Promise.all([
+        supabase
+          .from("dt_entregas")
+          .select("*")
+          .not("gestionado_en", "is", null)
+          .order("gestionado_en", { ascending: false })
+          .limit(3000),
+        supabase
+          .from("dt_entregas")
+          .select("*")
+          .is("gestionado_en", null)
+          .limit(3000),
+      ]);
       if (e1) throw e1;
-      const { data: sinFecha, error: e2 } = await supabase
-        .from("dt_entregas")
-        .select("*")
-        .is("gestionado_en", null)
-        .limit(3000);
       if (e2) throw e2;
       const ents = [...(conFecha || []), ...(sinFecha || [])];
       const gestionadas = ents.filter((e) => !!e.gestionado_en || Number(e.status) >= 2);
@@ -3018,11 +3029,12 @@ export default function App() {
       let peds = [];
       if (guias.length) {
         const CH = 200;
-        for (let i = 0; i < guias.length; i += CH) {
-          const lote = guias.slice(i, i + CH);
-          const { data: pp } = await supabase.from("pedidos").select("*").in("numero_guia", lote);
-          peds = peds.concat(pp || []);
-        }
+        const lotes = [];
+        for (let i = 0; i < guias.length; i += CH) lotes.push(guias.slice(i, i + CH));
+        const resultados = await Promise.all(
+          lotes.map((lote) => supabase.from("pedidos").select("*").in("numero_guia", lote))
+        );
+        resultados.forEach(({ data: pp }) => { peds = peds.concat(pp || []); });
       }
       const mapEnt = {};
       pagoNo.forEach((e) => { if (e.guide) mapEnt[e.guide] = e; });
@@ -7193,15 +7205,25 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 /* Logo + navegación */
 .aq-logo { width:42px; height:42px; border-radius:10px; background:#fff; object-fit:contain; padding:3px; }
 .aq-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:14px 24px; }
-.aq-nav { display:flex; gap:6px; max-width:760px; }
+.aq-nav { display:flex; gap:6px; max-width:760px; flex-wrap:wrap; align-items:center; }
 .aq-nav button { background:rgba(255,255,255,.12); color:#dce6f6; border:none; font:inherit; font-weight:600; font-size:13px;
   padding:7px 13px; border-radius:9px; cursor:pointer; }
 .aq-nav button:hover { background:rgba(255,255,255,.2); }
 .aq-nav button.on { background:#fff; color:var(--navy); }
-.aq-user { display:flex; align-items:center; gap:8px; color:#c5d2e8; font-size:12px; margin-left:6px; }
-.aq-logout { background:rgba(255,255,255,.12); color:#fff; border:none; font:inherit; font-size:12px; font-weight:600;
-  padding:6px 11px; border-radius:8px; cursor:pointer; }
-.aq-logout:hover { background:rgba(255,255,255,.24); }
+.aq-user { display:flex; align-items:center; gap:8px; color:#c5d2e8; font-size:12px; margin-left:6px; flex-wrap:wrap; }
+.aq-nav .aq-user button.aq-logout,
+.aq-nav button.aq-logout {
+  background:rgba(255,255,255,.18); color:#fff; border:1px solid rgba(255,255,255,.5); font:inherit; font-size:12px; font-weight:700;
+  padding:6px 12px; border-radius:8px; cursor:pointer; letter-spacing:.2px;
+}
+.aq-nav .aq-user button.aq-logout:hover,
+.aq-nav button.aq-logout:hover { background:#fdecea; color:var(--bad); border-color:#f3b4ad; }
+
+@media (max-width:768px) {
+  .aq-header { padding:12px 14px; }
+  .aq-nav { width:100%; max-width:none; }
+  .aq-user { width:100%; justify-content:space-between; margin-left:0; padding-top:6px; margin-top:4px; border-top:1px solid rgba(255,255,255,.15); }
+}
 
 /* Login */
 .aq-login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
@@ -7354,6 +7376,7 @@ code { background:#eef1f7; padding:1px 5px; border-radius:5px; font-size:13px; }
 
 @media (max-width:560px) {
   .aq-grid { grid-template-columns:1fr; }
+  .aq-dom-edit .aq-grid, .aq-modal-edit .aq-grid { grid-template-columns:1fr; }
   .aq-item { grid-template-columns: 1fr 56px 80px 28px; }
   .aq-item .aq-sub { display:none; }
   .aq-desc { grid-template-columns: 1fr 80px 28px; }
@@ -7623,5 +7646,16 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-alert-card.warn strong { color:#8a6400; }
 
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+
+/* ── Ajustes generales de mobile (evitan overflow horizontal y filas apretadas) ── */
+html, body { overflow-x:hidden; }
+@media (max-width:600px) {
+  .aq-main { padding:14px 12px 50px; gap:10px; }
+  .aq-card { padding:13px 14px; }
+  .aq-det-line { flex-wrap:wrap; }
+  .aq-row-head, .aq-modal-head { flex-wrap:wrap; }
+  .aq-cob-resumen { grid-template-columns:repeat(2,1fr); }
+  input, select, textarea { font-size:16px; } /* evita el zoom automático de iOS al enfocar */
+}
 `;
 
