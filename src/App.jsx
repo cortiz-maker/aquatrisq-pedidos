@@ -853,6 +853,7 @@ export default function App() {
   // solo con RUT de empresa). Al "procesar" una cotización de un potencial se
   // crea recién ahí la ficha en `clientes` (es_empresa=true) y queda enlazada.
   const [cotizaciones, setCotizaciones] = useState([]);
+  const [cotizCargado, setCotizCargado] = useState(false);
   const [cargandoCotiz, setCargandoCotiz] = useState(false);
   const [errorCotiz, setErrorCotiz] = useState("");
   const [buscarCotiz, setBuscarCotiz] = useState("");
@@ -1660,10 +1661,13 @@ export default function App() {
   }
 
   useEffect(() => {
-    if ((rol === "admin" || rol === "operador") && vista === "deudasprov" && session) cargarDeudasProv();
-    if ((rol === "admin" || rol === "operador") && vista === "cotizaciones" && session) cargarCotizaciones();
-    if ((rol === "admin" || rol === "operador") && vista === "facturas" && session) cargarFacturasPend();
-    if ((rol === "admin" || rol === "operador") && vista === "bidones" && session) cargarBidonesPend();
+    // Cada módulo carga sus datos solo la primera vez que se visita en la sesión.
+    // Volver a entrar (Facturas → Bidones → Facturas) NO vuelve a consultar la
+    // base de datos: se usa el botón "↻ Actualizar" cuando quieras datos frescos.
+    if ((rol === "admin" || rol === "operador") && vista === "deudasprov" && session && deudasProv === null) cargarDeudasProv();
+    if ((rol === "admin" || rol === "operador") && vista === "cotizaciones" && session && !cotizCargado) cargarCotizaciones();
+    if ((rol === "admin" || rol === "operador") && vista === "facturas" && session && facturasPend === null) cargarFacturasPend();
+    if ((rol === "admin" || rol === "operador") && vista === "bidones" && session && bidonesPend === null) cargarBidonesPend();
     // KPIs de Inicio: precargamos ambos conteos aunque el usuario no visite las pantallas.
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && facturasPend === null) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && bidonesPend === null) cargarBidonesPend();
@@ -2050,6 +2054,7 @@ export default function App() {
         .limit(300);
       if (error) throw error;
       setCotizaciones(data || []);
+      setCotizCargado(true);
     } catch (e) {
       setErrorCotiz(mensajeError(e, "No se pudieron cargar las cotizaciones."));
     } finally {
@@ -2980,6 +2985,10 @@ export default function App() {
 
   async function abrirCobranzas() {
     setVista("cobranzas");
+    if (cobranzas !== null) return; // ya está cargado en esta sesión; usa "↻ Actualizar" para refrescar
+    await cargarCobranzas();
+  }
+  async function cargarCobranzas() {
     setCargandoCob(true);
     setErrorCob("");
     setOkCob("");
@@ -6448,7 +6457,10 @@ export default function App() {
           <section className="aq-card">
             <div className="aq-row-head">
               <h2>Gestión de cobro</h2>
-              <button className="aq-link" onClick={() => setVista("inicio")}>Volver</button>
+              <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <button className="aq-btn-sec" onClick={cargarCobranzas} disabled={cargandoCob}>↻ Actualizar</button>
+                <button className="aq-link" onClick={() => setVista("inicio")}>Volver</button>
+              </span>
             </div>
             <p className="aq-muted">Pedidos entregados con <strong>Pago = No</strong> en el formulario del chofer. Marca Cobrado y/o Recuperado, o registra un intento. Más de 3 intentos sin cobrar bloquea al cliente.</p>
 
