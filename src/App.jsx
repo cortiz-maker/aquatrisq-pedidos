@@ -1838,7 +1838,7 @@ export default function App() {
   useEffect(() => {
     if (!credsListas) { setAuthReady(true); return; }
     let activo = true;
-    async function cargarPerfil(sess) {
+    async function cargarPerfil(sess, esLoginNuevo) {
       if (!sess) { setRol(null); setPerfilNombre(""); setDistChofer(""); setDistIdentDt(""); return; }
       const { data } = await supabase
         .from("perfiles")
@@ -1851,7 +1851,10 @@ export default function App() {
         setPerfilNombre(data.nombre || sess.user.email);
         setDistChofer(data.chofer_nombre || "");
         setDistIdentDt(data.identificador_dt || "");
-        setVista("inicio");
+        // Solo volvemos a "inicio" en un login nuevo, no en cada revalidación
+        // de token que Supabase dispara al recuperar el foco de la pestaña
+        // (por ejemplo al volver del SII u otra ventana).
+        if (esLoginNuevo) setVista("inicio");
       } else {
         setRol(null);
       }
@@ -1859,11 +1862,11 @@ export default function App() {
     supabase.auth.getSession().then(({ data }) => {
       if (!activo) return;
       setSession(data.session);
-      cargarPerfil(data.session).finally(() => activo && setAuthReady(true));
+      cargarPerfil(data.session, true).finally(() => activo && setAuthReady(true));
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, sess) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((evento, sess) => {
       setSession(sess);
-      cargarPerfil(sess);
+      cargarPerfil(sess, evento === "SIGNED_IN");
     });
     return () => { activo = false; sub.subscription.unsubscribe(); };
   }, [credsListas]);
