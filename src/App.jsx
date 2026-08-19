@@ -5228,7 +5228,7 @@ export default function App() {
               const listaFiltrada = !q ? lista : lista.filter((g) =>
                 g.nombre.toLowerCase().includes(q) ||
                 (g.rut || "").toLowerCase().includes(q) ||
-                g.guias.some((f) => String(f.numero_guia).toLowerCase().includes(q))
+                [...g.pend, ...g.dif, ...g.noReq, ...g.emit].some((f) => String(f.numero_guia).toLowerCase().includes(q))
               );
 
               const conPendientes = listaFiltrada.filter((g) => g.pend.length || g.dif.length);
