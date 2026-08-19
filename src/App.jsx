@@ -894,6 +894,7 @@ export default function App() {
   const [facturasPend, setFacturasPend] = useState(null);
   const [cargandoFact, setCargandoFact] = useState(false);
   const [errorFact, setErrorFact] = useState("");
+  const [buscarFact, setBuscarFact] = useState("");            // texto de búsqueda por cliente, RUT o guía
   const [facturaInputs, setFacturaInputs] = useState({});     // clave (guías separadas por coma) -> texto en edición
   const [facturaArchivos, setFacturaArchivos] = useState({}); // clave -> File (PDF) opcional
   const [guardandoFacturaGuia, setGuardandoFacturaGuia] = useState(null);
@@ -5186,6 +5187,14 @@ export default function App() {
               <button className="aq-btn-sec" onClick={cargarFacturasPend} disabled={cargandoFact}>↻ Actualizar</button>
             </div>
 
+            <div className="aq-search" style={{ marginBottom: 8 }}>
+              <input
+                placeholder="Buscar por cliente, RUT o guía…"
+                value={buscarFact}
+                onChange={(e) => setBuscarFact(e.target.value)}
+              />
+            </div>
+
             {errorFact && <div className="aq-error" style={{ marginBottom: 8 }}>{errorFact}</div>}
             {cargandoFact && <p className="aq-muted">Cargando facturas…</p>}
             {!cargandoFact && facturasPend && facturasPend.length === 0 && (
@@ -5211,11 +5220,19 @@ export default function App() {
                 return { cliente_id: g.cliente_id, nombre: cli?.nombre || "Cliente", rut, pend, dif, noReq, emit, maxDias, totalPend };
               });
               lista.sort((a, b) => (b.pend.length > 0) - (a.pend.length > 0) || b.maxDias - a.maxDias);
-              const conPendientes = lista.filter((g) => g.pend.length || g.dif.length);
-              const soloResueltos = lista.filter((g) => !g.pend.length && !g.dif.length && (g.emit.length || g.noReq.length));
+
+              const q = buscarFact.trim().toLowerCase();
+              const listaFiltrada = !q ? lista : lista.filter((g) =>
+                g.nombre.toLowerCase().includes(q) ||
+                (g.rut || "").toLowerCase().includes(q) ||
+                g.guias.some((f) => String(f.numero_guia).toLowerCase().includes(q))
+              );
+
+              const conPendientes = listaFiltrada.filter((g) => g.pend.length || g.dif.length);
+              const soloResueltos = listaFiltrada.filter((g) => !g.pend.length && !g.dif.length && (g.emit.length || g.noReq.length));
 
               if (!conPendientes.length && !soloResueltos.length) {
-                return <p className="aq-muted">No hay pedidos con Factura pendiente en el período.</p>;
+                return <p className="aq-muted">{q ? "Sin resultados para la búsqueda." : "No hay pedidos con Factura pendiente en el período."}</p>;
               }
               return (
                 <>
