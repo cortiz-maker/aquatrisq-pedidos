@@ -765,7 +765,13 @@ export default function App() {
   const [resultado, setResultado] = useState(null); // { ok, guia, sync, msg }
 
   // Navegación entre vistas: inicio (dashboard) | nuevo | mantenedor | confirmacion
-  const [vista, setVista] = useState("inicio");
+  const VISTAS_PERSISTIBLES = ["inicio", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "bidones"];
+  const [vista, setVista] = useState(() => {
+    try {
+      const guardada = sessionStorage.getItem("aq_vista");
+      return VISTAS_PERSISTIBLES.includes(guardada) ? guardada : "inicio";
+    } catch { return "inicio"; }
+  });
   const [confirma, setConfirma] = useState(null); // { guia, mensaje, emailEnviado, emailDestino, sync }
 
   // ── Autenticación (Supabase Auth) ──────────────────────────
@@ -1905,6 +1911,14 @@ export default function App() {
       setVista("inicio");
     }
   }, [rol, vista]);
+
+  // Recordar la vista actual para que un refresco de página (F5) te deje donde
+  // estabas, en vez de volver siempre a Inicio. No persistimos vistas
+  // transitorias como "confirmacion" (pantalla de éxito tras un pedido nuevo).
+  useEffect(() => {
+    if (!VISTAS_PERSISTIBLES.includes(vista)) return;
+    try { sessionStorage.setItem("aq_vista", vista); } catch { /* noop */ }
+  }, [vista]);
 
   // Mantener emailNuevo sincronizado con el cliente elegido
   useEffect(() => {
@@ -5267,7 +5281,7 @@ export default function App() {
                               <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
                                 <span>
                                   Guía {f.numero_guia}{f.factura_diferida ? " · A cierre de mes" : ""}
-                                  <em className="aq-det-chofer">{f.dias} día(s){f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
+                                  <em className="aq-det-chofer">{f.dias} día(s){f.gestionadoEn ? ` · Gestión: ${f.gestionadoEn.toLocaleDateString("es-CL")}` : ""}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
                                 </span>
                                 <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                   {CLP(f.monto)}
@@ -5310,47 +5324,58 @@ export default function App() {
                     );
                   })}
 
-                  {soloResueltos.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>Resueltas ({soloResueltos.length})</strong>}
-                  {soloResueltos.map((g) => {
-                    const claveG = "fact-r-" + (g.cliente_id || "sc");
-                    const abierto = !!grupoAbierto[claveG];
-                    return (
-                      <div className="aq-fact-grupo" key={"r" + (g.cliente_id || "sc")}>
-                        <div className="aq-det-line aq-prov-fact aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
-                          <span>
-                            {g.nombre}{g.rut ? " · " + g.rut : ""}
-                            <em className="aq-det-chofer">
-                              {g.emit.length > 0 ? `${g.emit.length} emitida(s)` : ""}{g.noReq.length > 0 ? `${g.emit.length ? " · " : ""}${g.noReq.length} sin factura requerida` : ""}
-                            </em>
-                          </span>
-                          <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
-                        </div>
-                        {abierto && (
-                          <div className="aq-fact-detalle">
-                            {g.emit.map((f) => (
-                              <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
-                                <span>
-                                  Guía {f.numero_guia}
-                                  <em className="aq-det-chofer">Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}</em>
-                                </span>
-                                <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                  {CLP(f.monto)}
-                                  {f.documento_emitido_url && <button className="aq-link" onClick={() => verDocumentoEmitido(f.documento_emitido_url)}>Ver PDF</button>}
-                                  <button className="aq-link" onClick={() => deshacerDocumentoEmitido(f.numero_guia)}>Deshacer</button>
-                                </span>
-                              </div>
-                            ))}
-                            {g.noReq.map((f) => (
-                              <div className="aq-det-line aq-prov-fact" key={"nr" + f.numero_guia}>
-                                <span>Guía {f.numero_guia}<em className="aq-det-chofer">Marcada sin factura requerida</em></span>
-                                <button className="aq-link" onClick={() => deshacerFacturaNoRequerida(f.numero_guia)}>Deshacer</button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                  {soloResueltos.length > 0 && (
+                    <div className="aq-fact-grupo" style={{ marginTop: 14 }}>
+                      <div
+                        className="aq-det-line aq-prov-cab aq-fact-head"
+                        onClick={() => setGrupoAbierto((prev) => ({ ...prev, "fact-emitidas-section": !prev["fact-emitidas-section"] }))}
+                      >
+                        <span><strong>Emitidas ({soloResueltos.length})</strong></span>
+                        <span className="aq-muted">{grupoAbierto["fact-emitidas-section"] ? "▲" : "▼"}</span>
                       </div>
-                    );
-                  })}
+
+                      {grupoAbierto["fact-emitidas-section"] && soloResueltos.map((g) => {
+                        const claveG = "fact-r-" + (g.cliente_id || "sc");
+                        const abierto = !!grupoAbierto[claveG];
+                        return (
+                          <div className="aq-fact-grupo" key={"r" + (g.cliente_id || "sc")}>
+                            <div className="aq-det-line aq-prov-fact aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
+                              <span>
+                                {g.nombre}{g.rut ? " · " + g.rut : ""}
+                                <em className="aq-det-chofer">
+                                  {g.emit.length > 0 ? `${g.emit.length} emitida(s)` : ""}{g.noReq.length > 0 ? `${g.emit.length ? " · " : ""}${g.noReq.length} sin factura requerida` : ""}
+                                </em>
+                              </span>
+                              <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
+                            </div>
+                            {abierto && (
+                              <div className="aq-fact-detalle">
+                                {g.emit.map((f) => (
+                                  <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
+                                    <span>
+                                      Guía {f.numero_guia}
+                                      <em className="aq-det-chofer">Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}</em>
+                                    </span>
+                                    <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                      {CLP(f.monto)}
+                                      {f.documento_emitido_url && <button className="aq-link" onClick={() => verDocumentoEmitido(f.documento_emitido_url)}>Ver PDF</button>}
+                                      <button className="aq-link" onClick={() => deshacerDocumentoEmitido(f.numero_guia)}>Deshacer</button>
+                                    </span>
+                                  </div>
+                                ))}
+                                {g.noReq.map((f) => (
+                                  <div className="aq-det-line aq-prov-fact" key={"nr" + f.numero_guia}>
+                                    <span>Guía {f.numero_guia}<em className="aq-det-chofer">Marcada sin factura requerida</em></span>
+                                    <button className="aq-link" onClick={() => deshacerFacturaNoRequerida(f.numero_guia)}>Deshacer</button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </>
               );
             })()}
