@@ -5995,6 +5995,17 @@ export default function App() {
             {confirma.sync !== "enviado_dt" && (
               <p className="aq-muted">Envío a DispatchTrack pendiente; el pedido quedó guardado.</p>
             )}
+            {confirma.sync === "enviado_dt" && (
+              <a
+                className="aq-btn"
+                style={{ display: "inline-block", textAlign: "center", textDecoration: "none", marginTop: 8 }}
+                href={`https://aquatrisq.dispatchtrack.com/search/${confirma.guia}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Seguir mi pedido
+              </a>
+            )}
             <div className="aq-confirm-acts">
               <button className="aq-btn" onClick={() => { setConfirma(null); setVista("inicio"); }}>Volver al inicio</button>
               <button className="aq-btn-sec" onClick={() => { setConfirma(null); setVista("nuevo"); }}>Otro pedido</button>
