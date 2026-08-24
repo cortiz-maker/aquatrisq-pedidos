@@ -213,6 +213,9 @@ function mensajeConfirmacion(guia, nombreCliente) {
   return `¡Hola! 👋
 Tu Pedido N° ${guia} ha sido ingresado a nuestra agenda y se encuentra programado para despacho el día de mañana. 🚚💧
 
+📦 Sigue tu pedido en tiempo real ingresando tu N° de pedido (${guia}) aquí:
+https://aquatrisq.dispatchtrack.com/widget/y5BFZ8SR5zDTonHzOuStvQ
+
 📲 Síguenos en Instagram @aquatrisq y no olvides etiquetarnos cuando recibas tu pedido. ¡Nos encanta conocer tu experiencia y ver cómo disfrutas nuestros productos! 💦💙
 
 🟡 Información Importante:
@@ -5996,15 +5999,20 @@ export default function App() {
               <p className="aq-muted">Envío a DispatchTrack pendiente; el pedido quedó guardado.</p>
             )}
             {confirma.sync === "enviado_dt" && (
-              <a
-                className="aq-btn"
-                style={{ display: "inline-block", textAlign: "center", textDecoration: "none", marginTop: 8 }}
-                href={`https://aquatrisq.dispatchtrack.com/search/${confirma.guia}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Seguir mi pedido
-              </a>
+              <>
+                <a
+                  className="aq-btn"
+                  style={{ display: "inline-block", textAlign: "center", textDecoration: "none", marginTop: 8 }}
+                  href="https://aquatrisq.dispatchtrack.com/widget/y5BFZ8SR5zDTonHzOuStvQ"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Seguir mi pedido
+                </a>
+                <p className="aq-muted" style={{ marginTop: 4 }}>
+                  Ingresa el N° {confirma.guia} en el buscador de la página que se abre.
+                </p>
+              </>
             )}
             <div className="aq-confirm-acts">
               <button className="aq-btn" onClick={() => { setConfirma(null); setVista("inicio"); }}>Volver al inicio</button>
