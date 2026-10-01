@@ -431,6 +431,22 @@ function bidonesPendientesDT(entrega) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+// ── Paginación: Supabase (PostgREST) devuelve como MÁXIMO 1000 filas por consulta ──
+// aunque se pida .limit(3000) o no se ponga límite. Al superar 1000 pedidos, los más
+// nuevos quedaban fuera de los cálculos (ej.: AQ-00962 no descontaba del efectivo).
+// `build` debe ser una función que arme la consulta desde cero, con un .order()
+// sobre una columna única (id / dispatch_id) para que las páginas no se crucen.
+async function traerTodo(build, pagina = 1000) {
+  let todo = [];
+  for (let desde = 0; ; desde += pagina) {
+    const { data, error } = await build().range(desde, desde + pagina - 1);
+    if (error) return { data: todo, error };
+    todo = todo.concat(data || []);
+    if (!data || data.length < pagina) break;
+  }
+  return { data: todo, error: null };
+}
+
 // ── Reglas de caja compartidas (panel gerencial + mantenedor de deudas) ──
 const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 // Guías excluidas de todo cálculo de caja.
@@ -585,8 +601,9 @@ async function calcularCajaMes(mesKey) {
     const limiteSup = new Date(ay, am, 1).toISOString().slice(0, 10);
 
     // Todas las guías creadas hasta el fin de mesKey (acumulado, sin límite inferior).
-    const { data: peds } = await supabase
-      .from("pedidos").select("created_at, numero_guia").lt("created_at", limiteSup);
+    const { data: peds } = await traerTodo(() => supabase
+      .from("pedidos").select("created_at, numero_guia").lt("created_at", limiteSup)
+      .order("id", { ascending: true }));
     const guiasDelMesSet = new Set(); // sólo para "costo recargas": flujo exacto del mes.
     const guiasHasta = [];
     const vistos = new Set();
@@ -980,27 +997,18 @@ export default function App() {
     (async () => {
       // Supabase devuelve máximo 1000 filas por consulta. clientes y
       // domicilios superan eso, así que los traemos paginando en bloques.
-      const traerTodo = async (tabla, columnas) => {
-        const PAGE = 1000;
-        let desde = 0;
-        let acumulado = [];
-        for (;;) {
-          const { data, error } = await supabase
-            .from(tabla)
-            .select(columnas)
-            .range(desde, desde + PAGE - 1);
-          if (error) throw error;
-          acumulado = acumulado.concat(data || []);
-          if (!data || data.length < PAGE) break;
-          desde += PAGE;
-        }
-        return acumulado;
+      // (orden por id: sin orden fijo las páginas pueden repetir u omitir filas).
+      const traerTabla = async (tabla, columnas) => {
+        const { data, error } = await traerTodo(() =>
+          supabase.from(tabla).select(columnas).order("id", { ascending: true }));
+        if (error) throw error;
+        return data;
       };
 
       const intentarCarga = async () => {
         const [cli, dom, p, t] = await Promise.all([
-          traerTodo("clientes", "*"),
-          traerTodo("domicilios", "id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal"),
+          traerTabla("clientes", "*"),
+          traerTabla("domicilios", "id,cliente_id,identificador_dt,etiqueta,direccion,comuna,es_principal"),
           supabase.from("productos").select("*").eq("activo", true).order("nombre"),
           supabase.from("precio_tramos").select("*"),
         ]);
@@ -1044,12 +1052,13 @@ export default function App() {
       const [y, m] = per.split("-").map(Number);
       const desde = new Date(y, m - 1, 1).toISOString();
       const hasta = new Date(y, m, 1).toISOString();
-      const { data, error } = await supabase
+      const { data, error } = await traerTodo(() => supabase
         .from("pedidos")
         .select("*")
         .gte("created_at", desde)
         .lt("created_at", hasta)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false }));
       if (error) throw error;
       const peds = data || [];
       setPedidosMes(peds);
@@ -1098,10 +1107,11 @@ export default function App() {
       const ahora = new Date();
       const ini = new Date(ahora.getFullYear(), ahora.getMonth() - 5, 1);
       const desde = ini.toISOString();
-      const { data: peds, error: ePed } = await supabase
+      const { data: peds, error: ePed } = await traerTodo(() => supabase
         .from("pedidos")
         .select("created_at, monto_total, numero_guia")
-        .gte("created_at", desde);
+        .gte("created_at", desde)
+        .order("id", { ascending: true }));
       if (ePed) throw ePed;
       const pedidos = peds || [];
       const meses = [];
@@ -1166,11 +1176,12 @@ export default function App() {
       const ini = new Date(ahora.getFullYear(), ahora.getMonth() - 5, 1);
       const desde = ini.toISOString();
 
-      const { data: peds, error: ePed } = await supabase
+      const { data: peds, error: ePed } = await traerTodo(() => supabase
         .from("pedidos")
         .select("id, created_at, monto_total, por_cobrar, domicilio_id, numero_guia")
         .gte("created_at", desde)
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true }));
       if (ePed) throw ePed;
       const pedidos = peds || [];
 
@@ -1252,11 +1263,11 @@ export default function App() {
       // Deuda vencida +30 días (histórico): entregas Pago=No no cobradas, gestionadas hace +30 días
       let venc30 = { monto: 0, count: 0 };
       try {
-        const { data: ents } = await supabase
+        const { data: ents } = await traerTodo(() => supabase
           .from("dt_entregas").select("*")
           .not("gestionado_en", "is", null)
           .order("gestionado_en", { ascending: false })
-          .limit(1000);
+          .order("dispatch_id", { ascending: false }));
         const pagoNo = (ents || []).filter((e) => esPagoNo(e));
         const guias = [...new Set(pagoNo.map((e) => e.guide).filter(Boolean))];
         const entByGuide = {};
@@ -1306,10 +1317,11 @@ export default function App() {
     try {
       const hoy = new Date();
       const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
-      const { data: peds, error: ePed } = await supabase
+      const { data: peds, error: ePed } = await traerTodo(() => supabase
         .from("pedidos")
         .select("created_at, numero_guia")
-        .gte("created_at", desde);
+        .gte("created_at", desde)
+        .order("id", { ascending: true }));
       if (ePed) throw ePed;
       const mesPorGuia = {}; // guía → mes de origen (mes del pedido, no el mes actual)
       const guias = [];
@@ -1386,10 +1398,11 @@ export default function App() {
     try {
       const hoy = new Date();
       const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 8, 1).toISOString().slice(0, 10);
-      const { data: peds, error: ePed } = await supabase
+      const { data: peds, error: ePed } = await traerTodo(() => supabase
         .from("pedidos")
         .select("id, numero_guia, cliente_id, domicilio_id, monto_total, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida, factura_diferida")
-        .gte("created_at", desde);
+        .gte("created_at", desde)
+        .order("id", { ascending: true }));
       if (ePed) throw ePed;
       const pedPorGuia = {};
       const guias = [];
@@ -1566,10 +1579,11 @@ export default function App() {
     try {
       const hoy = new Date();
       const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 8, 1).toISOString().slice(0, 10);
-      const { data: peds, error: ePed } = await supabase
+      const { data: peds, error: ePed } = await traerTodo(() => supabase
         .from("pedidos")
         .select("id, numero_guia, cliente_id, domicilio_id, bidones_retirados_en, bidones_proximo_pedido, bidones_retiro_guia")
-        .gte("created_at", desde);
+        .gte("created_at", desde)
+        .order("id", { ascending: true }));
       if (ePed) throw ePed;
       const pedPorGuia = {};
       const guias = [];
@@ -3011,17 +3025,17 @@ export default function App() {
       // esas filas quedaban fuera del límite y desaparecían de Cobranzas aun
       // cuando en DispatchTrack sí figuraban como no pagadas (caso AQ-00526).
       const [{ data: conFecha, error: e1 }, { data: sinFecha, error: e2 }] = await Promise.all([
-        supabase
+        traerTodo(() => supabase
           .from("dt_entregas")
           .select("*")
           .not("gestionado_en", "is", null)
           .order("gestionado_en", { ascending: false })
-          .limit(3000),
-        supabase
+          .order("dispatch_id", { ascending: false })),
+        traerTodo(() => supabase
           .from("dt_entregas")
           .select("*")
           .is("gestionado_en", null)
-          .limit(3000),
+          .order("dispatch_id", { ascending: false })),
       ]);
       if (e1) throw e1;
       if (e2) throw e2;
