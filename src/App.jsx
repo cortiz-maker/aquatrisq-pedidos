@@ -840,7 +840,7 @@ export default function App() {
   const [fineMonto, setFineMonto] = useState("");
   const [fineNota, setFineNota] = useState("");
   const [guardandoFine, setGuardandoFine] = useState(false);
-  const [fineVerPagados, setFineVerPagados] = useState(false);
+  const [descargandoFine, setDescargandoFine] = useState(false);
   // Lo que Fine debe hoy (también se usa en el botón "Crédito Fine" de Pagos a proveedor).
   const saldoFineGlobal = Math.max(0,
     (fineDesp || []).reduce((s, d) => s + (Number(d.valor) || 0), 0)
@@ -1428,6 +1428,193 @@ export default function App() {
       setFineDesp(null);
     } finally {
       setCargandoFine(false);
+    }
+  }
+  // Excel descargable con el detalle de la cuenta Fine (reemplaza la lista en pantalla).
+  async function descargarExcelFine(filas) {
+    setDescargandoFine(true); setErrorFine("");
+    try {
+      const guias = filas.map((f) => f.numero_guia).filter(Boolean);
+      const [{ data: peds, error: eP }, { data: ents, error: eE }] = await Promise.all([
+        supabase.from("pedidos")
+          .select("numero_guia, created_at, fecha_min_entrega, observacion, creado_por, cliente_id, domicilio_id")
+          .in("numero_guia", guias),
+        supabase.from("dt_entregas")
+          .select("guide, chofer, truck_identifier, recibido_por, arrived_at, gestionado_en, substatus, medio_pago, items, latitude, longitude")
+          .in("guide", guias),
+      ]);
+      if (eP) throw eP;
+      if (eE) throw eE;
+      const pedPorGuia = {};
+      (peds || []).forEach((p) => { pedPorGuia[p.numero_guia] = p; });
+      const entPorGuia = {};
+      (ents || []).forEach((e) => {
+        const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+        const prev = entPorGuia[e.guide];
+        const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+        if (!prev || t >= tp) entPorGuia[e.guide] = e;
+      });
+      const cliIds = [...new Set((peds || []).map((p) => p.cliente_id).filter(Boolean))];
+      const domIds = [...new Set((peds || []).map((p) => p.domicilio_id).filter(Boolean))];
+      const [{ data: clis }, { data: doms }] = await Promise.all([
+        cliIds.length ? supabase.from("clientes").select("id, codigo_cliente, telefono").in("id", cliIds) : Promise.resolve({ data: [] }),
+        domIds.length ? supabase.from("domicilios").select("id, direccion, comuna").in("id", domIds) : Promise.resolve({ data: [] }),
+      ]);
+      const cliPorId = {}; (clis || []).forEach((c) => { cliPorId[c.id] = c; });
+      const domPorId = {}; (doms || []).forEach((d) => { domPorId[d.id] = d; });
+
+      const ExcelJS = (await import("exceljs")).default;
+      const wb = new ExcelJS.Workbook();
+      wb.creator = perfilNombre || "Aquatrisq";
+      const AZUL = "FF1F4E78";
+      const cab = (ws, fila) => {
+        ws.getRow(fila).eachCell((c) => {
+          c.font = { name: "Arial", bold: true, color: { argb: "FFFFFFFF" }, size: 10 };
+          c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: AZUL } };
+          c.alignment = { vertical: "middle", wrapText: true };
+        });
+        ws.getRow(fila).height = 30;
+      };
+      const titulo = (ws, txt) => {
+        ws.getCell("A1").value = txt;
+        ws.getCell("A1").font = { name: "Arial", bold: true, size: 13, color: { argb: AZUL } };
+      };
+      // ExcelJS guarda las fechas en UTC: las corremos a la hora local del navegador (Chile).
+      const fecha = (v) => {
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+      };
+      const pesos = '"$"#,##0';
+      const movs = fineMov || [];
+      const totPagos = movs.filter((m) => m.tipo === "pago").reduce((a, m) => a + (Number(m.monto) || 0), 0);
+      const totCred = movs.filter((m) => m.tipo === "credito_recarga").reduce((a, m) => a + (Number(m.monto) || 0), 0);
+
+      const ultD = 3 + filas.length;   // última fila de datos en "Despachos Fine"
+      const tot = ultD + 1;            // fila de totales
+      // Hoja Resumen (primera)
+      const wsR = wb.addWorksheet("Resumen");
+      titulo(wsR, "Cuenta Fine — Aquatrisq");
+      wsR.getCell("A2").value = `Generado el ${new Date().toLocaleString("es-CL")} por ${perfilNombre || "—"}`;
+      wsR.getCell("A2").font = { name: "Arial", italic: true, size: 9 };
+      wsR.getColumn(1).width = 44; wsR.getColumn(2).width = 16;
+      wsR.getRow(4).values = ["Concepto", "Valor"];
+      cab(wsR, 4);
+      const lineas = [
+        ["Despachos de Fine", { formula: `COUNTA('Despachos Fine'!A4:A${ultD})` }, null],
+        ["Ítems entregados", { formula: `'Despachos Fine'!R${tot}` }, null],
+        [`Total generado (ítems × ${CLP(800)})`, { formula: `'Despachos Fine'!S${tot}` }, pesos],
+        ["Pagado por Fine", totPagos, pesos],
+        ["Usado como crédito en recargas Aguafine", totCred, pesos],
+        ["Fine nos debe hoy", { formula: "B7-B8-B9" }, pesos],
+      ];
+      lineas.forEach(([a, b, fmt], i) => {
+        const r = 5 + i;
+        wsR.getCell(r, 1).value = a; wsR.getCell(r, 2).value = b;
+        if (fmt) wsR.getCell(r, 2).numFmt = fmt;
+        wsR.getRow(r).font = { name: "Arial", size: 10, bold: i === lineas.length - 1 };
+      });
+
+      // Hoja Despachos
+      const wsD = wb.addWorksheet("Despachos Fine", { views: [{ state: "frozen", xSplit: 1, ySplit: 3 }] });
+      titulo(wsD, `Despachos por cuenta de Fine · ${CLP(800)} por ítem entregado`);
+      const colsD = [
+        ["N° Guía", 11], ["Creado", 16], ["Fecha programada", 12], ["Cód. cliente", 10], ["Cliente", 30], ["Teléfono", 13],
+        ["Dirección", 32], ["Comuna", 14], ["Observación", 26], ["Creado por", 13], ["Resultado DT", 12], ["Chofer", 13],
+        ["Patente", 9], ["Entregado (DT)", 16], ["Recibido por", 16], ["Medio pago (DT)", 18], ["Detalle entregado / pedido", 34],
+        ["Ítems entregados", 10], ["Valor ($)", 11], ["Cubierto ($)", 11], ["Saldo ($)", 11], ["Estado pago", 13], ["Latitud", 11], ["Longitud", 11],
+      ];
+      wsD.getRow(3).values = colsD.map((c) => c[0]);
+      colsD.forEach((c, i) => { wsD.getColumn(i + 1).width = c[1]; });
+      cab(wsD, 3);
+      filas.forEach((f, i) => {
+        const p = pedPorGuia[f.numero_guia] || {};
+        const e = entPorGuia[f.numero_guia] || {};
+        const c = cliPorId[p.cliente_id] || {};
+        const d = domPorId[p.domicilio_id] || {};
+        const det = Array.isArray(e.items)
+          ? e.items.map((x) => `${x.delivered_quantity ?? 0}/${x.original_quantity ?? x.quantity ?? 0} ${x.name || x.description || ""}`.trim()).join("; ")
+          : "";
+        const r = 4 + i;
+        wsD.getRow(r).values = [
+          f.numero_guia, fecha(p.created_at), fecha(p.fecha_min_entrega), c.codigo_cliente || "", f.cliente || "", c.telefono || "",
+          d.direccion || "", d.comuna || "", p.observacion || "", p.creado_por || "", e.substatus || (f.gestionado ? "" : "En ruta"),
+          e.chofer || f.chofer || "", e.truck_identifier || "", fecha(e.gestionado_en || e.arrived_at), (e.recibido_por || "").trim(),
+          e.medio_pago || "", det, Number(f.items) || 0, null, Number(f.cubierto) || 0, null,
+          !f.gestionado ? "En ruta" : f.pend === 0 ? "Pagado" : f.cubierto > 0 ? "Parcial" : "Pendiente",
+          e.latitude ? Number(e.latitude) : null, e.longitude ? Number(e.longitude) : null,
+        ];
+        wsD.getCell(r, 19).value = { formula: `R${r}*${800}` };
+        wsD.getCell(r, 21).value = { formula: `S${r}-T${r}` };
+      });
+      wsD.getCell(tot, 17).value = "Total";
+      ["R", "S", "T", "U"].forEach((col) => { wsD.getCell(`${col}${tot}`).value = { formula: `SUM(${col}4:${col}${ultD})` }; });
+      wsD.getRow(tot).font = { name: "Arial", bold: true, size: 10 };
+      for (let r = 4; r <= ultD; r++) wsD.getRow(r).font = { name: "Arial", size: 10 };
+      wsD.getColumn(2).numFmt = "dd-mm-yyyy hh:mm";
+      wsD.getColumn(3).numFmt = "dd-mm-yyyy";
+      wsD.getColumn(14).numFmt = "dd-mm-yyyy hh:mm";
+      [19, 20, 21].forEach((n) => { wsD.getColumn(n).numFmt = pesos; });
+      wsD.getCell(tot + 2, 1).value = "Cubierto/Saldo: los pagos y créditos de Fine se aplican del despacho más antiguo al más nuevo.";
+      wsD.getCell(tot + 2, 1).font = { name: "Arial", italic: true, size: 9 };
+      wsD.autoFilter = { from: "A3", to: `X${ultD}` };
+
+      // Hoja Movimientos
+      const wsM = wb.addWorksheet("Movimientos");
+      titulo(wsM, "Pagos de Fine y uso como crédito en recargas Aguafine");
+      wsM.getRow(3).values = ["Fecha", "Tipo", "Guía compra Aguafine", "Monto ($)", "Registrado por", "Nota"];
+      [16, 30, 16, 12, 20, 30].forEach((w, i) => { wsM.getColumn(i + 1).width = w; });
+      cab(wsM, 3);
+      movs.forEach((m, i) => {
+        wsM.getRow(4 + i).values = [fecha(m.fecha), m.tipo === "pago" ? "Pago de Fine" : "Crédito aplicado a compra Aguafine", m.guia_proveedor || "", Number(m.monto) || 0, m.registrado_por || "", m.nota || ""];
+        wsM.getRow(4 + i).font = { name: "Arial", size: 10 };
+      });
+      wsM.getColumn(1).numFmt = "dd-mm-yyyy hh:mm";
+      wsM.getColumn(4).numFmt = pesos;
+      if (movs.length) {
+        const tM = 4 + movs.length;
+        wsM.getCell(tM, 3).value = "Total";
+        wsM.getCell(tM, 4).value = { formula: `SUM(D4:D${tM - 1})` };
+        wsM.getRow(tM).font = { name: "Arial", bold: true, size: 10 };
+      } else {
+        wsM.getCell("A4").value = "Sin movimientos registrados.";
+      }
+
+      // Hoja Compras Aguafine pendientes
+      const compras = (deudasProv || []).filter((x) => /fine/i.test(x.proveedor || "") && !x.pagado);
+      const wsC = wb.addWorksheet("Compras Aguafine pend.");
+      titulo(wsC, "Compras a Aguafine pendientes (se pueden pagar con crédito Fine)");
+      wsC.getRow(3).values = ["N° Guía", "Mes", "Chofer", "Monto compra ($)", "Abonado ($)", "Saldo ($)"];
+      [11, 10, 14, 14, 12, 12].forEach((w, i) => { wsC.getColumn(i + 1).width = w; });
+      cab(wsC, 3);
+      compras.forEach((x, i) => {
+        const r = 4 + i;
+        wsC.getRow(r).values = [x.numero_guia, x.mes, x.chofer, Number(x.monto) || 0, Number(x.abonado) || 0, null];
+        wsC.getCell(r, 6).value = { formula: `D${r}-E${r}` };
+        wsC.getRow(r).font = { name: "Arial", size: 10 };
+      });
+      [4, 5, 6].forEach((n) => { wsC.getColumn(n).numFmt = pesos; });
+      if (compras.length) {
+        const tC = 4 + compras.length;
+        wsC.getCell(tC, 3).value = "Total";
+        ["D", "E", "F"].forEach((col) => { wsC.getCell(`${col}${tC}`).value = { formula: `SUM(${col}4:${col}${tC - 1})` }; });
+        wsC.getRow(tC).font = { name: "Arial", bold: true, size: 10 };
+      } else {
+        wsC.getCell("A4").value = "No hay compras pendientes a Aguafine.";
+      }
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Cuenta_Fine_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      setErrorFine(mensajeError(e, "No se pudo generar el Excel."));
+    } finally {
+      setDescargandoFine(false);
     }
   }
   function abrirFineModal(data) {
@@ -5203,42 +5390,19 @@ export default function App() {
                   )}
 
                   {filas.length === 0 && <p className="aq-muted">Aún no hay pedidos marcados como "Pedido de Fine".</p>}
-
-                  {pendientes.length > 0 && <strong>Pendientes de pago</strong>}
-                  {pendientes.map((f) => (
-                    <div className="aq-det-line aq-prov-cab" key={f.pedido_id} style={{ alignItems: "center", gap: 8 }}>
+                  {filas.length > 0 && (
+                    <div className="aq-det-line" style={{ alignItems: "center", gap: 8 }}>
                       <span style={{ flex: 1 }}>
-                        Guía {f.numero_guia} · {f.cliente || "—"}
+                        Detalle de despachos
                         <em className="aq-det-chofer">
-                          {fFecha(f.gestionado_en)} · {f.chofer || "Sin chofer"} · {f.items} ítem(s){f.cubierto > 0 ? ` · Cubierto ${CLP(f.cubierto)} · Saldo ${CLP(f.pend)}` : ""}
+                          {filas.length} despacho(s) · {pendientes.length} pendiente(s) de pago{enRuta.length > 0 ? ` · ${enRuta.length} en ruta` : ""}
                         </em>
                       </span>
-                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        {CLP(f.valor)}
-                        <button className="aq-btn-sec" onClick={() => abrirFineModal({ tipo: "pago", titulo: `Pago de Fine hasta la guía ${f.numero_guia}`, maximo: saldoFine, montoSugerido: f.hastaAqui })}>Marcar pagado</button>
-                      </span>
+                      <button className="aq-btn-sec" disabled={descargandoFine} onClick={() => descargarExcelFine(filas)}>
+                        {descargandoFine ? "Generando…" : "⬇ Descargar Excel"}
+                      </button>
                     </div>
-                  ))}
-
-                  {enRuta.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>En ruta (aún no suman)</strong>}
-                  {enRuta.map((f) => (
-                    <div className="aq-det-line" key={f.pedido_id}>
-                      <span>Guía {f.numero_guia} · {f.cliente || "—"}<em className="aq-det-chofer">Pendiente de entrega en DispatchTrack</em></span>
-                      <span className="aq-badge warn">En ruta</span>
-                    </div>
-                  ))}
-
-                  {pagados.length > 0 && (
-                    <button className="aq-link" style={{ display: "block", marginTop: 14 }} onClick={() => setFineVerPagados((v) => !v)}>
-                      {fineVerPagados ? "▲ Ocultar" : "▼ Ver"} despachos pagados ({pagados.length})
-                    </button>
                   )}
-                  {fineVerPagados && pagados.map((f) => (
-                    <div className="aq-det-line aq-prov-fact" key={f.pedido_id}>
-                      <span>Guía {f.numero_guia} · {f.cliente || "—"}<em className="aq-det-chofer">{fFecha(f.gestionado_en)} · {f.items} ítem(s)</em></span>
-                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>{CLP(f.valor)}<span className="aq-badge ok">Pagado</span></span>
-                    </div>
-                  ))}
 
                   <div style={{ marginTop: 20 }}>
                     <strong>Usar como crédito en recargas Aguafine</strong>
