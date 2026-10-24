@@ -774,6 +774,7 @@ export default function App() {
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${hora}`;
   }
   const [observacion, setObservacion] = useState("");
+  const [esFine, setEsFine] = useState(false); // pedido despachado por cuenta de Fine
   const [creadoPor, setCreadoPor] = useState("");
   const [nroDte, setNroDte] = useState("");
 
@@ -826,6 +827,24 @@ export default function App() {
   const [pagoFoto, setPagoFoto] = useState(null);           // File del respaldo bancario
   const [subiendoPago, setSubiendoPago] = useState(false);
   const [errorPago, setErrorPago] = useState("");
+  // ── Cuenta corriente Fine (despachos por cuenta de Fine, $800 por ítem) ──
+  const [accesoFine, setAccesoFine] = useState(false);       // permiso puntual (ej. Jorge Martínez)
+  // Ven la cuenta Fine: admin y gerencial siempre; otros perfiles solo con acceso_fine.
+  const puedeFine = rol === "admin" || rol === "gerencial" || (!!rol && accesoFine);
+  const [fineDesp, setFineDesp] = useState(null);            // filas de la vista fine_despachos
+  const [fineMov, setFineMov] = useState([]);                // pagos y usos como crédito
+  const [cargandoFine, setCargandoFine] = useState(false);
+  const [errorFine, setErrorFine] = useState("");
+  const [okFine, setOkFine] = useState("");
+  const [fineModal, setFineModal] = useState(null);          // { tipo: "pago" } | { tipo: "credito", compra }
+  const [fineMonto, setFineMonto] = useState("");
+  const [fineNota, setFineNota] = useState("");
+  const [guardandoFine, setGuardandoFine] = useState(false);
+  const [fineVerPagados, setFineVerPagados] = useState(false);
+  // Lo que Fine debe hoy (también se usa en el botón "Crédito Fine" de Pagos a proveedor).
+  const saldoFineGlobal = Math.max(0,
+    (fineDesp || []).reduce((s, d) => s + (Number(d.valor) || 0), 0)
+    - (fineMov || []).reduce((s, m) => s + (Number(m.monto) || 0), 0));
   const [seleccionPago, setSeleccionPago] = useState({});   // numero_guia -> bool (marca masiva, solo admin)
   const [guardandoPagoMasivo, setGuardandoPagoMasivo] = useState(false);
   // ── Abonos parciales (cobro a cliente + deuda proveedor) ──
@@ -1390,6 +1409,62 @@ export default function App() {
       setCargandoDeudas(false);
     }
   }
+  // ── Cuenta corriente Fine ──
+  // Cargos: ítems entregados en pedidos marcados "Pedido de Fine" × valor por ítem (vista fine_despachos).
+  // Abonos: pagos de Fine en dinero y usos de esa deuda como crédito para pagar recargas a Aguafine.
+  async function cargarFine() {
+    setCargandoFine(true); setErrorFine("");
+    try {
+      const [{ data: ds, error: eD }, { data: ms, error: eM }] = await Promise.all([
+        supabase.from("fine_despachos").select("*").order("created_at", { ascending: true }),
+        supabase.from("fine_movimientos").select("*").order("fecha", { ascending: false }),
+      ]);
+      if (eD) throw eD;
+      if (eM) throw eM;
+      setFineDesp(ds || []);
+      setFineMov(ms || []);
+    } catch (e) {
+      setErrorFine(mensajeError(e, "No se pudo cargar la cuenta de Fine."));
+      setFineDesp(null);
+    } finally {
+      setCargandoFine(false);
+    }
+  }
+  function abrirFineModal(data) {
+    setFineModal(data);
+    setFineMonto(data.montoSugerido ? String(data.montoSugerido) : "");
+    setFineNota("");
+    setErrorFine(""); setOkFine("");
+  }
+  async function confirmarFine() {
+    if (!fineModal) return;
+    const monto = Math.round(Number(fineMonto) || 0);
+    if (monto <= 0) { setErrorFine("Ingresa un monto mayor a 0."); return; }
+    if (monto > fineModal.maximo) { setErrorFine(`El monto supera el máximo permitido (${CLP(fineModal.maximo)}).`); return; }
+    setGuardandoFine(true); setErrorFine("");
+    try {
+      if (fineModal.tipo === "pago") {
+        const { error } = await supabase.rpc("fine_registrar_pago", { p_monto: monto, p_nota: fineNota || null });
+        if (error) throw error;
+        setOkFine(`Pago de Fine por ${CLP(monto)} registrado.`);
+      } else {
+        const c = fineModal.compra;
+        const { error } = await supabase.rpc("fine_usar_credito", {
+          p_guia: c.numero_guia, p_proveedor: c.proveedor, p_chofer: c.chofer, p_mes: c.mes,
+          p_monto_compra: Math.round(c.monto), p_monto: monto, p_nota: fineNota || null,
+        });
+        if (error) throw error;
+        setOkFine(`Crédito Fine de ${CLP(monto)} aplicado a la compra ${c.numero_guia}.`);
+      }
+      setFineModal(null);
+      await Promise.all([cargarFine(), cargarDeudasProv()]);
+    } catch (e) {
+      setErrorFine(mensajeError(e, "No se pudo registrar el movimiento."));
+    } finally {
+      setGuardandoFine(false);
+    }
+  }
+
   // ── Facturas por emitir: pedidos cerrados subestado "Venta" con Tipo de Documento = Factura ──
   // Facturas por emitir: filtro server-side por substatus="Venta" y por fecha,
   // en vez de traer TODAS las entregas de 12 meses (causa principal de la lentitud).
@@ -1690,7 +1765,8 @@ export default function App() {
     // Cada módulo carga sus datos solo la primera vez que se visita en la sesión.
     // Volver a entrar (Facturas → Bidones → Facturas) NO vuelve a consultar la
     // base de datos: se usa el botón "↻ Actualizar" cuando quieras datos frescos.
-    if ((rol === "admin" || rol === "operador") && vista === "deudasprov" && session && deudasProv === null) cargarDeudasProv();
+    if ((rol === "admin" || rol === "operador" || puedeFine) && vista === "deudasprov" && session && deudasProv === null) cargarDeudasProv();
+    if (puedeFine && vista === "deudasprov" && session && fineDesp === null) cargarFine();
     if ((rol === "admin" || rol === "operador") && vista === "cotizaciones" && session && !cotizCargado) cargarCotizaciones();
     if ((rol === "admin" || rol === "operador") && vista === "facturas" && session && facturasPend === null) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "bidones" && session && bidonesPend === null) cargarBidonesPend();
@@ -1698,7 +1774,7 @@ export default function App() {
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && facturasPend === null) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && bidonesPend === null) cargarBidonesPend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rol, vista, session]);
+  }, [rol, vista, session, puedeFine]);
 
   // Registrar pago de una deuda con respaldo bancario (foto → Storage privado).
   async function confirmarPago() {
@@ -1875,10 +1951,10 @@ export default function App() {
     if (!credsListas) { setAuthReady(true); return; }
     let activo = true;
     async function cargarPerfil(sess, esLoginNuevo) {
-      if (!sess) { setRol(null); setPerfilNombre(""); setDistChofer(""); setDistIdentDt(""); return; }
+      if (!sess) { setRol(null); setPerfilNombre(""); setDistChofer(""); setDistIdentDt(""); setAccesoFine(false); return; }
       const { data } = await supabase
         .from("perfiles")
-        .select("rol, nombre, activo, chofer_nombre, identificador_dt")
+        .select("rol, nombre, activo, chofer_nombre, identificador_dt, acceso_fine")
         .eq("id", sess.user.id)
         .maybeSingle();
       if (!activo) return;
@@ -1887,6 +1963,7 @@ export default function App() {
         setPerfilNombre(data.nombre || sess.user.email);
         setDistChofer(data.chofer_nombre || "");
         setDistIdentDt(data.identificador_dt || "");
+        setAccesoFine(!!data.acceso_fine);
         // Solo volvemos a "inicio" en un login nuevo, no en cada revalidación
         // de token que Supabase dispara al recuperar el foco de la pestaña
         // (por ejemplo al volver del SII u otra ventana).
@@ -1933,7 +2010,7 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "bidones")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "cotizaciones" || vista === "facturas" || vista === "bidones")) {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
@@ -2922,6 +2999,7 @@ export default function App() {
       por_cobrar:     !!p.por_cobrar,
       tipo_documento: p.tipo_documento || "boleta",
       observacion:    p.observacion || "",
+      es_fine:        !!p.es_fine,
     });
     setItemsModal([]);
     setOkPed(""); setErrPed("");
@@ -2943,6 +3021,7 @@ export default function App() {
         por_cobrar:     pedidoEdit.tipo_pago === "Por Cobrar",
         tipo_documento: pedidoEdit.tipo_documento,
         observacion:    pedidoEdit.observacion || null,
+        es_fine:        !!pedidoEdit.es_fine,
         monto_total:    nuevoTotal,
       };
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedidoModal.pedido.id);
@@ -3842,6 +3921,7 @@ export default function App() {
         monto_total: montoTotal,
         origen: rol === "distribuidor" ? "distribuidor" : "formulario",
         observacion: observacion.trim() || null,
+        es_fine: rol !== "distribuidor" && esFine,
         estado_sync: "pendiente",
         creado_por: (rol === "distribuidor" ? (distChofer || creadoPor) : creadoPor).trim() || null,
         nro_jumpseller: nroDte.trim() || null,
@@ -3965,6 +4045,7 @@ export default function App() {
       setItems([]);
       setDescuentos([]);
       setObservacion("");
+      setEsFine(false);
       setNroDte("");
       setCliente(null);
       setDomicilioId("");
@@ -4228,8 +4309,8 @@ export default function App() {
             {rol !== "gerencial" && rol !== "distribuidor" && (
               <button className={vista === "cobranzas" ? "on" : ""} onClick={abrirCobranzas}>Cobranzas</button>
             )}
-            {(rol === "admin" || rol === "operador") && (
-              <button className={vista === "deudasprov" ? "on" : ""} onClick={() => setVista("deudasprov")}>Pagos proveedor</button>
+            {(rol === "admin" || rol === "operador" || puedeFine) && (
+              <button className={vista === "deudasprov" ? "on" : ""} onClick={() => setVista("deudasprov")}>{rol === "gerencial" ? "Proveedores · Fine" : "Pagos proveedor"}</button>
             )}
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "cotizaciones" ? "on" : ""} onClick={() => { setVista("cotizaciones"); setCotizEdit(null); }}>Cotizaciones</button>
@@ -5064,6 +5145,146 @@ export default function App() {
           </div>
         )}
 
+        {/* ===================== CUENTA FINE (admin, gerencial y perfiles con acceso) ===================== */}
+        {credsListas && vista === "deudasprov" && puedeFine && (() => {
+          const desp = fineDesp || [];
+          const movs = fineMov || [];
+          const totItems = desp.reduce((s, d) => s + (Number(d.items) || 0), 0);
+          const totCargo = desp.reduce((s, d) => s + (Number(d.valor) || 0), 0);
+          const totPagos = movs.filter((m) => m.tipo === "pago").reduce((s, m) => s + (Number(m.monto) || 0), 0);
+          const totCred = movs.filter((m) => m.tipo === "credito_recarga").reduce((s, m) => s + (Number(m.monto) || 0), 0);
+          const saldoFine = Math.max(0, totCargo - totPagos - totCred);
+          // Los abonos cubren los despachos del más antiguo al más nuevo.
+          let resto = totPagos + totCred;
+          let acum = 0;
+          const filas = desp.map((d) => {
+            const valor = Number(d.valor) || 0;
+            const cubierto = Math.min(valor, resto);
+            resto -= cubierto;
+            const pend = valor - cubierto;
+            acum += pend;
+            return { ...d, valor, cubierto, pend, hastaAqui: acum };
+          });
+          const enRuta = filas.filter((f) => !f.gestionado);
+          const pendientes = filas.filter((f) => f.gestionado && f.pend > 0);
+          const pagados = filas.filter((f) => f.gestionado && f.pend === 0);
+          const comprasAguafine = (deudasProv || []).filter((d) => /fine/i.test(d.proveedor || "") && !d.pagado);
+          const fFecha = (v) => v ? new Date(v).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "2-digit" }) : "—";
+          return (
+            <section className="aq-card">
+              <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+                <div>
+                  <h2 style={{ margin: 0 }}>Despachos Fine</h2>
+                  <span className="aq-muted">Entregas hechas por cuenta de Fine · {CLP(800)} por ítem entregado. Lo que Fine debe se paga en dinero o se usa como crédito para pagar recargas a Aguafine.</span>
+                </div>
+                <button className="aq-btn-sec" onClick={() => { cargarFine(); cargarDeudasProv(); }} disabled={cargandoFine}>↻ Actualizar</button>
+              </div>
+
+              {errorFine && !fineModal && <div className="aq-error" style={{ marginBottom: 8 }}>{errorFine}</div>}
+              {okFine && <div className="aq-result ok" style={{ marginBottom: 8 }}>{okFine}</div>}
+              {cargandoFine && <p className="aq-muted">Cargando cuenta Fine…</p>}
+
+              {!cargandoFine && fineDesp && (
+                <>
+                  <div className="aq-desglose" style={{ marginBottom: 12 }}>
+                    <div className="aq-desglose-row"><span>Ítems despachados</span><strong>{totItems}</strong></div>
+                    <div className="aq-desglose-row"><span>Total generado ({totItems} × {CLP(800)})</span><strong>{CLP(totCargo)}</strong></div>
+                    <div className="aq-desglose-row"><span>Pagado por Fine</span><strong className="pos">{CLP(totPagos)}</strong></div>
+                    <div className="aq-desglose-row"><span>Usado como crédito en recargas</span><strong className="pos">{CLP(totCred)}</strong></div>
+                    <div className="aq-desglose-row total"><span>Fine nos debe hoy</span><strong className={saldoFine > 0 ? "neg" : "pos"}>{CLP(saldoFine)}</strong></div>
+                  </div>
+
+                  {saldoFine > 0 && (
+                    <div className="aq-fact-acciones" style={{ marginBottom: 14 }}>
+                      <button className="aq-btn" style={{ marginTop: 0 }} onClick={() => abrirFineModal({ tipo: "pago", titulo: "Pago de Fine", maximo: saldoFine, montoSugerido: saldoFine })}>
+                        Registrar pago de Fine
+                      </button>
+                    </div>
+                  )}
+
+                  {filas.length === 0 && <p className="aq-muted">Aún no hay pedidos marcados como "Pedido de Fine".</p>}
+
+                  {pendientes.length > 0 && <strong>Pendientes de pago</strong>}
+                  {pendientes.map((f) => (
+                    <div className="aq-det-line aq-prov-cab" key={f.pedido_id} style={{ alignItems: "center", gap: 8 }}>
+                      <span style={{ flex: 1 }}>
+                        Guía {f.numero_guia} · {f.cliente || "—"}
+                        <em className="aq-det-chofer">
+                          {fFecha(f.gestionado_en)} · {f.chofer || "Sin chofer"} · {f.items} ítem(s){f.cubierto > 0 ? ` · Cubierto ${CLP(f.cubierto)} · Saldo ${CLP(f.pend)}` : ""}
+                        </em>
+                      </span>
+                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        {CLP(f.valor)}
+                        <button className="aq-btn-sec" onClick={() => abrirFineModal({ tipo: "pago", titulo: `Pago de Fine hasta la guía ${f.numero_guia}`, maximo: saldoFine, montoSugerido: f.hastaAqui })}>Marcar pagado</button>
+                      </span>
+                    </div>
+                  ))}
+
+                  {enRuta.length > 0 && <strong style={{ display: "block", marginTop: 14 }}>En ruta (aún no suman)</strong>}
+                  {enRuta.map((f) => (
+                    <div className="aq-det-line" key={f.pedido_id}>
+                      <span>Guía {f.numero_guia} · {f.cliente || "—"}<em className="aq-det-chofer">Pendiente de entrega en DispatchTrack</em></span>
+                      <span className="aq-badge warn">En ruta</span>
+                    </div>
+                  ))}
+
+                  {pagados.length > 0 && (
+                    <button className="aq-link" style={{ display: "block", marginTop: 14 }} onClick={() => setFineVerPagados((v) => !v)}>
+                      {fineVerPagados ? "▲ Ocultar" : "▼ Ver"} despachos pagados ({pagados.length})
+                    </button>
+                  )}
+                  {fineVerPagados && pagados.map((f) => (
+                    <div className="aq-det-line aq-prov-fact" key={f.pedido_id}>
+                      <span>Guía {f.numero_guia} · {f.cliente || "—"}<em className="aq-det-chofer">{fFecha(f.gestionado_en)} · {f.items} ítem(s)</em></span>
+                      <span style={{ display: "flex", gap: 10, alignItems: "center" }}>{CLP(f.valor)}<span className="aq-badge ok">Pagado</span></span>
+                    </div>
+                  ))}
+
+                  <div style={{ marginTop: 20 }}>
+                    <strong>Usar como crédito en recargas Aguafine</strong>
+                    <p className="aq-mini" style={{ margin: "4px 0 8px" }}>
+                      Paga una compra pendiente a Aguafine con lo que Fine nos debe. La compra queda abonada en Pagos a proveedor y baja la deuda de Fine.
+                    </p>
+                    {saldoFine <= 0 && <p className="aq-muted">No hay crédito disponible de Fine.</p>}
+                    {saldoFine > 0 && deudasProv === null && <p className="aq-muted">Cargando compras a Aguafine…</p>}
+                    {saldoFine > 0 && deudasProv && comprasAguafine.length === 0 && <p className="aq-muted">No hay compras pendientes a Aguafine.</p>}
+                    {saldoFine > 0 && comprasAguafine.map((d) => {
+                      const saldoCompra = d.saldo ?? d.monto;
+                      const max = Math.min(saldoCompra, saldoFine);
+                      return (
+                        <div className="aq-det-line aq-prov-cab" key={"cr" + d.numero_guia} style={{ alignItems: "center", gap: 8 }}>
+                          <span style={{ flex: 1 }}>
+                            Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{Number(d.abonado) > 0 ? ` · Abonado ${CLP(d.abonado)}` : ""} · Saldo {CLP(saldoCompra)}</em>
+                          </span>
+                          <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                            {CLP(d.monto)}
+                            <button className="aq-btn-sec" onClick={() => abrirFineModal({ tipo: "credito", titulo: `Pagar compra ${d.numero_guia} con crédito Fine`, compra: d, maximo: max, montoSugerido: max })}>Pagar con crédito</button>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {movs.length > 0 && (
+                    <div style={{ marginTop: 20 }}>
+                      <strong>Movimientos</strong>
+                      {movs.map((m) => (
+                        <div className="aq-det-line" key={m.id}>
+                          <span>
+                            {m.tipo === "pago" ? "Pago de Fine" : `Crédito aplicado a compra ${m.guia_proveedor}`}
+                            <em className="aq-det-chofer">{fFecha(m.fecha)}{m.registrado_por ? " · " + m.registrado_por : ""}{m.nota ? " · " + m.nota : ""}</em>
+                          </span>
+                          <span>{CLP(m.monto)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+          );
+        })()}
+
         {/* ===================== PAGOS A PROVEEDOR (admin/operador) ===================== */}
         {credsListas && vista === "deudasprov" && (rol === "admin" || rol === "operador") && (
           <section className="aq-card">
@@ -5197,6 +5418,9 @@ export default function App() {
                                     {CLP(d.monto)}
                                     <button className="aq-btn-sec" onClick={() => abrirAbono("proveedor", { numero_guia: d.numero_guia, mes: d.mes, proveedor: d.proveedor, chofer: d.chofer, monto: d.monto, abonado: ab, saldo, titulo: d.proveedor })}>Abonar</button>
                                     <button className="aq-btn-sec" onClick={() => { setPagoModal(d); setPagoFoto(null); setErrorPago(""); }}>Marcar pagado</button>
+                                    {puedeFine && /fine/i.test(d.proveedor || "") && saldoFineGlobal > 0 && (
+                                      <button className="aq-btn-sec" onClick={() => abrirFineModal({ tipo: "credito", titulo: `Pagar compra ${d.numero_guia} con crédito Fine`, compra: d, maximo: Math.min(saldo, saldoFineGlobal), montoSugerido: Math.min(saldo, saldoFineGlobal) })}>Crédito Fine</button>
+                                    )}
                                   </span>
                                 </div>
                               );
@@ -5928,6 +6152,51 @@ export default function App() {
                     {subiendoPago ? "Registrando…" : "Confirmar pago"}
                   </button>
                   <button className="aq-btn-sec" disabled={subiendoPago} onClick={() => setPagoModal(null)}>Cancelar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: pago de Fine o uso de crédito Fine en una compra a Aguafine */}
+        {fineModal && (
+          <div className="aq-modal-ov" onClick={() => !guardandoFine && setFineModal(null)}>
+            <div className="aq-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="aq-modal-head">
+                <div>
+                  <strong>{fineModal.tipo === "pago" ? "Registrar pago de Fine" : "Pagar con crédito Fine"}</strong>
+                  <span className="aq-muted">{fineModal.titulo}</span>
+                </div>
+                <button className="aq-link" disabled={guardandoFine} onClick={() => setFineModal(null)}>Cerrar ✕</button>
+              </div>
+              <div className="aq-modal-edit">
+                <div className="aq-desglose" style={{ marginBottom: 10 }}>
+                  {fineModal.tipo === "credito" && (
+                    <div className="aq-desglose-row"><span>Saldo de la compra</span><strong>{CLP(fineModal.compra.saldo ?? fineModal.compra.monto)}</strong></div>
+                  )}
+                  <div className="aq-desglose-row total"><span>Máximo a registrar</span><strong>{CLP(fineModal.maximo)}</strong></div>
+                </div>
+                <label className="aq-mini">Monto (CLP) · puede ser parcial</label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max={fineModal.maximo}
+                  value={fineMonto}
+                  onChange={(e) => { setFineMonto(e.target.value); setErrorFine(""); }}
+                  placeholder={`Máx. ${fineModal.maximo}`}
+                />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button className="aq-link" type="button" onClick={() => setFineMonto(String(fineModal.maximo))}>Usar el máximo</button>
+                </div>
+                <label className="aq-mini" style={{ marginTop: 10, display: "block" }}>Nota (opcional)</label>
+                <input type="text" value={fineNota} onChange={(e) => setFineNota(e.target.value)} placeholder={fineModal.tipo === "pago" ? "Ej: transferencia 24/10" : "Ej: compensación recarga"} />
+                {errorFine && <div className="aq-error" style={{ marginTop: 8 }}>{errorFine}</div>}
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <button className="aq-btn" style={{ marginTop: 0 }} disabled={guardandoFine} onClick={confirmarFine}>
+                    {guardandoFine ? "Registrando…" : "Confirmar"}
+                  </button>
+                  <button className="aq-btn-sec" disabled={guardandoFine} onClick={() => setFineModal(null)}>Cancelar</button>
                 </div>
               </div>
             </div>
@@ -7000,6 +7269,10 @@ export default function App() {
                     Observación
                     <textarea rows="2" value={observacion} onChange={(e) => setObservacion(e.target.value)} />
                   </label>
+                  <label className="aq-check-inline aq-full">
+                    <input type="checkbox" checked={esFine} onChange={(e) => setEsFine(e.target.checked)} />
+                    Pedido de Fine <span className="aq-muted">(despacho por cuenta de Fine · se cobra a Fine por ítem entregado)</span>
+                  </label>
                 </section>
                 )}
 
@@ -7078,6 +7351,10 @@ export default function App() {
                     <label className="aq-full">
                       Observación
                       <input type="text" value={pedidoEdit.observacion} onChange={(e) => setPedidoEdit({ ...pedidoEdit, observacion: e.target.value })} placeholder="Ej: cliente pagó con transferencia el 15/06" />
+                    </label>
+                    <label className="aq-check-inline aq-full">
+                      <input type="checkbox" checked={!!pedidoEdit.es_fine} onChange={(e) => setPedidoEdit({ ...pedidoEdit, es_fine: e.target.checked })} />
+                      Pedido de Fine
                     </label>
                   </div>
 
