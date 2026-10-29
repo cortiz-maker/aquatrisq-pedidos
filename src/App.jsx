@@ -946,6 +946,7 @@ export default function App() {
   const [buscarFact, setBuscarFact] = useState("");            // texto de búsqueda por cliente, RUT o guía
   const [facturaInputs, setFacturaInputs] = useState({});     // clave (guías separadas por coma) -> texto en edición
   const [facturaArchivos, setFacturaArchivos] = useState({}); // clave -> File (PDF) opcional
+  const [facturaModo, setFacturaModo] = useState({});         // claveG cliente -> "todos" | "individual"
   const [guardandoFacturaGuia, setGuardandoFacturaGuia] = useState(null);
   const [grupoAbierto, setGrupoAbierto] = useState({});       // "fact-<clienteId>" | "bid-<clienteId>" -> bool
 
@@ -5677,6 +5678,7 @@ export default function App() {
                     const guiasPend = g.pend.map((f) => f.numero_guia);
                     const guiasAccion = [...guiasPend, ...g.dif.map((f) => f.numero_guia)];
                     const clave = guiasAccion.join(",");
+                    const modoInd = facturaModo[claveG] === "individual" && guiasAccion.length > 1;
                     const cls = g.maxDias >= 5 ? "bad" : g.maxDias >= 2 ? "warn" : "ok";
                     return (
                       <div className="aq-fact-grupo" key={g.cliente_id || "sc"}>
@@ -5695,8 +5697,28 @@ export default function App() {
 
                         {abierto && (
                           <div className="aq-fact-detalle">
-                            {[...g.pend, ...g.dif].map((f) => (
-                              <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
+                            {guiasAccion.length > 1 && (
+                              <div className="aq-fact-modo">
+                                <span className="aq-muted">Emitir:</span>
+                                <button
+                                  className={"aq-btn-sec" + (modoInd ? "" : " on")}
+                                  onClick={() => setFacturaModo((prev) => ({ ...prev, [claveG]: "todos" }))}
+                                >
+                                  Una factura por todos
+                                </button>
+                                <button
+                                  className={"aq-btn-sec" + (modoInd ? " on" : "")}
+                                  onClick={() => setFacturaModo((prev) => ({ ...prev, [claveG]: "individual" }))}
+                                >
+                                  Pedido por pedido
+                                </button>
+                              </div>
+                            )}
+                            {[...g.pend, ...g.dif].map((f) => {
+                              const cg = String(f.numero_guia);
+                              return (
+                              <div key={f.numero_guia}>
+                              <div className="aq-det-line aq-prov-fact">
                                 <span>
                                   Guía {f.numero_guia}{f.factura_diferida ? " · A cierre de mes" : ""}
                                   <em className="aq-det-chofer">{f.dias} día(s){f.gestionadoEn ? ` · Gestión: ${f.gestionadoEn.toLocaleDateString("es-CL")}` : ""}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
@@ -5708,9 +5730,36 @@ export default function App() {
                                   )}
                                 </span>
                               </div>
-                            ))}
+                              {modoInd && (
+                                <div className="aq-fact-acciones aq-fact-ind">
+                                  <input
+                                    type="text"
+                                    placeholder="N° documento"
+                                    value={facturaInputs[cg] ?? ""}
+                                    onChange={(e) => setFacturaInputs((prev) => ({ ...prev, [cg]: e.target.value }))}
+                                    style={{ width: 130 }}
+                                  />
+                                  <input
+                                    type="file"
+                                    accept="application/pdf"
+                                    title="PDF de la factura de este pedido (opcional)"
+                                    onChange={(e) => setFacturaArchivos((prev) => ({ ...prev, [cg]: e.target.files?.[0] || null }))}
+                                  />
+                                  <button
+                                    className="aq-btn-sec"
+                                    disabled={guardandoFacturaGuia === cg || !(facturaInputs[cg] || "").trim()}
+                                    onClick={() => guardarDocumentoEmitidoGrupo([f.numero_guia], facturaInputs[cg], facturaArchivos[cg])}
+                                  >
+                                    {guardandoFacturaGuia === cg ? "Guardando…" : "Guardar"}
+                                  </button>
+                                </div>
+                              )}
+                              </div>
+                              );
+                            })}
 
                             <div className="aq-fact-acciones">
+                              {!modoInd && (<>
                               <input
                                 type="text"
                                 placeholder="N° documento"
@@ -5729,8 +5778,9 @@ export default function App() {
                                 disabled={guardandoFacturaGuia === clave || !(facturaInputs[clave] || "").trim()}
                                 onClick={() => guardarDocumentoEmitidoGrupo(guiasAccion, facturaInputs[clave], facturaArchivos[clave])}
                               >
-                                {guardandoFacturaGuia === clave ? "Guardando…" : "Guardar"}
+                                {guardandoFacturaGuia === clave ? "Guardando…" : (guiasAccion.length > 1 ? `Guardar para los ${guiasAccion.length} pedidos` : "Guardar")}
                               </button>
+                              </>)}
                               {guiasPend.length > 0 && (
                                 <button className="aq-link" onClick={() => marcarFacturaDiferidaGrupo(guiasPend)}>Emitir al cierre de mes</button>
                               )}
@@ -8036,6 +8086,8 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-fact-acciones { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
 .aq-fact-acciones input[type="text"] { font-size:13px; padding:7px 10px; }
 .aq-fact-acciones input[type="file"] { font-size:12px; max-width:180px; }
+.aq-fact-modo { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+.aq-fact-ind { margin:4px 0 10px 12px; padding-left:8px; border-left:2px solid #cfe3f3; }
 .aq-check-inline { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink); margin-top:10px; cursor:pointer; }
 .aq-check-inline input { width:auto; margin:0; }
 .aq-chofer-box:last-child { border-bottom:none; }
