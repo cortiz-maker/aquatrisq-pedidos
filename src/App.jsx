@@ -4205,32 +4205,14 @@ export default function App() {
       const mensaje = mensajeConfirmacion(guia, cliente?.nombre);
       const emailDestino = emailValido(cliente?.email) ? cliente.email.trim() : null;
 
-      const detalle = lineas
-        .map((l) => `${l.cantidad} x ${l.nombre}${l.codigo ? " (" + l.codigo + ")" : ""} — ${CLP((Number(l.cantidad) || 0) * (Number(l.precio_unit) || 0))}`)
-        .join("\n");
-
-      let emailEnviado = false;
-      if (emailDestino) {
-        try {
-          const re = await fetch(`${PUENTE_URL}/api/notificar`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              to: emailDestino,
-              cliente: cliente?.nombre || "",
-              guia,
-              mensaje,
-              detalle,
-              total: montoTotal,
-            }),
-          });
-          emailEnviado = re.ok;
-        } catch {
-          /* el endpoint de correo puede no estar aún en el puente */
-        }
-      }
-
-      setConfirma({ guia, mensaje, emailEnviado, emailDestino, sync });
+      // El correo de confirmación lo envía la base de datos al crear el pedido
+      // (trigger trg_aviso_pedido → función aviso-pedido). Aquí solo se informa.
+      // No se confirman al cliente: pedidos en $0, compras a proveedor ni despachos Fine.
+      const pedidoInterno = !(Number(montoTotal) > 0)
+        || lineas.some((l) => /^compra/i.test(String(l.nombre || "")))
+        || esFine || esFineMini;
+      const emailEnviado = !!emailDestino && !pedidoInterno;
+      setConfirma({ guia, mensaje, emailEnviado, emailDestino, pedidoInterno, sync });
       setVista("confirmacion");
 
       // Reset completo: volvemos al inicio en una pantalla limpia.
@@ -6446,11 +6428,11 @@ export default function App() {
             </div>
             <pre className="aq-confirm-msg">{confirma.mensaje}</pre>
             <div className={"aq-email-line " + (confirma.emailEnviado ? "ok" : confirma.emailDestino ? "warn" : "muted")}>
-              {confirma.emailEnviado
-                ? `Correo enviado a ${confirma.emailDestino}.`
-                : confirma.emailDestino
-                ? `No se pudo enviar el correo a ${confirma.emailDestino} (revisar el puente). El pedido quedó guardado igual.`
-                : "El cliente no tiene email registrado, no se envió correo."}
+              {confirma.pedidoInterno
+                ? "Pedido interno (compra, Fine o monto $0): no se envía correo al cliente."
+                : confirma.emailEnviado
+                ? `Confirmación enviada automáticamente por correo a ${confirma.emailDestino}.`
+                : "El cliente no tiene un correo válido registrado: no se envió confirmación por correo."}
             </div>
             {confirma.sync !== "enviado_dt" && (
               <p className="aq-muted">Envío a DispatchTrack pendiente; el pedido quedó guardado.</p>
