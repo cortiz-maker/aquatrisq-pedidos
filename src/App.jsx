@@ -756,6 +756,7 @@ export default function App() {
 
   // Cabecera
   const [tipoDocumento, setTipoDocumento] = useState("boleta");
+  const [documentoInmediato, setDocumentoInmediato] = useState(false); // cliente pide boleta/factura al hacer el pedido
   const [tipoPago, setTipoPago] = useState("Por Cobrar");
   const [rutFactura, setRutFactura] = useState("");
   const [marca, setMarca] = useState("TrisQ");
@@ -789,7 +790,7 @@ export default function App() {
   const [resultado, setResultado] = useState(null); // { ok, guia, sync, msg }
 
   // Navegación entre vistas: inicio (dashboard) | nuevo | mantenedor | confirmacion
-  const VISTAS_PERSISTIBLES = ["inicio", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "bidones"];
+  const VISTAS_PERSISTIBLES = ["inicio", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "boletas", "bidones"];
   const [vista, setVista] = useState(() => {
     try {
       const guardada = sessionStorage.getItem("aq_vista");
@@ -941,6 +942,9 @@ export default function App() {
 
   // ── Facturas por emitir (Venta + Tipo de Documento = Factura) ──
   const [facturasPend, setFacturasPend] = useState(null);
+  const [docsInm, setDocsInm] = useState(null);           // pedidos con documento inmediato (boleta o factura)
+  const [cargandoBol, setCargandoBol] = useState(false);
+  const [buscarBol, setBuscarBol] = useState("");
   const [cargandoFact, setCargandoFact] = useState(false);
   const [errorFact, setErrorFact] = useState("");
   const [buscarFact, setBuscarFact] = useState("");            // texto de búsqueda por cliente, RUT o guía
@@ -1665,7 +1669,7 @@ export default function App() {
       const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 8, 1).toISOString().slice(0, 10);
       const { data: peds, error: ePed } = await traerTodo(() => supabase
         .from("pedidos")
-        .select("id, numero_guia, cliente_id, domicilio_id, monto_total, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida, factura_diferida")
+        .select("id, numero_guia, cliente_id, domicilio_id, monto_total, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida, factura_diferida, tipo_documento, documento_inmediato, created_at")
         .gte("created_at", desde)
         .order("id", { ascending: true }));
       if (ePed) throw ePed;
@@ -1719,6 +1723,31 @@ export default function App() {
           factura_diferida: !!p.factura_diferida,
         });
       });
+      // Facturas pedidas al momento del pedido: entran de inmediato, sin esperar
+      // a que DispatchTrack cierre la entrega como "Venta".
+      const yaEnLista = new Set(lista.map((f) => f.numero_guia));
+      (peds || []).forEach((p) => {
+        if (!p.numero_guia || !p.documento_inmediato || p.tipo_documento !== "factura" || yaEnLista.has(p.numero_guia)) return;
+        const creado = p.created_at ? new Date(p.created_at) : null;
+        lista.push({
+          numero_guia: p.numero_guia,
+          pedidoId: p.id,
+          cliente_id: p.cliente_id,
+          domicilio_id: p.domicilio_id,
+          monto: Number(p.monto_total) || 0,
+          numeroRef: "",
+          rutFactura: p.rut_factura || "",
+          gestionadoEn: null,
+          dias: creado ? Math.floor((Date.now() - creado.getTime()) / 86400000) : 0,
+          anticipada: true,
+          creadoEn: creado,
+          numero_documento_emitido: p.numero_documento_emitido || "",
+          documento_emitido_en: p.documento_emitido_en || null,
+          documento_emitido_url: p.documento_emitido_url || null,
+          factura_no_requerida: !!p.factura_no_requerida,
+          factura_diferida: !!p.factura_diferida,
+        });
+      });
       lista.sort((a, b) => b.dias - a.dias);
       setFacturasPend(lista);
     } catch (e) {
@@ -1727,6 +1756,34 @@ export default function App() {
     } finally {
       setCargandoFact(false);
     }
+  }
+  // ── Documentos inmediatos: el cliente pidió boleta o factura al hacer el pedido ──
+  // Consulta liviana (solo pedidos marcados), se refresca sola cada 2 minutos para
+  // que la alerta aparezca sin esperar a DispatchTrack.
+  async function cargarDocsInm() {
+    setCargandoBol(true);
+    try {
+      const hoy = new Date();
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 8, 1).toISOString().slice(0, 10);
+      const { data, error } = await supabase
+        .from("pedidos")
+        .select("id, numero_guia, cliente_id, monto_total, tipo_documento, created_at, rut_factura, numero_documento_emitido, documento_emitido_en, documento_emitido_url, factura_no_requerida")
+        .eq("documento_inmediato", true)
+        .gte("created_at", desde)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      setDocsInm((data || []).filter((p) => p.numero_guia).map((p) => ({
+        ...p,
+        dias: p.created_at ? Math.floor((Date.now() - new Date(p.created_at).getTime()) / 86400000) : 0,
+      })));
+    } catch (e) {
+      setErrorFact(mensajeError(e, "No se pudieron cargar los documentos por emitir."));
+    } finally {
+      setCargandoBol(false);
+    }
+  }
+  async function recargarDocumentos() {
+    await Promise.all([facturasPend !== null || vista === "facturas" ? cargarFacturasPend() : null, cargarDocsInm()]);
   }
   // Guarda el N° de documento (y opcionalmente el PDF emitido) para todas las
   // guías indicadas de una sola vez — cubre el caso de un cliente que acumula
@@ -1751,7 +1808,7 @@ export default function App() {
       if (url) patch.documento_emitido_url = url;
       const { error } = await supabase.from("pedidos").update(patch).in("numero_guia", guias);
       if (error) throw error;
-      await cargarFacturasPend();
+      await recargarDocumentos();
       setFacturaInputs((prev) => { const n = { ...prev }; delete n[clave]; return n; });
       setFacturaArchivos((prev) => { const n = { ...prev }; delete n[clave]; return n; });
     } catch (e) {
@@ -1761,7 +1818,7 @@ export default function App() {
     }
   }
   async function deshacerDocumentoEmitido(guia) {
-    if (!window.confirm("¿Marcar esta factura nuevamente como pendiente de emitir?")) return;
+    if (!window.confirm("¿Marcar este documento nuevamente como pendiente de emitir?")) return;
     setGuardandoFacturaGuia(guia);
     try {
       const { error } = await supabase
@@ -1769,7 +1826,7 @@ export default function App() {
         .update({ numero_documento_emitido: null, documento_emitido_en: null, documento_emitido_url: null })
         .eq("numero_guia", guia);
       if (error) throw error;
-      await cargarFacturasPend();
+      await recargarDocumentos();
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo actualizar."));
     } finally {
@@ -1783,7 +1840,7 @@ export default function App() {
     try {
       const { error } = await supabase.from("pedidos").update({ factura_diferida: true }).in("numero_guia", guias);
       if (error) throw error;
-      await cargarFacturasPend();
+      await recargarDocumentos();
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo actualizar."));
     } finally {
@@ -1795,21 +1852,21 @@ export default function App() {
     try {
       const { error } = await supabase.from("pedidos").update({ factura_diferida: false }).eq("numero_guia", guia);
       if (error) throw error;
-      await cargarFacturasPend();
+      await recargarDocumentos();
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo actualizar."));
     } finally {
       setGuardandoFacturaGuia(null);
     }
   }
-  async function marcarFacturaNoRequeridaGrupo(guias) {
-    if (!window.confirm(`¿Marcar ${guias.length} pedido(s) como "no requiere factura"? Dejarán de contar como pendientes.`)) return;
+  async function marcarFacturaNoRequeridaGrupo(guias, doc = "factura") {
+    if (!window.confirm(`¿Marcar ${guias.length} pedido(s) como "no requiere ${doc}"? Dejarán de contar como pendientes.`)) return;
     const clave = guias.join(",");
     setGuardandoFacturaGuia(clave);
     try {
       const { error } = await supabase.from("pedidos").update({ factura_no_requerida: true }).in("numero_guia", guias);
       if (error) throw error;
-      await cargarFacturasPend();
+      await recargarDocumentos();
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo actualizar."));
     } finally {
@@ -1821,7 +1878,7 @@ export default function App() {
     try {
       const { error } = await supabase.from("pedidos").update({ factura_no_requerida: false }).eq("numero_guia", guia);
       if (error) throw error;
-      await cargarFacturasPend();
+      await recargarDocumentos();
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo actualizar."));
     } finally {
@@ -1959,12 +2016,24 @@ export default function App() {
     if (puedeFine && vista === "deudasprov" && session && fineDesp === null) cargarFine();
     if ((rol === "admin" || rol === "operador") && vista === "cotizaciones" && session && !cotizCargado) cargarCotizaciones();
     if ((rol === "admin" || rol === "operador") && vista === "facturas" && session && facturasPend === null) cargarFacturasPend();
+    // Si llegó una factura inmediata nueva desde la última carga, refrescamos Facturas al entrar.
+    if ((rol === "admin" || rol === "operador") && vista === "facturas" && session && facturasPend && docsInm
+        && docsInm.some((d) => d.tipo_documento === "factura" && !d.numero_documento_emitido && !d.factura_no_requerida && !facturasPend.some((f) => f.numero_guia === d.numero_guia))) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "bidones" && session && bidonesPend === null) cargarBidonesPend();
+    if ((rol === "admin" || rol === "operador") && (vista === "boletas" || vista === "inicio") && session && docsInm === null) cargarDocsInm();
     // KPIs de Inicio: precargamos ambos conteos aunque el usuario no visite las pantallas.
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && facturasPend === null) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && bidonesPend === null) cargarBidonesPend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rol, vista, session, puedeFine]);
+
+  // Alerta de documentos inmediatos: refresco liviano cada 2 minutos.
+  useEffect(() => {
+    if (!session || !(rol === "admin" || rol === "operador")) return;
+    const t = setInterval(() => { cargarDocsInm(); }, 120000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, rol]);
 
   // Registrar pago de una deuda con respaldo bancario (foto → Storage privado).
   async function confirmarPago() {
@@ -2200,11 +2269,11 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "cotizaciones" || vista === "facturas" || vista === "bidones")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones")) {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
-    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "bidones")) {
+    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -3188,6 +3257,7 @@ export default function App() {
       tipo_pago:      p.tipo_pago || "Transferencia / Medio Digital",
       por_cobrar:     !!p.por_cobrar,
       tipo_documento: p.tipo_documento || "boleta",
+      documento_inmediato: !!p.documento_inmediato,
       observacion:    p.observacion || "",
       es_fine:        !!p.es_fine && !p.fine_minimarket,
       fine_minimarket: !!p.es_fine && !!p.fine_minimarket,
@@ -3211,6 +3281,7 @@ export default function App() {
         tipo_pago:      pedidoEdit.tipo_pago,
         por_cobrar:     pedidoEdit.tipo_pago === "Por Cobrar",
         tipo_documento: pedidoEdit.tipo_documento,
+        documento_inmediato: pedidoEdit.tipo_documento !== "sin_documento" && !!pedidoEdit.documento_inmediato,
         observacion:    pedidoEdit.observacion || null,
         es_fine:        !!pedidoEdit.es_fine || !!pedidoEdit.fine_minimarket,
         fine_minimarket: !!pedidoEdit.fine_minimarket,
@@ -3736,6 +3807,7 @@ export default function App() {
     setMarca(c.marca || "TrisQ");
     setRutFactura(c.rut || "");
     setTipoDocumento(c.es_empresa ? "factura" : "boleta");
+    setDocumentoInmediato(false);
 
     const [dom, plan, dc] = await Promise.all([
       supabase.from("domicilios").select("*").eq("cliente_id", c.id).order("es_principal", { ascending: false }),
@@ -4109,6 +4181,7 @@ export default function App() {
         tipo_pago: tipoPago,
         por_cobrar: tipoPago === "Por Cobrar",
         tipo_documento: tipoDocumento,
+        documento_inmediato: tipoDocumento !== "sin_documento" && documentoInmediato,
         rut_factura: tipoDocumento === "factura" ? rutFactura.trim() : null,
         monto_total: montoTotal,
         origen: rol === "distribuidor" ? "distribuidor" : "formulario",
@@ -4216,6 +4289,9 @@ export default function App() {
       setConfirma({ guia, mensaje, emailEnviado, emailDestino, pedidoInterno, sync });
       setVista("confirmacion");
 
+      // Documento inmediato: refrescamos la alerta al tiro.
+      if (tipoDocumento !== "sin_documento" && documentoInmediato) cargarDocsInm();
+      setDocumentoInmediato(false);
       // Reset completo: volvemos al inicio en una pantalla limpia.
       setItems([]);
       setDescuentos([]);
@@ -4239,6 +4315,13 @@ export default function App() {
 
   // ── Métricas del dashboard (mes seleccionado) ──────────────
   // Mapas para resolver cliente y domicilio sin consultas nuevas.
+  // Conteos de documentos pendientes (facturas de DT + documentos inmediatos).
+  const pendDoc = (d) => !d.numero_documento_emitido && !d.factura_no_requerida;
+  const boletasPendLista = (docsInm || []).filter((d) => d.tipo_documento === "boleta" && pendDoc(d));
+  const factPendGuias = new Set([
+    ...(facturasPend || []).filter((f) => pendDoc(f) && !f.factura_diferida).map((f) => f.numero_guia),
+    ...(docsInm || []).filter((d) => d.tipo_documento === "factura" && pendDoc(d)).map((d) => d.numero_guia),
+  ]);
   const clientePorId = useMemo(() => {
     const m = {};
     clientes.forEach((c) => { m[c.id] = c; });
@@ -4494,9 +4577,13 @@ export default function App() {
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "facturas" ? "on" : ""} onClick={() => setVista("facturas")}>
                 Facturas
-                {facturasPend && facturasPend.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida).length > 0 && (
-                  <span className="aq-nav-alert">{facturasPend.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida).length}</span>
-                )}
+                {factPendGuias.size > 0 && <span className="aq-nav-alert">{factPendGuias.size}</span>}
+              </button>
+            )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "boletas" ? "on" : ""} onClick={() => setVista("boletas")}>
+                Boletas
+                {boletasPendLista.length > 0 && <span className="aq-nav-alert">{boletasPendLista.length}</span>}
               </button>
             )}
             {(rol === "admin" || rol === "operador") && (
@@ -4734,10 +4821,11 @@ export default function App() {
                 )}
 
                 {(() => {
-                  const factPend = (facturasPend || []).filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
+                  const factPendBase = (facturasPend || []).filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
+                  const factPend = [...factPendBase, ...(docsInm || []).filter((d) => d.tipo_documento === "factura" && pendDoc(d) && !factPendBase.some((f) => f.numero_guia === d.numero_guia))];
                   const bidPend = (bidonesPend || []).filter((b) => !b.bidones_retirados_en);
                   const bidTotal = bidPend.reduce((s, b) => s + b.cantidad, 0);
-                  if (!factPend.length && !bidTotal) return null;
+                  if (!factPend.length && !bidTotal && !boletasPendLista.length) return null;
                   const factCrit = factPend.filter((f) => f.dias >= 5).length;
                   return (
                     <div className="aq-gestion-alerts">
@@ -4746,6 +4834,13 @@ export default function App() {
                           <span>Facturas por emitir</span>
                           <strong>{factPend.length}</strong>
                           <em className="aq-money-sub">{factCrit > 0 ? `${factCrit} con 5+ días de atraso` : "Dentro de plazo"}</em>
+                        </button>
+                      )}
+                      {boletasPendLista.length > 0 && (
+                        <button className="aq-alert-card bad" onClick={() => setVista("boletas")}>
+                          <span>Boletas por emitir</span>
+                          <strong>{boletasPendLista.length}</strong>
+                          <em className="aq-money-sub">Pedidas por el cliente al hacer el pedido</em>
                         </button>
                       )}
                       {bidTotal > 0 && (
@@ -5721,7 +5816,8 @@ export default function App() {
                               <div className="aq-det-line aq-prov-fact">
                                 <span>
                                   Guía {f.numero_guia}{f.factura_diferida ? " · A cierre de mes" : ""}
-                                  <em className="aq-det-chofer">{f.dias} día(s){f.gestionadoEn ? ` · Gestión: ${f.gestionadoEn.toLocaleDateString("es-CL")}` : ""}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
+                                  {f.anticipada && <span className="aq-badge" style={{ marginLeft: 6 }}>Inmediata</span>}
+                                  <em className="aq-det-chofer">{f.dias} día(s){f.anticipada && f.creadoEn ? ` · Pedido: ${f.creadoEn.toLocaleDateString("es-CL")}` : ""}{f.gestionadoEn ? ` · Gestión: ${f.gestionadoEn.toLocaleDateString("es-CL")}` : ""}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
                                 </span>
                                 <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                   {CLP(f.monto)}
@@ -5851,6 +5947,108 @@ export default function App() {
         )}
 
         {/* ===================== BIDONES PENDIENTES DE RETIRO (admin/operador) ===================== */}
+        {credsListas && vista === "boletas" && (rol === "admin" || rol === "operador") && (() => {
+          const todas = (docsInm || []).filter((d) => d.tipo_documento === "boleta");
+          const q = buscarBol.trim().toLowerCase();
+          const coincide = (d) => !q
+            || (clientePorId[d.cliente_id]?.nombre || "").toLowerCase().includes(q)
+            || String(d.numero_guia).toLowerCase().includes(q)
+            || String(d.numero_documento_emitido || "").toLowerCase().includes(q);
+          const pend = todas.filter((d) => pendDoc(d) && coincide(d)).sort((a, b) => b.dias - a.dias);
+          const resueltas = todas.filter((d) => !pendDoc(d) && coincide(d))
+            .sort((a, b) => new Date(b.documento_emitido_en || b.created_at) - new Date(a.documento_emitido_en || a.created_at))
+            .slice(0, 30);
+          return (
+          <section className="aq-card">
+            <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Boletas por emitir</h2>
+                <span className="aq-muted">Pedidos donde el cliente pidió la boleta al hacer el pedido. Aparecen apenas se ingresa el pedido, sin esperar a DispatchTrack.</span>
+              </div>
+              <button className="aq-btn-sec" onClick={cargarDocsInm} disabled={cargandoBol}>↻ Actualizar</button>
+            </div>
+            <input
+              type="search"
+              placeholder="Buscar cliente, guía o N° boleta"
+              value={buscarBol}
+              onChange={(e) => setBuscarBol(e.target.value)}
+              style={{ width: "100%", marginBottom: 10 }}
+            />
+            {errorFact && <div className="aq-error" style={{ marginBottom: 8 }}>{errorFact}</div>}
+            {cargandoBol && docsInm === null && <p className="aq-muted">Cargando boletas…</p>}
+            {docsInm && !pend.length && <p className="aq-muted">{q ? "Sin resultados para la búsqueda." : "No hay boletas pendientes de emitir."}</p>}
+
+            {pend.map((d) => {
+              const cg = String(d.numero_guia);
+              const cli = clientePorId[d.cliente_id];
+              const cls = d.dias >= 2 ? "bad" : d.dias >= 1 ? "warn" : "ok";
+              return (
+                <div className="aq-fact-grupo" key={d.id}>
+                  <div className="aq-det-line aq-prov-cab">
+                    <span>
+                      {cli?.nombre || "Cliente"}
+                      <em className="aq-det-chofer">Guía {d.numero_guia} · Pedido: {new Date(d.created_at).toLocaleDateString("es-CL")}</em>
+                    </span>
+                    <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {CLP(Number(d.monto_total) || 0)}
+                      <span className={"aq-badge " + cls}>{d.dias} día(s)</span>
+                    </span>
+                  </div>
+                  <div className="aq-fact-acciones">
+                    <input
+                      type="text"
+                      placeholder="N° boleta"
+                      value={facturaInputs[cg] ?? ""}
+                      onChange={(e) => setFacturaInputs((prev) => ({ ...prev, [cg]: e.target.value }))}
+                      style={{ width: 130 }}
+                    />
+                    <input
+                      type="file"
+                      accept="application/pdf"
+                      title="PDF de la boleta (opcional)"
+                      onChange={(e) => setFacturaArchivos((prev) => ({ ...prev, [cg]: e.target.files?.[0] || null }))}
+                    />
+                    <button
+                      className="aq-btn-sec"
+                      disabled={guardandoFacturaGuia === cg || !(facturaInputs[cg] || "").trim()}
+                      onClick={() => guardarDocumentoEmitidoGrupo([d.numero_guia], facturaInputs[cg], facturaArchivos[cg])}
+                    >
+                      {guardandoFacturaGuia === cg ? "Guardando…" : "Guardar"}
+                    </button>
+                    <button className="aq-link" onClick={() => marcarFacturaNoRequeridaGrupo([d.numero_guia], "boleta")}>No requiere boleta</button>
+                  </div>
+                </div>
+              );
+            })}
+
+            {resueltas.length > 0 && (
+              <>
+                <h3 style={{ marginTop: 18 }}>Emitidas recientemente</h3>
+                {resueltas.map((d) => (
+                  <div className="aq-det-line aq-prov-fact" key={d.id}>
+                    <span>
+                      {clientePorId[d.cliente_id]?.nombre || "Cliente"}
+                      <em className="aq-det-chofer">
+                        Guía {d.numero_guia}
+                        {d.numero_documento_emitido ? ` · Boleta N° ${d.numero_documento_emitido}` : " · No requiere boleta"}
+                        {d.documento_emitido_en ? ` · ${new Date(d.documento_emitido_en).toLocaleDateString("es-CL")}` : ""}
+                      </em>
+                    </span>
+                    <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      {CLP(Number(d.monto_total) || 0)}
+                      {d.documento_emitido_url && <button className="aq-link" onClick={() => verDocumentoEmitido(d.documento_emitido_url)}>Ver PDF</button>}
+                      {d.numero_documento_emitido
+                        ? <button className="aq-link" onClick={() => deshacerDocumentoEmitido(d.numero_guia)}>Deshacer</button>
+                        : <button className="aq-link" onClick={() => deshacerFacturaNoRequerida(d.numero_guia)}>Deshacer</button>}
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
+          </section>
+          );
+        })()}
+
         {credsListas && vista === "bidones" && (rol === "admin" || rol === "operador") && (
           <section className="aq-card">
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
@@ -7421,6 +7619,12 @@ export default function App() {
                         {TIPOS_DOC.map((t) => <option key={t} value={t}>{t}</option>)}
                       </select>
                     </label>
+                    {tipoDocumento !== "sin_documento" && (
+                      <label className="aq-check-inline aq-full">
+                        <input type="checkbox" checked={documentoInmediato} onChange={(e) => setDocumentoInmediato(e.target.checked)} />
+                        Emitir {tipoDocumento} de inmediato <span className="aq-muted">(el cliente la pide con el pedido)</span>
+                      </label>
+                    )}
                     <label>
                       Forma de pago
                       <select value={tipoPago} onChange={(e) => setTipoPago(e.target.value)} disabled={consumePlan}>
@@ -7558,6 +7762,12 @@ export default function App() {
                         {TIPOS_DOC.map((t) => <option key={t} value={t}>{t}</option>)}
                       </select>
                     </label>
+                    {pedidoEdit.tipo_documento !== "sin_documento" && (
+                      <label className="aq-check-inline aq-full">
+                        <input type="checkbox" checked={!!pedidoEdit.documento_inmediato} onChange={(e) => setPedidoEdit({ ...pedidoEdit, documento_inmediato: e.target.checked })} />
+                        Emitir {pedidoEdit.tipo_documento} de inmediato
+                      </label>
+                    )}
                     <label className="aq-full">
                       Observación
                       <input type="text" value={pedidoEdit.observacion} onChange={(e) => setPedidoEdit({ ...pedidoEdit, observacion: e.target.value })} placeholder="Ej: cliente pagó con transferencia el 15/06" />
