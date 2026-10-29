@@ -774,7 +774,8 @@ export default function App() {
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${hora}`;
   }
   const [observacion, setObservacion] = useState("");
-  const [esFine, setEsFine] = useState(false); // pedido despachado por cuenta de Fine
+  const [esFine, setEsFine] = useState(false); // pedido despachado por cuenta de Fine ($800/ítem)
+  const [esFineMini, setEsFineMini] = useState(false); // pedido Fine Mini Market ($400/ítem)
   const [creadoPor, setCreadoPor] = useState("");
   const [nroDte, setNroDte] = useState("");
 
@@ -827,7 +828,7 @@ export default function App() {
   const [pagoFoto, setPagoFoto] = useState(null);           // File del respaldo bancario
   const [subiendoPago, setSubiendoPago] = useState(false);
   const [errorPago, setErrorPago] = useState("");
-  // ── Cuenta corriente Fine (despachos por cuenta de Fine, $800 por ítem) ──
+  // ── Cuenta corriente Fine (despachos por cuenta de Fine: $800 por ítem; Mini Market $400) ──
   const [accesoFine, setAccesoFine] = useState(false);       // permiso puntual (ej. Jorge Martínez)
   // Ven la cuenta Fine: admin y gerencial siempre; otros perfiles solo con acceso_fine.
   const puedeFine = rol === "admin" || rol === "gerencial" || (!!rol && accesoFine);
@@ -1503,7 +1504,7 @@ export default function App() {
       const lineas = [
         ["Despachos de Fine", { formula: `COUNTA('Despachos Fine'!A4:A${ultD})` }, null],
         ["Ítems entregados", { formula: `'Despachos Fine'!R${tot}` }, null],
-        [`Total generado (ítems × ${CLP(800)})`, { formula: `'Despachos Fine'!S${tot}` }, pesos],
+        [`Total generado (Fine ${CLP(800)} / Mini Market ${CLP(400)} por ítem)`, { formula: `'Despachos Fine'!S${tot}` }, pesos],
         ["Pagado por Fine", totPagos, pesos],
         ["Usado como crédito en recargas Aguafine", totCred, pesos],
         ["Fine nos debe hoy", { formula: "B7-B8-B9" }, pesos],
@@ -1517,12 +1518,12 @@ export default function App() {
 
       // Hoja Despachos
       const wsD = wb.addWorksheet("Despachos Fine", { views: [{ state: "frozen", xSplit: 1, ySplit: 3 }] });
-      titulo(wsD, `Despachos por cuenta de Fine · ${CLP(800)} por ítem entregado`);
+      titulo(wsD, `Despachos por cuenta de Fine · ${CLP(800)} por ítem entregado (Mini Market ${CLP(400)})`);
       const colsD = [
         ["N° Guía", 11], ["Creado", 16], ["Fecha programada", 12], ["Cód. cliente", 10], ["Cliente", 30], ["Teléfono", 13],
         ["Dirección", 32], ["Comuna", 14], ["Observación", 26], ["Creado por", 13], ["Resultado DT", 12], ["Chofer", 13],
         ["Patente", 9], ["Entregado (DT)", 16], ["Recibido por", 16], ["Medio pago (DT)", 18], ["Detalle entregado / pedido", 34],
-        ["Ítems entregados", 10], ["Valor ($)", 11], ["Cubierto ($)", 11], ["Saldo ($)", 11], ["Estado pago", 13], ["Latitud", 11], ["Longitud", 11],
+        ["Ítems entregados", 10], ["Valor ($)", 11], ["Cubierto ($)", 11], ["Saldo ($)", 11], ["Estado pago", 13], ["Latitud", 11], ["Longitud", 11], ["Tipo despacho", 16],
       ];
       wsD.getRow(3).values = colsD.map((c) => c[0]);
       colsD.forEach((c, i) => { wsD.getColumn(i + 1).width = c[1]; });
@@ -1543,8 +1544,9 @@ export default function App() {
           e.medio_pago || "", det, Number(f.items) || 0, null, Number(f.cubierto) || 0, null,
           !f.gestionado ? "En ruta" : f.pend === 0 ? "Pagado" : f.cubierto > 0 ? "Parcial" : "Pendiente",
           e.latitude ? Number(e.latitude) : null, e.longitude ? Number(e.longitude) : null,
+          f.fine_minimarket ? "Fine Mini Market" : "Fine",
         ];
-        wsD.getCell(r, 19).value = { formula: `R${r}*${800}` };
+        wsD.getCell(r, 19).value = { formula: `R${r}*${Number(f.valor_item) || (f.fine_minimarket ? 400 : 800)}` };
         wsD.getCell(r, 21).value = { formula: `S${r}-T${r}` };
       });
       wsD.getCell(tot, 17).value = "Total";
@@ -1557,7 +1559,7 @@ export default function App() {
       [19, 20, 21].forEach((n) => { wsD.getColumn(n).numFmt = pesos; });
       wsD.getCell(tot + 2, 1).value = "Cubierto/Saldo: los pagos y créditos de Fine se aplican del despacho más antiguo al más nuevo.";
       wsD.getCell(tot + 2, 1).font = { name: "Arial", italic: true, size: 9 };
-      wsD.autoFilter = { from: "A3", to: `X${ultD}` };
+      wsD.autoFilter = { from: "A3", to: `Y${ultD}` };
 
       // Hoja Movimientos
       const wsM = wb.addWorksheet("Movimientos");
@@ -3186,7 +3188,8 @@ export default function App() {
       por_cobrar:     !!p.por_cobrar,
       tipo_documento: p.tipo_documento || "boleta",
       observacion:    p.observacion || "",
-      es_fine:        !!p.es_fine,
+      es_fine:        !!p.es_fine && !p.fine_minimarket,
+      fine_minimarket: !!p.es_fine && !!p.fine_minimarket,
     });
     setItemsModal([]);
     setOkPed(""); setErrPed("");
@@ -3208,7 +3211,8 @@ export default function App() {
         por_cobrar:     pedidoEdit.tipo_pago === "Por Cobrar",
         tipo_documento: pedidoEdit.tipo_documento,
         observacion:    pedidoEdit.observacion || null,
-        es_fine:        !!pedidoEdit.es_fine,
+        es_fine:        !!pedidoEdit.es_fine || !!pedidoEdit.fine_minimarket,
+        fine_minimarket: !!pedidoEdit.fine_minimarket,
         monto_total:    nuevoTotal,
       };
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedidoModal.pedido.id);
@@ -4108,7 +4112,8 @@ export default function App() {
         monto_total: montoTotal,
         origen: rol === "distribuidor" ? "distribuidor" : "formulario",
         observacion: observacion.trim() || null,
-        es_fine: rol !== "distribuidor" && esFine,
+        es_fine: rol !== "distribuidor" && (esFine || esFineMini),
+        fine_minimarket: rol !== "distribuidor" && esFineMini,
         estado_sync: "pendiente",
         creado_por: (rol === "distribuidor" ? (distChofer || creadoPor) : creadoPor).trim() || null,
         nro_jumpseller: nroDte.trim() || null,
@@ -4233,6 +4238,7 @@ export default function App() {
       setDescuentos([]);
       setObservacion("");
       setEsFine(false);
+      setEsFineMini(false);
       setNroDte("");
       setCliente(null);
       setDomicilioId("");
@@ -5338,6 +5344,8 @@ export default function App() {
           const movs = fineMov || [];
           const totItems = desp.reduce((s, d) => s + (Number(d.items) || 0), 0);
           const totCargo = desp.reduce((s, d) => s + (Number(d.valor) || 0), 0);
+          const itemsNormal = desp.filter((d) => !d.fine_minimarket).reduce((s, d) => s + (Number(d.items) || 0), 0);
+          const itemsMini = desp.filter((d) => d.fine_minimarket).reduce((s, d) => s + (Number(d.items) || 0), 0);
           const totPagos = movs.filter((m) => m.tipo === "pago").reduce((s, m) => s + (Number(m.monto) || 0), 0);
           const totCred = movs.filter((m) => m.tipo === "credito_recarga").reduce((s, m) => s + (Number(m.monto) || 0), 0);
           const saldoFine = Math.max(0, totCargo - totPagos - totCred);
@@ -5362,7 +5370,7 @@ export default function App() {
               <div className="aq-modal-head" style={{ marginBottom: 8 }}>
                 <div>
                   <h2 style={{ margin: 0 }}>Despachos Fine</h2>
-                  <span className="aq-muted">Entregas hechas por cuenta de Fine · {CLP(800)} por ítem entregado. Lo que Fine debe se paga en dinero o se usa como crédito para pagar recargas a Aguafine.</span>
+                  <span className="aq-muted">Entregas hechas por cuenta de Fine · {CLP(800)} por ítem entregado ({CLP(400)} en pedidos Mini Market). Lo que Fine debe se paga en dinero o se usa como crédito para pagar recargas a Aguafine.</span>
                 </div>
                 <button className="aq-btn-sec" onClick={() => { cargarFine(); cargarDeudasProv(); }} disabled={cargandoFine}>↻ Actualizar</button>
               </div>
@@ -5375,7 +5383,9 @@ export default function App() {
                 <>
                   <div className="aq-desglose" style={{ marginBottom: 12 }}>
                     <div className="aq-desglose-row"><span>Ítems despachados</span><strong>{totItems}</strong></div>
-                    <div className="aq-desglose-row"><span>Total generado ({totItems} × {CLP(800)})</span><strong>{CLP(totCargo)}</strong></div>
+                    <div className="aq-desglose-row"><span>Fine ({itemsNormal} × {CLP(800)})</span><strong>{CLP(itemsNormal * 800)}</strong></div>
+                    {itemsMini > 0 && <div className="aq-desglose-row"><span>Fine Mini Market ({itemsMini} × {CLP(400)})</span><strong>{CLP(itemsMini * 400)}</strong></div>}
+                    <div className="aq-desglose-row"><span>Total generado</span><strong>{CLP(totCargo)}</strong></div>
                     <div className="aq-desglose-row"><span>Pagado por Fine</span><strong className="pos">{CLP(totPagos)}</strong></div>
                     <div className="aq-desglose-row"><span>Usado como crédito en recargas</span><strong className="pos">{CLP(totCred)}</strong></div>
                     <div className="aq-desglose-row total"><span>Fine nos debe hoy</span><strong className={saldoFine > 0 ? "neg" : "pos"}>{CLP(saldoFine)}</strong></div>
@@ -7434,8 +7444,12 @@ export default function App() {
                     <textarea rows="2" value={observacion} onChange={(e) => setObservacion(e.target.value)} />
                   </label>
                   <label className="aq-check-inline aq-full">
-                    <input type="checkbox" checked={esFine} onChange={(e) => setEsFine(e.target.checked)} />
-                    Pedido de Fine <span className="aq-muted">(despacho por cuenta de Fine · se cobra a Fine por ítem entregado)</span>
+                    <input type="checkbox" checked={esFine} onChange={(e) => { setEsFine(e.target.checked); if (e.target.checked) setEsFineMini(false); }} />
+                    Pedido de Fine <span className="aq-muted">(despacho por cuenta de Fine · {CLP(800)} por ítem entregado)</span>
+                  </label>
+                  <label className="aq-check-inline aq-full">
+                    <input type="checkbox" checked={esFineMini} onChange={(e) => { setEsFineMini(e.target.checked); if (e.target.checked) setEsFine(false); }} />
+                    Pedido Fine Mini Market <span className="aq-muted">(despacho por cuenta de Fine · {CLP(400)} por ítem entregado)</span>
                   </label>
                 </section>
                 )}
@@ -7517,8 +7531,12 @@ export default function App() {
                       <input type="text" value={pedidoEdit.observacion} onChange={(e) => setPedidoEdit({ ...pedidoEdit, observacion: e.target.value })} placeholder="Ej: cliente pagó con transferencia el 15/06" />
                     </label>
                     <label className="aq-check-inline aq-full">
-                      <input type="checkbox" checked={!!pedidoEdit.es_fine} onChange={(e) => setPedidoEdit({ ...pedidoEdit, es_fine: e.target.checked })} />
-                      Pedido de Fine
+                      <input type="checkbox" checked={!!pedidoEdit.es_fine} onChange={(e) => setPedidoEdit({ ...pedidoEdit, es_fine: e.target.checked, fine_minimarket: e.target.checked ? false : pedidoEdit.fine_minimarket })} />
+                      Pedido de Fine <span className="aq-muted">({CLP(800)} por ítem)</span>
+                    </label>
+                    <label className="aq-check-inline aq-full">
+                      <input type="checkbox" checked={!!pedidoEdit.fine_minimarket} onChange={(e) => setPedidoEdit({ ...pedidoEdit, fine_minimarket: e.target.checked, es_fine: e.target.checked ? false : pedidoEdit.es_fine })} />
+                      Pedido Fine Mini Market <span className="aq-muted">({CLP(400)} por ítem)</span>
                     </label>
                   </div>
 
