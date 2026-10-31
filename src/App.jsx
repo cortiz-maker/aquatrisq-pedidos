@@ -5713,7 +5713,7 @@ export default function App() {
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
               <div>
                 <h2 style={{ margin: 0 }}>Facturas por emitir</h2>
-                <span className="aq-muted">Agrupado por cliente · pedidos cerrados subestado Venta con Tipo de Documento = Factura (últimos 6 meses).</span>
+                <span className="aq-muted">Agrupado por RUT de facturación (junta los locales de una misma empresa) · pedidos cerrados subestado Venta con Tipo de Documento = Factura (últimos 6 meses).</span>
               </div>
               <button className="aq-btn-sec" onClick={cargarFacturasPend} disabled={cargandoFact}>↻ Actualizar</button>
             </div>
@@ -5733,14 +5733,22 @@ export default function App() {
             )}
 
             {!cargandoFact && facturasPend && facturasPend.length > 0 && (() => {
+              // Agrupamos por RUT de facturación: una misma empresa con varios locales
+              // (clientes distintos en la base) queda en un solo grupo y puede recibir
+              // una sola factura. Sin RUT, se agrupa por cliente como antes.
+              const normRut = (r) => String(r || "").replace(/[^0-9kK]/g, "").toUpperCase();
               const grupos = {};
               facturasPend.forEach((f) => {
-                const cid = f.cliente_id || "sin-cliente";
-                if (!grupos[cid]) grupos[cid] = { cliente_id: f.cliente_id, guias: [] };
-                grupos[cid].guias.push(f);
+                const rutN = normRut(f.rutFactura || clientePorId[f.cliente_id]?.rut);
+                const key = rutN ? "rut-" + rutN : "cli-" + (f.cliente_id || "sc");
+                if (!grupos[key]) grupos[key] = { key, cliente_id: f.cliente_id, guias: [] };
+                grupos[key].guias.push(f);
               });
+              const nombreCorto = (c) => String(c?.nombre || "Cliente").split("/")[0].trim();
               const lista = Object.values(grupos).map((g) => {
                 const cli = clientePorId[g.cliente_id];
+                const clienteIds = [...new Set(g.guias.map((f) => f.cliente_id))];
+                const varios = clienteIds.length > 1;
                 const pend = g.guias.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
                 const dif = g.guias.filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && f.factura_diferida);
                 const noReq = g.guias.filter((f) => f.factura_no_requerida);
@@ -5748,13 +5756,16 @@ export default function App() {
                 const maxDias = pend.length ? Math.max(...pend.map((f) => f.dias)) : 0;
                 const totalPend = [...pend, ...dif].reduce((s, f) => s + f.monto, 0);
                 const rut = g.guias.find((f) => f.rutFactura)?.rutFactura || cli?.rut || "";
-                return { cliente_id: g.cliente_id, nombre: cli?.nombre || "Cliente", rut, pend, dif, noReq, emit, maxDias, totalPend };
+                const nombre = varios ? nombreCorto(cli) : (cli?.nombre || "Cliente");
+                const nombresTodos = clienteIds.map((id) => clientePorId[id]?.nombre || "").join(" ");
+                return { key: g.key, cliente_id: g.cliente_id, nombre, nombresTodos, varios, nLocales: clienteIds.length, rut, pend, dif, noReq, emit, maxDias, totalPend };
               });
               lista.sort((a, b) => (b.pend.length > 0) - (a.pend.length > 0) || b.maxDias - a.maxDias);
 
               const q = buscarFact.trim().toLowerCase();
               const listaFiltrada = !q ? lista : lista.filter((g) =>
                 g.nombre.toLowerCase().includes(q) ||
+                g.nombresTodos.toLowerCase().includes(q) ||
                 (g.rut || "").toLowerCase().includes(q) ||
                 [...g.pend, ...g.dif, ...g.noReq, ...g.emit].some((f) => String(f.numero_guia).toLowerCase().includes(q))
               );
@@ -5768,7 +5779,7 @@ export default function App() {
               return (
                 <>
                   {conPendientes.map((g) => {
-                    const claveG = "fact-" + (g.cliente_id || "sc");
+                    const claveG = "fact-" + g.key;
                     const abierto = !!grupoAbierto[claveG];
                     const guiasPend = g.pend.map((f) => f.numero_guia);
                     const guiasAccion = [...guiasPend, ...g.dif.map((f) => f.numero_guia)];
@@ -5776,12 +5787,12 @@ export default function App() {
                     const modoInd = facturaModo[claveG] === "individual" && guiasAccion.length > 1;
                     const cls = g.maxDias >= 5 ? "bad" : g.maxDias >= 2 ? "warn" : "ok";
                     return (
-                      <div className="aq-fact-grupo" key={g.cliente_id || "sc"}>
+                      <div className="aq-fact-grupo" key={g.key}>
                         <div className="aq-det-line aq-prov-cab aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
                           <span>
                             {g.nombre}{g.rut ? " · " + g.rut : ""}
                             <em className="aq-det-chofer">
-                              {g.pend.length + g.dif.length} pedido(s){g.dif.length ? ` · ${g.dif.length} a cierre de mes` : ""} · {CLP(g.totalPend)}
+                              {g.varios ? `${g.nLocales} locales · ` : ""}{g.pend.length + g.dif.length} pedido(s){g.dif.length ? ` · ${g.dif.length} a cierre de mes` : ""} · {CLP(g.totalPend)}
                             </em>
                           </span>
                           <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -5816,6 +5827,7 @@ export default function App() {
                               <div className="aq-det-line aq-prov-fact">
                                 <span>
                                   Guía {f.numero_guia}{f.factura_diferida ? " · A cierre de mes" : ""}
+                                  {g.varios && <em className="aq-det-chofer">{clientePorId[f.cliente_id]?.nombre || "Cliente"}</em>}
                                   {f.anticipada && <span className="aq-badge" style={{ marginLeft: 6 }}>Inmediata</span>}
                                   <em className="aq-det-chofer">{f.dias} día(s){f.anticipada && f.creadoEn ? ` · Pedido: ${f.creadoEn.toLocaleDateString("es-CL")}` : ""}{f.gestionadoEn ? ` · Gestión: ${f.gestionadoEn.toLocaleDateString("es-CL")}` : ""}{f.numeroRef ? ` · Ref. chofer: ${f.numeroRef}` : ""}</em>
                                 </span>
@@ -5899,15 +5911,15 @@ export default function App() {
                       </div>
 
                       {grupoAbierto["fact-emitidas-section"] && soloResueltos.map((g) => {
-                        const claveG = "fact-r-" + (g.cliente_id || "sc");
+                        const claveG = "fact-r-" + g.key;
                         const abierto = !!grupoAbierto[claveG];
                         return (
-                          <div className="aq-fact-grupo" key={"r" + (g.cliente_id || "sc")}>
+                          <div className="aq-fact-grupo" key={"r" + g.key}>
                             <div className="aq-det-line aq-prov-fact aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
                               <span>
                                 {g.nombre}{g.rut ? " · " + g.rut : ""}
                                 <em className="aq-det-chofer">
-                                  {g.emit.length > 0 ? `${g.emit.length} emitida(s)` : ""}{g.noReq.length > 0 ? `${g.emit.length ? " · " : ""}${g.noReq.length} sin factura requerida` : ""}
+                                  {g.varios ? `${g.nLocales} locales · ` : ""}{g.emit.length > 0 ? `${g.emit.length} emitida(s)` : ""}{g.noReq.length > 0 ? `${g.emit.length ? " · " : ""}${g.noReq.length} sin factura requerida` : ""}
                                 </em>
                               </span>
                               <span className="aq-muted">{abierto ? "▲" : "▼"}</span>
@@ -5918,7 +5930,7 @@ export default function App() {
                                   <div className="aq-det-line aq-prov-fact" key={f.numero_guia}>
                                     <span>
                                       Guía {f.numero_guia}
-                                      <em className="aq-det-chofer">Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}</em>
+                                      <em className="aq-det-chofer">{g.varios ? (clientePorId[f.cliente_id]?.nombre || "Cliente") + " · " : ""}Doc. {f.numero_documento_emitido}{f.documento_emitido_en ? " · " + new Date(f.documento_emitido_en).toLocaleDateString("es-CL") : ""}</em>
                                     </span>
                                     <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                       {CLP(f.monto)}
