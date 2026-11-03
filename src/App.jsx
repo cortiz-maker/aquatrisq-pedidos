@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient.js";
 import { PUENTE_URL, SUPABASE_URL } from "./config.js";
+import Crm from "./Crm.jsx";
 
 // ── Valores de enums (tal cual están en Postgres) ────────────
 const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar", "Pedido Pagado"];
@@ -790,7 +791,7 @@ export default function App() {
   const [resultado, setResultado] = useState(null); // { ok, guia, sync, msg }
 
   // Navegación entre vistas: inicio (dashboard) | nuevo | mantenedor | confirmacion
-  const VISTAS_PERSISTIBLES = ["inicio", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "boletas", "bidones"];
+  const VISTAS_PERSISTIBLES = ["inicio", "crm", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "boletas", "bidones"];
   const [vista, setVista] = useState(() => {
     try {
       const guardada = sessionStorage.getItem("aq_vista");
@@ -2273,7 +2274,7 @@ export default function App() {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
-    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones")) {
+    if (rol === "distribuidor" && (vista === "crm" || vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -4559,6 +4560,9 @@ export default function App() {
         {credsListas && rol && (
           <nav className="aq-nav">
             <button className={vista === "inicio" ? "on" : ""} onClick={() => setVista("inicio")}>Inicio</button>
+            {(rol === "admin" || rol === "operador" || rol === "gerencial") && (
+              <button className={vista === "crm" ? "on" : ""} onClick={() => setVista("crm")}>CRM</button>
+            )}
             {rol !== "gerencial" && (
               <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
             )}
@@ -6721,6 +6725,19 @@ export default function App() {
         )}
 
         {/* ===================== MANTENEDORES (Bloque 4) ===================== */}
+        {/* ===================== CRM · FICHA DE CLIENTE ===================== */}
+        {credsListas && !cargando && !errorCarga && vista === "crm" && rol !== "distribuidor" && (
+          <Crm
+            supabase={supabase}
+            rol={rol}
+            perfilNombre={perfilNombre}
+            clientes={clientes}
+            todosDomicilios={todosDomicilios}
+            onNuevoPedido={(c) => { setVista("nuevo"); elegirCliente(c); }}
+            onEditarCliente={(c) => { setVista("mantenedor"); setMantTab("clientes"); editarCliente(c); }}
+          />
+        )}
+
         {credsListas && !cargando && !errorCarga && vista === "mantenedor" && (
           <>
             {/* Sub-pestañas */}
