@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient.js";
 import { PUENTE_URL, SUPABASE_URL } from "./config.js";
-import Crm from "./Crm.jsx";
+import Crm, { segmento } from "./Crm.jsx";
 
 // ── Valores de enums (tal cual están en Postgres) ────────────
 const TIPOS_PAGO = ["Efectivo", "Transferencia / Medio Digital", "Tarjeta", "Plan PrePago", "Por Cobrar", "Pedido Pagado"];
@@ -929,6 +929,9 @@ export default function App() {
   const [guardandoCli, setGuardandoCli] = useState(false);
   const [okCli, setOkCli] = useState("");
   const [semaforoCli, setSemaforoCli] = useState(null);
+  // Resumen CRM para el Inicio: contactos agendados (hoy o vencidos) y clientes en riesgo.
+  const [crmHome, setCrmHome] = useState(null);
+  const [crmFiltro, setCrmFiltro] = useState("todos");
   const [domEdit, setDomEdit] = useState(null);    // domicilio en edición { id?, cliente_id, identificador_dt, etiqueta, direccion, comuna, es_principal, _nuevo }
   const [guardandoDom, setGuardandoDom] = useState(false);
   const [okDom, setOkDom] = useState("");
@@ -2278,6 +2281,27 @@ export default function App() {
       setVista("inicio");
     }
   }, [rol, vista]);
+
+  useEffect(() => {
+    if (vista !== "inicio" || !session || !(rol === "admin" || rol === "operador")) return;
+    let vivo = true;
+    (async () => {
+      try {
+        const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+        const [{ data: seg }, { data: met }] = await Promise.all([
+          supabase.from("cliente_seguimiento").select("proximo_contacto").eq("completado", false).lte("proximo_contacto", hoy),
+          supabase.from("crm_clientes").select("pedidos,dias_desde_ultimo,frecuencia_dias"),
+        ]);
+        if (!vivo) return;
+        setCrmHome({
+          contactos: (seg || []).length,
+          vencidos: (seg || []).filter((x) => x.proximo_contacto < hoy).length,
+          riesgo: (met || []).filter((m) => segmento(m).key === "riesgo").length,
+        });
+      } catch { /* el Inicio funciona igual sin el resumen CRM */ }
+    })();
+    return () => { vivo = false; };
+  }, [vista, session, rol]);
 
   // Recordar la vista actual para que un refresco de página (F5) te deje donde
   // estabas, en vez de volver siempre a Inicio. No persistimos vistas
@@ -4561,7 +4585,7 @@ export default function App() {
           <nav className="aq-nav">
             <button className={vista === "inicio" ? "on" : ""} onClick={() => setVista("inicio")}>Inicio</button>
             {(rol === "admin" || rol === "operador" || rol === "gerencial") && (
-              <button className={vista === "crm" ? "on" : ""} onClick={() => setVista("crm")}>CRM</button>
+              <button className={vista === "crm" ? "on" : ""} onClick={() => { setCrmFiltro("todos"); setVista("crm"); }}>CRM</button>
             )}
             {rol !== "gerencial" && (
               <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
@@ -4633,18 +4657,36 @@ export default function App() {
         {/* ===================== INICIO / DASHBOARD ===================== */}
         {credsListas && vista === "inicio" && rol !== "gerencial" && rol !== "distribuidor" && (
           <>
-            <section className="aq-card aq-period">
-              <button className="aq-per-nav" onClick={() => cambiarPeriodo(-1)} aria-label="Mes anterior">‹</button>
-              <div className="aq-per-label">
-                <span>Período</span>
-                <strong>{periodoLabel}</strong>
+            <section className="aq-home-hero">
+              <div className="aq-home-top">
+                <div>
+                  <div className="aq-home-eyebrow">Panel de operación</div>
+                  <h2 className="aq-home-title">Hola{perfilNombre ? ", " + perfilNombre.split(" ")[0] : ""}</h2>
+                </div>
+                <div className="aq-home-period">
+                  <button className="aq-home-per-nav" onClick={() => cambiarPeriodo(-1)} aria-label="Mes anterior">‹</button>
+                  <div className="aq-home-per-label"><span>Período</span><strong>{periodoLabel}</strong></div>
+                  <button className="aq-home-per-nav" onClick={() => cambiarPeriodo(1)} aria-label="Mes siguiente" disabled={periodo >= hoyPeriodo()}>›</button>
+                </div>
               </div>
-              <button
-                className="aq-per-nav"
-                onClick={() => cambiarPeriodo(1)}
-                aria-label="Mes siguiente"
-                disabled={periodo >= hoyPeriodo()}
-              >›</button>
+              {!cargandoDash && (
+                <div className="aq-home-kpis">
+                  {[
+                    ["todos", "Ingresados", dash.ingresados, "pedidos del mes"],
+                    ["enviados", "Enviados a DT", dash.enviados, "en DispatchTrack"],
+                    ["pendientes", "Pendientes", dash.pendientes, "sin enviar a DT"],
+                    ["hoy", "Para hoy", dash.paraHoy, "entregas programadas"],
+                  ].map(([k, label, val, nota]) => (
+                    <button
+                      key={k}
+                      className={"aq-home-kpi" + (filtroEstado === k ? " on" : "") + (k === "pendientes" && dash.pendientes > 0 ? " warn" : "")}
+                      onClick={() => setFiltroEstado(k === "hoy" && filtroEstado === "hoy" ? "todos" : k)}
+                    >
+                      <span>{label}</span><strong>{val}</strong><em>{nota}</em>
+                    </button>
+                  ))}
+                </div>
+              )}
             </section>
 
             {errorDash && <div className="aq-card aq-error">No se pudo cargar el período: {errorDash}</div>}
@@ -4652,71 +4694,69 @@ export default function App() {
               <div className="aq-card">Cargando período…</div>
             ) : (
               <>
-                <div className="aq-kpis">
-                  <button
-                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "todos" ? " on" : "")}
-                    onClick={() => setFiltroEstado("todos")}
-                  >
-                    <span>Ingresados</span><strong>{dash.ingresados}</strong>
-                  </button>
-                  <button
-                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "enviados" ? " on" : "")}
-                    onClick={() => setFiltroEstado("enviados")}
-                  >
-                    <span>Enviados a DT</span><strong>{dash.enviados}</strong>
-                  </button>
-                  <button
-                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "pendientes" ? " on" : "")}
-                    onClick={() => setFiltroEstado("pendientes")}
-                  >
-                    <span>Pendientes</span><strong>{dash.pendientes}</strong>
-                  </button>
-                  <button
-                    className={"aq-kpi aq-kpi-btn" + (filtroEstado === "hoy" ? " on" : "")}
-                    onClick={() => setFiltroEstado(filtroEstado === "hoy" ? "todos" : "hoy")}
-                  >
-                    <span>Para hoy</span><strong>{dash.paraHoy}</strong>
-                  </button>
-                </div>
+                {(() => {
+                  const factPendBase = (facturasPend || []).filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
+                  const factPend = [...factPendBase, ...(docsInm || []).filter((d) => d.tipo_documento === "factura" && pendDoc(d) && !factPendBase.some((f) => f.numero_guia === d.numero_guia))];
+                  const bidPend = (bidonesPend || []).filter((b) => !b.bidones_retirados_en);
+                  const bidTotal = bidPend.reduce((s, b) => s + b.cantidad, 0);
+                  const factCrit = factPend.filter((f) => f.dias >= 5).length;
+                  const tareas = [];
+                  if (factPend.length) tareas.push({ k: "fact", tono: factCrit ? "bad" : "warn", label: "Facturas por emitir", n: factPend.length, nota: factCrit > 0 ? `${factCrit} con 5+ días de atraso` : "Dentro de plazo", go: () => setVista("facturas") });
+                  if (boletasPendLista.length) tareas.push({ k: "bol", tono: "bad", label: "Boletas por emitir", n: boletasPendLista.length, nota: "Pedidas por el cliente al hacer el pedido", go: () => setVista("boletas") });
+                  if (bidTotal) tareas.push({ k: "bid", tono: "warn", label: "Bidones por retirar", n: bidTotal, nota: `En poder de ${new Set(bidPend.map((b) => b.cliente_id)).size} cliente(s)`, go: () => setVista("bidones") });
+                  if (crmHome && crmHome.contactos > 0) tareas.push({ k: "crm-c", tono: crmHome.vencidos ? "bad" : "info", label: "Clientes por contactar", n: crmHome.contactos, nota: crmHome.vencidos ? `${crmHome.vencidos} contacto(s) vencido(s)` : "Agendados para hoy", go: () => { try { sessionStorage.removeItem("aq_crm_ficha"); } catch { /* noop */ } setCrmFiltro("todos"); setVista("crm"); } });
+                  if (crmHome && crmHome.riesgo > 0) tareas.push({ k: "crm-r", tono: "info", label: "Clientes en riesgo", n: crmHome.riesgo, nota: "Atrasados vs. su frecuencia de compra", go: () => { try { sessionStorage.removeItem("aq_crm_ficha"); } catch { /* noop */ } setCrmFiltro("riesgo"); setVista("crm"); } });
+                  return (
+                    <section className="aq-card">
+                      <div className="aq-row-head">
+                        <h2>Para gestionar</h2>
+                        {tareas.length === 0 && <span className="aq-muted" style={{ margin: 0 }}>Todo al día ✓</span>}
+                      </div>
+                      {tareas.length > 0 && (
+                        <div className="aq-home-tareas">
+                          {tareas.map((t) => (
+                            <button key={t.k} className={"aq-home-tarea " + t.tono} onClick={t.go}>
+                              <strong>{t.n}</strong>
+                              <span><b>{t.label}</b><em>{t.nota}</em></span>
+                              <i aria-hidden="true">›</i>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  );
+                })()}
 
-                <div className="aq-money">
-                  <div className="aq-money-card navy">
-                    <span>Monto del mes</span>
-                    <strong>{CLP(dash.monto)}</strong>
+                <section className="aq-card">
+                  <h2>Dinero del mes</h2>
+                  <div className="aq-home-money">
+                    <div className="aq-home-mcard main">
+                      <span>Monto del mes</span>
+                      <strong>{CLP(dash.monto)}</strong>
+                      <em>{dash.ingresados} pedido(s) en {periodoLabel}</em>
+                    </div>
+                    <button className="aq-home-mcard amber" onClick={abrirCobranzas} title="Abrir gestión de cobro">
+                      <span>Deuda por cobrar</span>
+                      <strong>{CLP(dash.deudaMonto)}</strong>
+                      <em>{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados}</em>
+                    </button>
+                    <button className={"aq-home-mcard " + ((cajaMes?.efectivo?.aRendir || 0) < 0 ? "red" : "blue")} onClick={() => setPopEfectivo(true)} title="Ver desglose">
+                      <span>Efectivo libre / a rendir</span>
+                      <strong>{CLP(cajaMes?.efectivo?.aRendir || 0)}</strong>
+                      <em>Recaudado {CLP(cajaMes?.efectivo?.recaudacion || 0)} − compras − prov. pagado − rendición</em>
+                    </button>
+                    <button className="aq-home-mcard amber" onClick={() => setPopProveedor(true)} title="Ver desglose por proveedor">
+                      <span>Pendiente pago proveedor</span>
+                      <strong>{CLP(cajaMes?.provPendiente?.total || 0)}</strong>
+                      <em>{cajaMes?.provPendiente?.count || 0} factura(s) por pagar</em>
+                    </button>
+                    <button className="aq-home-mcard green" onClick={() => setPopCosto(true)} title="Ver detalle por día">
+                      <span>Costo recargas</span>
+                      <strong>{CLP(cajaMes?.costo?.total || 0)}</strong>
+                      <em>Compra proveedor (DT): 20L $600 · 12/10L $300</em>
+                    </button>
                   </div>
-                  <button className="aq-money-card deuda" onClick={abrirCobranzas} title="Abrir gestión de cobro">
-                    <span>Deuda por cobrar del mes</span>
-                    <strong>{CLP(dash.deudaMonto)}</strong>
-                    <em className="aq-money-sub">{dash.deudaCount} pedido(s) · cobrados {dash.cobrados} · recuperados {dash.recuperados} · histórico en Cobranzas</em>
-                  </button>
-                  <button
-                    className={"aq-money-card proveedor" + ((cajaMes?.efectivo?.aRendir || 0) < 0 ? " neg" : "")}
-                    onClick={() => setPopEfectivo(true)}
-                    title="Ver desglose"
-                  >
-                    <span>Efectivo libre / a Rendir 🔎</span>
-                    <strong>{CLP(cajaMes?.efectivo?.aRendir || 0)}</strong>
-                    <em className="aq-money-sub">Recaudado {CLP(cajaMes?.efectivo?.recaudacion || 0)} − compras − prov. pagado − rendición</em>
-                  </button>
-                  <button
-                    className="aq-money-card rendicion"
-                    onClick={() => setPopProveedor(true)}
-                    title="Ver desglose por proveedor"
-                  >
-                    <span>Pendiente pago proveedor 🔎</span>
-                    <strong>{CLP(cajaMes?.provPendiente?.total || 0)}</strong>
-                    <em className="aq-money-sub">{cajaMes?.provPendiente?.count || 0} factura(s) por pagar</em>
-                  </button>
-                  <button
-                    className="aq-money-card efectivo"
-                    onClick={() => setPopCosto(true)}
-                    title="Ver detalle por día"
-                  >
-                    <span>Costo recargas del mes 🔎</span>
-                    <strong>{CLP(cajaMes?.costo?.total || 0)}</strong>
-                    <em className="aq-money-sub">Unidades Compra Proveedor (DT): 20L $600 · 12/10L $300</em>
-                  </button>
-                </div>
+                </section>
 
                 {errorEvo && <div className="aq-card aq-error">No se pudo cargar la evolución: {errorEvo}</div>}
                 {cargandoEvo && !evolucion ? (
@@ -4823,40 +4863,6 @@ export default function App() {
                     })()}
                   </>
                 )}
-
-                {(() => {
-                  const factPendBase = (facturasPend || []).filter((f) => !f.numero_documento_emitido && !f.factura_no_requerida && !f.factura_diferida);
-                  const factPend = [...factPendBase, ...(docsInm || []).filter((d) => d.tipo_documento === "factura" && pendDoc(d) && !factPendBase.some((f) => f.numero_guia === d.numero_guia))];
-                  const bidPend = (bidonesPend || []).filter((b) => !b.bidones_retirados_en);
-                  const bidTotal = bidPend.reduce((s, b) => s + b.cantidad, 0);
-                  if (!factPend.length && !bidTotal && !boletasPendLista.length) return null;
-                  const factCrit = factPend.filter((f) => f.dias >= 5).length;
-                  return (
-                    <div className="aq-gestion-alerts">
-                      {factPend.length > 0 && (
-                        <button className="aq-alert-card bad" onClick={() => setVista("facturas")}>
-                          <span>Facturas por emitir</span>
-                          <strong>{factPend.length}</strong>
-                          <em className="aq-money-sub">{factCrit > 0 ? `${factCrit} con 5+ días de atraso` : "Dentro de plazo"}</em>
-                        </button>
-                      )}
-                      {boletasPendLista.length > 0 && (
-                        <button className="aq-alert-card bad" onClick={() => setVista("boletas")}>
-                          <span>Boletas por emitir</span>
-                          <strong>{boletasPendLista.length}</strong>
-                          <em className="aq-money-sub">Pedidas por el cliente al hacer el pedido</em>
-                        </button>
-                      )}
-                      {bidTotal > 0 && (
-                        <button className="aq-alert-card warn" onClick={() => setVista("bidones")}>
-                          <span>Bidones pendientes de retiro</span>
-                          <strong>{bidTotal}</strong>
-                          <em className="aq-money-sub">En poder de {new Set(bidPend.map((b) => b.cliente_id)).size} cliente(s)</em>
-                        </button>
-                      )}
-                    </div>
-                  );
-                })()}
 
                 {rol === "operador" && (
                 <section className="aq-card">
@@ -6728,6 +6734,8 @@ export default function App() {
         {/* ===================== CRM · FICHA DE CLIENTE ===================== */}
         {credsListas && !cargando && !errorCarga && vista === "crm" && rol !== "distribuidor" && (
           <Crm
+            key={crmFiltro}
+            filtroInicial={crmFiltro}
             supabase={supabase}
             rol={rol}
             perfilNombre={perfilNombre}
@@ -8421,6 +8429,73 @@ html, body { overflow-x:hidden; }
   .aq-row-head, .aq-modal-head { flex-wrap:wrap; }
   .aq-cob-resumen { grid-template-columns:repeat(2,1fr); }
   input, select, textarea { font-size:16px; } /* evita el zoom automático de iOS al enfocar */
+}
+
+/* ===== Rediseño 2026-11: encabezado, navegación e Inicio ===== */
+.aq-header { background:linear-gradient(90deg,#16275c 0%,var(--navy) 55%,#24408a 100%); box-shadow:0 2px 12px rgba(27,47,110,.18); position:sticky; top:0; z-index:20; }
+.aq-nav { max-width:none; gap:4px; }
+.aq-nav button { background:transparent; color:#cfdaf0; padding:7px 11px; border-radius:8px; }
+.aq-nav button:hover { background:rgba(255,255,255,.12); color:#fff; }
+.aq-nav button.on { background:#fff; color:var(--navy); box-shadow:0 1px 4px rgba(0,0,0,.12); }
+.aq-home-hero { background:linear-gradient(135deg,var(--navy) 0%,#2b4a9a 100%); color:#fff; border-radius:18px; padding:20px 22px; display:flex; flex-direction:column; gap:16px; }
+.aq-home-top { display:flex; justify-content:space-between; align-items:center; gap:14px; flex-wrap:wrap; }
+.aq-home-eyebrow { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:#b9c9ec; font-weight:700; }
+.aq-home-title { font-family:'Fraunces',serif; font-weight:600; font-size:26px; margin:2px 0 0; color:#fff; text-transform:none; letter-spacing:0; }
+.aq-home-period { display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:6px; }
+.aq-home-per-nav { width:34px; height:34px; border-radius:9px; border:none; background:rgba(255,255,255,.14); color:#fff; font-size:20px; line-height:1; cursor:pointer; }
+.aq-home-per-nav:hover:not(:disabled) { background:rgba(255,255,255,.26); }
+.aq-home-per-nav:disabled { opacity:.35; cursor:not-allowed; }
+.aq-home-per-label { text-align:center; min-width:130px; }
+.aq-home-per-label span { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:#b9c9ec; }
+.aq-home-per-label strong { font-size:16px; display:block; }
+.aq-home-per-label strong::first-letter { text-transform:uppercase; }
+.aq-evol-svg { max-width:780px; max-height:300px; margin:0 auto; }
+.aq-home-kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+.aq-home-kpi { text-align:left; font:inherit; color:#fff; background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.16); border-radius:13px; padding:12px 14px; cursor:pointer; display:flex; flex-direction:column; gap:2px; transition:background .12s; }
+.aq-home-kpi:hover { background:rgba(255,255,255,.18); }
+.aq-home-kpi span { font-size:11px; text-transform:uppercase; letter-spacing:.07em; font-weight:700; opacity:.8; }
+.aq-home-kpi strong { font-size:28px; font-weight:700; line-height:1.1; font-variant-numeric:tabular-nums; }
+.aq-home-kpi em { font-style:normal; font-size:12px; opacity:.7; }
+.aq-home-kpi.warn strong { color:#ffd27a; }
+.aq-home-kpi.on { background:#fff; color:var(--navy); border-color:#fff; }
+.aq-home-kpi.on.warn strong { color:#a05a00; }
+.aq-home-tareas { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:8px; }
+.aq-home-tarea { display:flex; align-items:center; gap:12px; text-align:left; font:inherit; background:#fff; border:1px solid var(--line); border-left:4px solid var(--blue); border-radius:11px; padding:10px 12px; cursor:pointer; color:var(--ink); }
+.aq-home-tarea:hover { background:#f7f9fd; }
+.aq-home-tarea strong { font-size:24px; font-weight:700; min-width:40px; text-align:center; color:var(--navy); font-variant-numeric:tabular-nums; }
+.aq-home-tarea span { display:flex; flex-direction:column; flex:1; min-width:0; }
+.aq-home-tarea b { font-size:14px; }
+.aq-home-tarea em { font-style:normal; font-size:12px; color:var(--muted); }
+.aq-home-tarea i { font-style:normal; font-size:20px; color:var(--muted); }
+.aq-home-tarea.bad { border-left-color:var(--bad); }
+.aq-home-tarea.bad strong { color:var(--bad); }
+.aq-home-tarea.warn { border-left-color:#e09a1b; }
+.aq-home-tarea.warn strong { color:#a05a00; }
+.aq-home-money { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
+.aq-home-mcard { text-align:left; font:inherit; background:#fff; border:1px solid var(--line); border-top:4px solid var(--blue); border-radius:12px; padding:12px 14px; display:flex; flex-direction:column; gap:3px; color:var(--ink); }
+button.aq-home-mcard { cursor:pointer; }
+button.aq-home-mcard:hover { background:#f7f9fd; }
+.aq-home-mcard span { font-size:11px; text-transform:uppercase; letter-spacing:.07em; font-weight:700; color:var(--muted); }
+.aq-home-mcard strong { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--navy); }
+.aq-home-mcard em { font-style:normal; font-size:11px; color:var(--muted); line-height:1.35; }
+.aq-home-mcard.main { background:var(--navy); border-color:var(--navy); }
+.aq-home-mcard.main span, .aq-home-mcard.main em { color:#c5d2e8; }
+.aq-home-mcard.main strong { color:#fff; font-size:26px; }
+.aq-home-mcard.amber { border-top-color:#e09a1b; }
+.aq-home-mcard.amber strong { color:#a05a00; }
+.aq-home-mcard.green { border-top-color:#1f9a5c; }
+.aq-home-mcard.green strong { color:#1a7a45; }
+.aq-home-mcard.red { border-top-color:var(--bad); }
+.aq-home-mcard.red strong { color:var(--bad); }
+@media (max-width:760px) {
+  .aq-home-kpis { grid-template-columns:repeat(2,1fr); }
+  .aq-home-money { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .aq-home-mcard.main { grid-column:1 / -1; }
+  .aq-home-mcard strong { font-size:18px; }
+  .aq-home-mcard { padding:10px 12px; }
+  .aq-home-title { font-size:22px; }
+  .aq-home-period { width:100%; justify-content:space-between; }
+  .aq-header { position:static; }
 }
 `;
 

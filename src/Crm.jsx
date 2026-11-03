@@ -69,12 +69,12 @@ const ORDENES = [
   { key: "riesgo", label: "Más días sin comprar" },
 ];
 
-export default function Crm({ supabase, rol, perfilNombre, clientes, todosDomicilios, onNuevoPedido, onEditarCliente }) {
+export default function Crm({ filtroInicial = "todos", supabase, rol, perfilNombre, clientes, todosDomicilios, onNuevoPedido, onEditarCliente }) {
   const [metricas, setMetricas] = useState(null);
   const [pendientes, setPendientes] = useState([]);
   const [error, setError] = useState("");
   const [buscar, setBuscar] = useState("");
-  const [filtro, setFiltro] = useState("todos");
+  const [filtro, setFiltro] = useState(filtroInicial);
   const [orden, setOrden] = useState("total");
   const [limite, setLimite] = useState(40);
   const [fichaId, setFichaId] = useState(() => {
