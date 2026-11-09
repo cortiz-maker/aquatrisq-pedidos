@@ -980,7 +980,9 @@ export default function App() {
   const [okCob, setOkCob] = useState("");
   const [filtroCob, setFiltroCob] = useState("pendientes"); // pendientes | gestionados | todos
   const [buscarCob, setBuscarCob] = useState("");           // texto de búsqueda en gestión de cobro
-  const [guardandoCob, setGuardandoCob] = useState("");  // id del pedido en proceso
+  const [guardandoCob, setGuardandoCob] = useState("");
+  const [incobPanel, setIncobPanel] = useState(null);    // cliente_id con el panel "Declarar incobrable" abierto
+  const [incobMotivo, setIncobMotivo] = useState("");  // id del pedido en proceso
   const [avisoDeuda, setAvisoDeuda] = useState(null);    // { guias:[], monto } alerta en Nuevo pedido
   const [cobExpand, setCobExpand] = useState({});        // cliente_id -> grupo expandido en Cobranzas
   const [cobroRespaldoPedido, setCobroRespaldoPedido] = useState(null); // id de pedido con panel de respaldo abierto
@@ -1302,13 +1304,13 @@ export default function App() {
           const lotes = [];
           for (let i = 0; i < guias.length; i += 200) lotes.push(guias.slice(i, i + 200));
           const resultados = await Promise.all(
-            lotes.map((lote) => supabase.from("pedidos").select("numero_guia, monto_total, cobro_cobrado").in("numero_guia", lote))
+            lotes.map((lote) => supabase.from("pedidos").select("numero_guia, monto_total, cobro_cobrado, cobro_incobrable").in("numero_guia", lote))
           );
           resultados.forEach(({ data }) => { pp = pp.concat(data || []); });
         }
         const ahora = Date.now();
         pp.forEach((p) => {
-          if (p.cobro_cobrado) return;
+          if (p.cobro_cobrado || p.cobro_incobrable) return;
           const e = entByGuide[p.numero_guia];
           const g = e?.gestionado_en ? new Date(e.gestionado_en).getTime() : null;
           if (g && (ahora - g) > 30 * 86400000) { venc30.monto += Number(p.monto_total) || 0; venc30.count += 1; }
@@ -2360,6 +2362,10 @@ export default function App() {
 
   async function guardarBloqueo() {
     if (!clienteMant) return;
+    if (clienteMant.lista_negra && !bloqMant) {
+      setOkMant("Error: el cliente está en la lista negra (incobrable). Para desbloquearlo primero hay que sacarlo de la lista negra en Cobranzas.");
+      return;
+    }
     setGuardandoMant(true);
     setOkMant("");
     try {
@@ -3158,6 +3164,10 @@ export default function App() {
   // Semáforo de pago: solo si el cliente alguna vez entró en no-pago (Pago = No).
   // Color por la antigüedad de su deuda actual sin cobrar (días desde la entrega).
   async function calcSemaforo(c) {
+    if (c && c.lista_negra) {
+      setSemaforoCli({ cls: "rojo", dias: 0, label: "Lista negra · deuda incobrable, no se atiende", moroso: true, hayDeuda: true });
+      return;
+    }
     try {
       const { data: pp } = await supabase
         .from("pedidos")
@@ -3486,6 +3496,71 @@ export default function App() {
     }
   }
 
+  // Decisión gerencial: declara incobrable toda la deuda pendiente del cliente,
+  // lo saca de la estadística de cobranza y lo deja en la lista negra (bloqueado, no se atiende).
+  async function declararIncobrable(clienteId, orders, motivoTxt) {
+    const cli = clientePorId[clienteId];
+    if (!cli) { setErrorCob("No se encontró el cliente."); return; }
+    const pend = orders.filter((o) => !o.pedido.cobro_cobrado && !o.pedido.cobro_incobrable);
+    setGuardandoCob("incob-" + clienteId);
+    setErrorCob(""); setOkCob("");
+    try {
+      const ahora = new Date().toISOString();
+      const motivo = (motivoTxt || "").trim() || "Deuda declarada incobrable por decisión gerencial";
+      const ppatch = { cobro_incobrable: true, incobrable_at: ahora, incobrable_por: perfilNombre || null, incobrable_motivo: motivo };
+      const ids = pend.map((o) => o.pedido.id);
+      if (ids.length) {
+        const { error } = await supabase.from("pedidos").update(ppatch).in("id", ids);
+        if (error) throw error;
+      }
+      const guias = pend.map((o) => o.pedido.numero_guia).filter(Boolean);
+      const cpatch = {
+        lista_negra: true, lista_negra_at: ahora, lista_negra_por: perfilNombre || null,
+        lista_negra_motivo: motivo + (guias.length ? " (guía(s) " + guias.join(", ") + ")" : ""),
+        bloqueado: true, bloqueado_at: cli.bloqueado_at || ahora, bloqueado_por: perfilNombre || cli.bloqueado_por || null,
+        motivo_bloqueo: "Lista negra · deuda incobrable" + (guias.length ? " (guía(s) " + guias.join(", ") + ")" : ""),
+      };
+      const { error: eCli } = await supabase.from("clientes").update(cpatch).eq("id", clienteId);
+      if (eCli) throw eCli;
+      ids.forEach((id) => actualizarCobranzaLocal(id, ppatch));
+      setClientes((prev) => prev.map((c) => (c.id === clienteId ? { ...c, ...cpatch } : c)));
+      if (cliente && cliente.id === clienteId) setCliente((prev) => ({ ...prev, ...cpatch }));
+      setIncobPanel(null); setIncobMotivo("");
+      setOkCob(`⛔ ${cli.nombre} quedó en la lista negra. ${ids.length} pedido(s) declarado(s) incobrable(s) y fuera de la estadística de cobranza.`);
+    } catch (e) {
+      setErrorCob(mensajeError(e, "No se pudo declarar incobrable."));
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+  // Revierte la lista negra (por si se declaró por error). El cliente queda bloqueado
+  // hasta que se desbloquee a mano en el mantenedor.
+  async function quitarListaNegra(clienteId, orders) {
+    const cli = clientePorId[clienteId];
+    if (!cli) return;
+    setGuardandoCob("incob-" + clienteId);
+    setErrorCob(""); setOkCob("");
+    try {
+      const ppatch = { cobro_incobrable: false, incobrable_at: null, incobrable_por: null, incobrable_motivo: null };
+      const ids = orders.filter((o) => o.pedido.cobro_incobrable).map((o) => o.pedido.id);
+      if (ids.length) {
+        const { error } = await supabase.from("pedidos").update(ppatch).in("id", ids);
+        if (error) throw error;
+      }
+      const cpatch = { lista_negra: false, lista_negra_at: null, lista_negra_por: null, lista_negra_motivo: null };
+      const { error: eCli } = await supabase.from("clientes").update(cpatch).eq("id", clienteId);
+      if (eCli) throw eCli;
+      ids.forEach((id) => actualizarCobranzaLocal(id, ppatch));
+      setClientes((prev) => prev.map((c) => (c.id === clienteId ? { ...c, ...cpatch } : c)));
+      if (cliente && cliente.id === clienteId) setCliente((prev) => ({ ...prev, ...cpatch }));
+      setOkCob(`${cli.nombre} salió de la lista negra; su deuda vuelve a Pendientes. Sigue bloqueado hasta que se desbloquee en el mantenedor.`);
+    } catch (e) {
+      setErrorCob(mensajeError(e, "No se pudo quitar de la lista negra."));
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+
   // Registra un intento de cobro. Más de 3 intentos sin cobrar → bloquea al cliente.
   async function registrarIntento(pedido) {
     setGuardandoCob(pedido.id);
@@ -3588,6 +3663,7 @@ export default function App() {
     if (!nombre) { setOkCli("Error: el nombre es obligatorio."); return; }
     const email = (cliEdit.email || "").trim();
     if (email && !emailValido(email)) { setOkCli("Error: el email no tiene un formato válido."); return; }
+    if (cliEdit.lista_negra && !cliEdit.bloqueado) { setOkCli("Error: el cliente está en la lista negra (incobrable). Para desbloquearlo primero hay que sacarlo de la lista negra en Cobranzas."); return; }
     setGuardandoCli(true);
     setOkCli("");
     try {
@@ -3835,9 +3911,9 @@ export default function App() {
     try {
       const { data: pp } = await supabase
         .from("pedidos")
-        .select("numero_guia, monto_total, cobro_cobrado")
+        .select("numero_guia, monto_total, cobro_cobrado, cobro_incobrable")
         .eq("cliente_id", c.id);
-      const guias = (pp || []).filter((x) => x.numero_guia && !x.cobro_cobrado).map((x) => x.numero_guia);
+      const guias = (pp || []).filter((x) => x.numero_guia && !x.cobro_cobrado && !x.cobro_incobrable).map((x) => x.numero_guia);
       if (guias.length) {
         const { data: ents } = await supabase.from("dt_entregas").select("*").in("guide", guias);
         const deudaGuias = (ents || []).filter((e) => esPagoNo(e)).map((e) => e.guide);
@@ -4066,6 +4142,8 @@ export default function App() {
   // ── Validación ─────────────────────────────────────────────
   function validar() {
     if (!cliente) return "Elige un cliente.";
+    if (cliente.lista_negra)
+      return "Cliente en lista negra (deuda declarada incobrable). No se atiende.";
     if (cliente.bloqueado)
       return "Cliente bloqueado" + (cliente.motivo_bloqueo ? ": " + cliente.motivo_bloqueo : "") + ". No se puede generar el pedido.";
     if (!domicilioId) return "Elige un domicilio de entrega.";
@@ -4350,7 +4428,7 @@ export default function App() {
     // Cobro: deuda real = entrega con Pago=No y aún no cobrado (en el período)
     const conDeuda = ped.filter((p) => {
       const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
-      return e && esPagoNo(e) && !p.cobro_cobrado;
+      return e && esPagoNo(e) && !p.cobro_cobrado && !p.cobro_incobrable;
     });
     return {
       ingresados: ped.length,
@@ -4387,6 +4465,7 @@ export default function App() {
     const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
     if (!e || !esPagoNo(e)) return null;
     if (p.cobro_cobrado) return { label: "Cobrado", cls: "ok" };
+    if (p.cobro_incobrable) return { label: "Incobrable", cls: "bad" };
     return { label: "Deuda", cls: "bad" };
   };
 
@@ -4395,7 +4474,9 @@ export default function App() {
   const montoCob = (o) => Number(o.pedido.monto_total) || montoEntrega(o.entrega) || 0;
   const abonadoCob = (o) => Number(o.pedido.cobro_abonado) || 0;
   // Saldo pendiente real de un pedido: monto − abonado (0 si ya está cobrado).
-  const saldoCob = (o) => (o.pedido.cobro_cobrado ? 0 : Math.max(0, montoCob(o) - abonadoCob(o)));
+  const saldoCob = (o) => (o.pedido.cobro_cobrado || o.pedido.cobro_incobrable ? 0 : Math.max(0, montoCob(o) - abonadoCob(o)));
+  // Saldo que quedó sin cobrar al declararse incobrable (castigado).
+  const saldoIncob = (o) => (o.pedido.cobro_incobrable && !o.pedido.cobro_cobrado ? Math.max(0, montoCob(o) - abonadoCob(o)) : 0);
   // Dinero efectivamente recaudado de un pedido (cobro total o suma de abonos).
   const recaudadoCob = (o) => (o.pedido.cobro_cobrado ? montoCob(o) : abonadoCob(o));
   const diasDesdeEntrega = (o) => {
@@ -4404,7 +4485,12 @@ export default function App() {
   };
 
   const cobResumen = useMemo(() => {
-    const items = cobranzas || [];
+    // Los pedidos declarados incobrables salen de la estadística de cobranza;
+    // se informan aparte como castigados (lista negra).
+    const todos = cobranzas || [];
+    const items = todos.filter((o) => !o.pedido.cobro_incobrable);
+    let incob = 0, incobCount = 0;
+    todos.forEach((o) => { if (o.pedido.cobro_incobrable) { incob += saldoIncob(o); incobCount++; } });
     let generada = 0, cobrado = 0, pend = 0, pendCount = 0, venc = 0, vencCount = 0, recCount = 0;
     items.forEach((o) => {
       generada += montoCob(o);
@@ -4417,12 +4503,14 @@ export default function App() {
       }
       if (o.pedido.cobro_recuperado) recCount++;
     });
-    return { generada, cobrado, pend, pendCount, venc, vencCount, recCount, total: items.length };
+    return { generada, cobrado, pend, pendCount, venc, vencCount, recCount, total: items.length, incob, incobCount };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cobranzas]);
 
   const cobGrupos = useMemo(() => {
     const items = (cobranzas || []).filter((x) => {
+      if (filtroCob === "listanegra") return !!x.pedido.cobro_incobrable;
+      if (x.pedido.cobro_incobrable) return false;
       if (filtroCob === "pendientes") return !x.pedido.cobro_cobrado;
       if (filtroCob === "gestionados") return !!x.pedido.cobro_cobrado;
       if (filtroCob === "vencidos") return !x.pedido.cobro_cobrado;
@@ -4434,11 +4522,17 @@ export default function App() {
       if (!map[cid]) map[cid] = { clienteId: cid, orders: [] };
       map[cid].orders.push(o);
     });
+    // En Lista negra aparecen todos los clientes marcados, tengan o no pedidos en Cobranzas.
+    if (filtroCob === "listanegra") {
+      Object.values(clientePorId || {}).forEach((c) => {
+        if (c && c.lista_negra && !map[c.id]) map[c.id] = { clienteId: c.id, orders: [] };
+      });
+    }
     const q = buscarCob.trim().toLowerCase();
     return Object.values(map)
       .map((g) => {
-        const deuda = g.orders.reduce((s, o) => s + saldoCob(o), 0);
-        const diasMax = g.orders.filter((o) => saldoCob(o) > 0).reduce((mx, o) => { const d = diasDesdeEntrega(o); return d != null && d > mx ? d : mx; }, 0);
+        const deuda = g.orders.reduce((s, o) => s + (filtroCob === "listanegra" ? saldoIncob(o) : saldoCob(o)), 0);
+        const diasMax = g.orders.filter((o) => (filtroCob === "listanegra" ? saldoIncob(o) : saldoCob(o)) > 0).reduce((mx, o) => { const d = diasDesdeEntrega(o); return d != null && d > mx ? d : mx; }, 0);
         return { ...g, deuda, count: g.orders.length, diasMax };
       })
       .filter((g) => {
@@ -6758,12 +6852,12 @@ export default function App() {
                               onClick={() => { editarCliente(r.cliente); setBuscarMant(""); }}
                               className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                             >
-                              <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
+                              <strong>{r.cliente.lista_negra ? "⛔ " : r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}{r.cliente.activo === false ? " · inactivo" : ""}</strong>
                               <span>
                                 {r.dom?.identificador_dt
                                   ? r.dom.identificador_dt + " · " + (r.dom.etiqueta || r.dom.direccion || "")
                                   : (r.cliente.codigo_cliente || r.cliente.rut || "")}
-                                {r.cliente.bloqueado ? " · bloqueado" : ""}
+                                {r.cliente.lista_negra ? " · lista negra" : r.cliente.bloqueado ? " · bloqueado" : ""}
                               </span>
                             </li>
                           ))}
@@ -7199,7 +7293,11 @@ export default function App() {
               <button className={filtroCob === "gestionados" ? "on" : ""} onClick={() => setFiltroCob("gestionados")}>Cobrados</button>
               <button className={filtroCob === "vencidos" ? "on" : ""} onClick={() => setFiltroCob("vencidos")}>+30 días</button>
               <button className={filtroCob === "todos" ? "on" : ""} onClick={() => setFiltroCob("todos")}>Todos</button>
+              <button className={filtroCob === "listanegra" ? "on" : ""} onClick={() => setFiltroCob("listanegra")}>⛔ Lista negra</button>
             </div>
+            {filtroCob === "listanegra" && (
+              <p className="aq-muted" style={{ marginTop: 6 }}>Clientes con deuda declarada incobrable por decisión gerencial. Quedan bloqueados, no se atienden y su deuda no cuenta en la estadística de cobranza.</p>
+            )}
 
             <input
               className="aq-buscar-ped"
@@ -7236,33 +7334,67 @@ export default function App() {
                 </div>
               </div>
             )}
+            {!cargandoCob && cobResumen.incobCount > 0 && (
+              <p className="aq-muted" style={{ marginTop: 6 }}>
+                Fuera de la estadística: {CLP(cobResumen.incob)} declarados incobrables ({cobResumen.incobCount} pedido(s)) · <button className="aq-link" onClick={() => setFiltroCob("listanegra")}>ver lista negra</button>
+              </p>
+            )}
 
             {cargandoCob ? (
               <p className="aq-muted" style={{ marginTop: 12 }}>Cargando…</p>
-            ) : (cobranzas || []).length === 0 ? (
+            ) : (cobranzas || []).length === 0 && filtroCob !== "listanegra" ? (
               <p className="aq-muted" style={{ marginTop: 12 }}>No hay entregas con Pago = No.</p>
             ) : cobGrupos.length === 0 ? (
-              <p className="aq-muted" style={{ marginTop: 12 }}>Nada en este filtro.</p>
+              <p className="aq-muted" style={{ marginTop: 12 }}>{filtroCob === "listanegra" ? "No hay clientes en la lista negra." : "Nada en este filtro."}</p>
             ) : (
               <div className="aq-tabla" style={{ marginTop: 6 }}>
                 {cobGrupos.map((g) => {
                   const cli = clientePorId[g.clienteId];
                   const abierto = !!cobExpand[g.clienteId];
-                  const vencido = g.diasMax > 30;
+                  const vencido = g.diasMax > 30 && filtroCob !== "listanegra";
+                  const enLN = !!cli?.lista_negra;
+                  const procIncob = guardandoCob === "incob-" + g.clienteId;
                   return (
                     <div className="aq-cob-grupo" key={g.clienteId}>
                       <div className="aq-cob-grow" onClick={() => setCobExpand((prev) => ({ ...prev, [g.clienteId]: !prev[g.clienteId] }))}>
                         <div className="aq-cob-main">
-                          <strong>{cli?.nombre || "Cliente"}{cli?.bloqueado ? " · ⚠ bloqueado" : ""}</strong>
+                          <strong>{cli?.nombre || "Cliente"}{enLN ? " · ⛔ lista negra" : cli?.bloqueado ? " · ⚠ bloqueado" : ""}</strong>
                           <span className="aq-tr-sub">
-                            {g.count} pedido(s) impago(s)
-                            {g.diasMax > 0 ? " · más antiguo " + g.diasMax + " días" : ""}
+                            {filtroCob === "listanegra"
+                              ? (g.count + " pedido(s) incobrable(s)" + (cli?.lista_negra_at ? " · desde " + new Date(cli.lista_negra_at).toLocaleDateString("es-CL") : "") + (cli?.lista_negra_por ? " · " + cli.lista_negra_por : ""))
+                              : (g.count + " pedido(s) impago(s)")}
+                            {g.diasMax > 0 && filtroCob !== "listanegra" ? " · más antiguo " + g.diasMax + " días" : ""}
                           </span>
                         </div>
                         <span className="aq-tr-monto">{CLP(g.deuda)}</span>
                         {vencido && <span className="aq-badge bad">+30 días</span>}
                         <span className="aq-hist-caret">{abierto ? "▾" : "▸"}</span>
                       </div>
+                      {abierto && rol === "admin" && (
+                        <div className="aq-fact-acciones" style={{ margin: "6px 0 8px" }}>
+                          {enLN ? (
+                            <>
+                              {cli?.lista_negra_motivo && <span className="aq-muted">Motivo: {cli.lista_negra_motivo}</span>}
+                              <button className="aq-link" disabled={procIncob} onClick={() => quitarListaNegra(g.clienteId, g.orders)}>
+                                {procIncob ? "Guardando…" : "Sacar de la lista negra"}
+                              </button>
+                            </>
+                          ) : g.deuda > 0 && incobPanel !== g.clienteId ? (
+                            <button className="aq-btn-sec aq-btn-incob" onClick={() => { setIncobPanel(g.clienteId); setIncobMotivo(""); }}>
+                              ⛔ Declarar incobrable · lista negra
+                            </button>
+                          ) : incobPanel === g.clienteId ? (
+                            <>
+                              <span className="aq-muted">Se declarará incobrable la deuda pendiente ({CLP(g.deuda)}), el cliente queda bloqueado en la lista negra y no se atiende.</span>
+                              <input placeholder="Motivo (opcional)" value={incobMotivo} onChange={(e) => setIncobMotivo(e.target.value)} />
+                              <button className="aq-btn-sec aq-btn-incob" disabled={procIncob} onClick={() => declararIncobrable(g.clienteId, g.orders, incobMotivo)}>
+                                {procIncob ? "Guardando…" : "Confirmar incobrable"}
+                              </button>
+                              <button className="aq-link" onClick={() => setIncobPanel(null)}>Cancelar</button>
+                            </>
+                          ) : null}
+                        </div>
+                      )}
                       {abierto && (
                         <div className="aq-cob-orders">
                           {g.orders.map(({ pedido: p, entrega: e }) => {
@@ -7292,7 +7424,9 @@ export default function App() {
                                   </div>
                                 </div>
                                 <div className="aq-cob-badges">
-                                  <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
+                                  {p.cobro_incobrable
+                                    ? <span className="aq-badge bad">Incobrable{p.incobrable_at ? " · " + new Date(p.incobrable_at).toLocaleDateString("es-CL") : ""}</span>
+                                    : <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>}
                                   {abonadoP > 0 && !p.cobro_cobrado && <span className="aq-badge">Saldo {CLP(saldoP)}</span>}
                                   <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
                                   <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
@@ -7311,6 +7445,11 @@ export default function App() {
                                     <button className="aq-link" onClick={() => { setCobroRespaldoPedido(null); setCobroRespaldoArchivo(null); }}>Cancelar</button>
                                   </div>
                                 )}
+                                {p.cobro_incobrable ? (
+                                <div className="aq-cob-acts">
+                                  <button className="aq-link" onClick={() => abrirPedidoModal(p)}>Ver detalle</button>
+                                </div>
+                                ) : (
                                 <div className="aq-cob-acts">
                                   <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
                                     {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
@@ -7329,6 +7468,7 @@ export default function App() {
                                   </button>
                                   <button className="aq-link" onClick={() => abrirPedidoModal(p)}>Ver detalle</button>
                                 </div>
+                                )}
                               </div>
                             );
                           })}
@@ -7382,7 +7522,7 @@ export default function App() {
                           onClick={() => elegirCliente(r.cliente, r.dom?.id)}
                           className={r.cliente.bloqueado ? "aq-li-alerta" : ""}
                         >
-                          <strong>{r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
+                          <strong>{r.cliente.lista_negra ? "⛔ " : r.cliente.bloqueado ? "⚠ " : ""}{r.cliente.nombre}</strong>
                           <span>
                             {r.dom?.identificador_dt
                               ? r.dom.identificador_dt + " · " + (r.dom.etiqueta || r.dom.direccion || "")
@@ -7431,7 +7571,15 @@ export default function App() {
               )}
             </section>
 
-            {cliente && cliente.bloqueado && (
+            {cliente && cliente.lista_negra && (
+              <div className="aq-alerta-cliente">
+                <strong>⛔ Lista negra · incobrable</strong>
+                <p>{cliente.lista_negra_motivo || "Deuda declarada incobrable por decisión gerencial."}</p>
+                <span>Este cliente no se atiende. No se pueden generar pedidos.</span>
+              </div>
+            )}
+
+            {cliente && cliente.bloqueado && !cliente.lista_negra && (
               <div className="aq-alerta-cliente">
                 <strong>⚠ Cliente con alerta</strong>
                 <p>{cliente.motivo_bloqueo || "Cliente marcado para revisión."}</p>
@@ -8238,6 +8386,7 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-cob-rcard.ok strong { color:#1a7a45; }
 .aq-cob-rcard.pend strong { color:#8a6400; }
 .aq-cob-rcard.venc { background:#fdecea; border-color:#f3b4ad; }
+.aq-btn-incob { border-color:#f3b4ad !important; color:var(--bad) !important; }
 .aq-cob-rcard.venc strong, .aq-cob-rcard.venc span { color:var(--bad); }
 
 /* Grupos por cliente en cobranzas */
