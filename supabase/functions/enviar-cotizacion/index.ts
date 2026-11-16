@@ -149,9 +149,37 @@ function buildHtml(c: any, items: any[], nombre: string, link: string) {
 </html>`;
 }
 
+// Muestra interna: llamada desde la base con el token de avisos (x-aviso-token)
+// y { muestra: { cotizacion, items }, pdf_base64 }. Usa datos de ejemplo, va
+// SOLO a correo_prueba y no toca ninguna cotización real.
+async function enviarMuestra(req: Request, body: any) {
+  const cfg = (await sb("aviso_factura_config?id=eq.1&select=trigger_token,relay_url,relay_token,reply_to,link_pago,correo_prueba"))?.[0];
+  if (!cfg || (req.headers.get("x-aviso-token") || "") !== cfg.trigger_token) return json({ ok: false, error: "no autorizado" }, 401);
+  const c = body.muestra?.cotizacion || {};
+  const items = body.muestra?.items || [];
+  const pdf = String(body.pdf_base64 || "").replace(/^data:[^,]+,/, "");
+  if (!items.length || !pdf || !emailOk(cfg.correo_prueba)) return json({ ok: false, error: "muestra incompleta" }, 400);
+  const res = await fetch(cfg.relay_url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-relay-token": cfg.relay_token },
+    body: JSON.stringify({
+      to: [cfg.correo_prueba], cc: [], reply_to: [cfg.reply_to].filter(Boolean),
+      subject: `🧪 [MUESTRA] Aquatrisq · Cotización ${c.folio} · Total ${clp(c.total)}`,
+      html: buildHtml(c, items, String(c.contacto_nombre || c.razon_social || "cliente"), String(cfg.link_pago || "").trim()),
+      attachments: [{ filename: `Cotizacion_${c.folio}_Aquatrisq.pdf`, content: pdf }],
+    }),
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.ok) return json({ ok: false, error: `relay: ${out.error || res.status}` }, 502);
+  return json({ ok: true, muestra: true, para: cfg.correo_prueba });
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
+    const body = await req.json().catch(() => ({}));
+    if (body.muestra) return await enviarMuestra(req, body);
+
     // 1) Usuario y rol (solo admin/operador pueden enviar cotizaciones).
     const auth = req.headers.get("Authorization") || "";
     const ur = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_ROLE_KEY, Authorization: auth } });
@@ -164,7 +192,6 @@ Deno.serve(async (req) => {
     }
 
     // 2) Datos de la llamada.
-    const body = await req.json().catch(() => ({}));
     const cotizId = String(body.cotizacion_id || "");
     const para = String(body.para || "").trim();
     const pdf = String(body.pdf_base64 || "").replace(/^data:[^,]+,/, "");
