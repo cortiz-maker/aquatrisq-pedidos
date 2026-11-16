@@ -909,6 +909,7 @@ export default function App() {
   const [okCotiz, setOkCotiz] = useState("");
   const [procesandoCotiz, setProcesandoCotiz] = useState(false);
   const [generandoPdfCotiz, setGenerandoPdfCotiz] = useState(false);
+  const [enviandoCotiz, setEnviandoCotiz] = useState(false);
 
   // Fichas técnicas de producto (opcionales, se anexan a la cotización por
   // línea). Cache en memoria por clave de producto: "id:<uuid>" para
@@ -2894,9 +2895,9 @@ export default function App() {
   }
 
   async function guardarCotizacion() {
-    if (!cotizEdit) return;
+    if (!cotizEdit) return null;
     const err = validarCotiz();
-    if (err) { setOkCotiz("Error: " + err); return; }
+    if (err) { setOkCotiz("Error: " + err); return null; }
     setGuardandoCotiz(true);
     setOkCotiz("");
     try {
@@ -2955,8 +2956,10 @@ export default function App() {
       setOkCotiz("Cotización " + folio + " guardada.");
       setCotizEdit((prev) => ({ ...prev, _nuevo: false, id: cotizId, folio }));
       await cargarCotizaciones();
+      return { id: cotizId, folio };
     } catch (e) {
       setOkCotiz("Error: " + mensajeError(e, "No se pudo guardar la cotización."));
+      return null;
     } finally {
       setGuardandoCotiz(false);
     }
@@ -3055,7 +3058,9 @@ export default function App() {
     });
   }
 
-  async function descargarPdfCotizacion(c, items) {
+  // opts.base64 = true: no descarga; devuelve el PDF como data URI para
+  // adjuntarlo al correo (botón "Emitir y enviar"). Es el mismo PDF.
+  async function descargarPdfCotizacion(c, items, opts = {}) {
     setGenerandoPdfCotiz(true);
     try {
       const jsPDF = await cargarJsPDF();
@@ -3236,8 +3241,10 @@ export default function App() {
         fy = Math.max(fy + (ficha.imagen_url ? 172 : 0), sy);
       }
 
+      if (opts.base64) return doc.output("datauristring");
       doc.save("Cotizacion-" + (c.folio || "sin-folio") + ".pdf");
     } catch (e) {
+      if (opts.base64) throw e;
       setOkCotiz("Error: " + mensajeError(e, "No se pudo generar el PDF."));
     } finally {
       setGenerandoPdfCotiz(false);
@@ -3269,6 +3276,64 @@ export default function App() {
       "Saludos,\n" +
       "Aquatrisq";
     return { asunto, cuerpo };
+  }
+
+  // Correo sugerido para la cotización: el de la ficha del cliente si es
+  // existente; si no, el correo de contacto de la cotización.
+  function correoDestinoCotiz(c) {
+    const cli = c.cliente_id ? clientes.find((x) => x.id === c.cliente_id) : null;
+    return String((cli && cli.email) || c.contacto_email || "").trim();
+  }
+
+  // "Emitir y enviar": guarda, genera el PDF y lo envía por correo al cliente
+  // (función enviar-cotizacion). Copia a quien envía. Pasa a "Enviada".
+  async function enviarCotizacionCorreo() {
+    if (!cotizEdit || enviandoCotiz) return;
+    const sugerido = correoDestinoCotiz(cotizEdit);
+    const para = window.prompt(
+      "Se enviará la cotización por correo con el PDF adjunto (te llega copia).\n\nConfirma o corrige el correo del destinatario:",
+      sugerido
+    );
+    if (para === null) return; // canceló
+    const correo = para.trim();
+    if (!/^[^@\s,;]+@[^@\s,;]+\.[a-z]{2,}$/i.test(correo)) {
+      setOkCotiz("Error: el correo «" + correo + "» no es válido.");
+      return;
+    }
+    setEnviandoCotiz(true);
+    setOkCotiz("");
+    try {
+      const guardada = await guardarCotizacion();
+      if (!guardada) return; // el error ya quedó en pantalla
+      // El PDF que viaja ya dice "Enviada" (si estaba en borrador o vencida).
+      const estadoPdf = ["borrador", "vencida"].includes(cotizEdit.estado) ? "enviada" : cotizEdit.estado;
+      const c = { ...cotizEdit, id: guardada.id, folio: guardada.folio, estado: estadoPdf };
+      const pdf = await descargarPdfCotizacion(c, itemsCotiz, { base64: true });
+      if (!pdf) throw new Error("No se pudo generar el PDF.");
+      const { data, error } = await supabase.functions.invoke("enviar-cotizacion", {
+        body: { cotizacion_id: guardada.id, para: correo, pdf_base64: pdf },
+      });
+      if (error) {
+        let msg = error.message;
+        try { const b = await error.context.json(); if (b && b.error) msg = b.error; } catch (_) { /* sin cuerpo */ }
+        throw new Error(msg);
+      }
+      if (!data || !data.ok) throw new Error((data && data.error) || "No se pudo enviar el correo.");
+      const ahora = new Date().toISOString();
+      setCotizEdit((prev) => ({
+        ...prev,
+        estado: data.estado || prev.estado,
+        enviada_at: ahora,
+        enviada_a: [data.para, ...(data.cc || [])],
+        envios_count: (Number(prev.envios_count) || 0) + 1,
+      }));
+      await cargarCotizaciones();
+      setOkCotiz("Cotización " + guardada.folio + " enviada a " + data.para + (data.cc && data.cc.length ? " (copia a " + data.cc.join(", ") + ")" : "") + ".");
+    } catch (e) {
+      setOkCotiz("Error: " + mensajeError(e, "No se pudo enviar la cotización."));
+    } finally {
+      setEnviandoCotiz(false);
+    }
   }
 
   async function copiarTextoEnvioCotiz() {
@@ -6880,6 +6945,11 @@ export default function App() {
                       {generandoPdfCotiz ? "Generando PDF…" : "Descargar PDF"}
                     </button>
                   )}
+                  {cotizEdit.estado !== "procesada" && (
+                    <button className="aq-btn" style={{ background: "#0D9488" }} disabled={enviandoCotiz || guardandoCotiz} onClick={enviarCotizacionCorreo}>
+                      {enviandoCotiz ? "Enviando…" : cotizEdit.enviada_at ? "Reenviar por correo" : "Emitir y enviar"}
+                    </button>
+                  )}
                   {!cotizEdit._nuevo && (
                     <button className="aq-btn-sec" onClick={copiarTextoEnvioCotiz}>Copiar texto de envío</button>
                   )}
@@ -6896,6 +6966,13 @@ export default function App() {
                     </>
                   )}
                 </div>
+                {cotizEdit.enviada_at && (
+                  <p className="aq-muted" style={{ marginTop: 8 }}>
+                    ✉️ Enviada por correo el {new Date(cotizEdit.enviada_at).toLocaleString("es-CL", { timeZone: "America/Santiago", dateStyle: "short", timeStyle: "short" })}
+                    {Array.isArray(cotizEdit.enviada_a) && cotizEdit.enviada_a.length ? " a " + cotizEdit.enviada_a.join(", ") : ""}
+                    {Number(cotizEdit.envios_count) > 1 ? " · " + cotizEdit.envios_count + " envíos" : ""}
+                  </p>
+                )}
                 {cotizClienteTipo === "potencial" && cotizEdit.estado !== "procesada" && (
                   <p className="aq-muted" style={{ marginTop: 8 }}>
                     Este cliente aún no existe en la ficha de Clientes: se crea automáticamente al presionar "Procesar cotización".
