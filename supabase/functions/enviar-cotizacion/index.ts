@@ -52,7 +52,16 @@ function fechaCL(iso: string | null): string {
   return y && m && d ? `${d}-${m}-${y}` : String(iso);
 }
 
-function buildHtml(c: any, items: any[], nombre: string, link: string) {
+const rutNorm = (r: unknown) => String(r || "").replace(/[.\-\s]/g, "").toUpperCase();
+
+// Condición especial del cliente (tabla condiciones_cotizacion, por RUT).
+async function condicionPorRut(rut: string) {
+  if (!rut) return null;
+  const r = await sb(`condiciones_cotizacion?rut=eq.${encodeURIComponent(rut)}&activo=eq.true&select=titulo,texto`);
+  return r?.[0] || null;
+}
+
+function buildHtml(c: any, items: any[], nombre: string, link: string, condicion: any = null) {
   const filas = items.map((it) => `
       <tr>
         <td style="padding:9px 0;border-bottom:1px solid #E2E8F0;font-size:13px;color:#0D1F3C;font-family:Arial,sans-serif;">${esc(it.nombre_producto)}</td>
@@ -121,6 +130,7 @@ function buildHtml(c: any, items: any[], nombre: string, link: string) {
         <td align="right" style="padding:12px 0 0;font-size:15px;font-weight:900;color:${COLOR};font-family:Arial,sans-serif;white-space:nowrap;">${clp(c.total)}</td>
       </tr>
     </table>
+    ${condicion ? `<div style="margin-top:14px;background:#F0FDFA;border:1px solid ${COLOR};border-radius:10px;padding:12px 14px;font-family:Arial,sans-serif;"><div style="font-size:12px;font-weight:800;color:${COLOR};margin-bottom:4px;">${esc(condicion.titulo)}</div><div style="font-size:12px;color:#3F4E63;line-height:1.6;">${esc(condicion.texto)}</div></div>` : ""}
     ${notas ? `<div style="margin-top:14px;font-size:12px;color:#3F4E63;line-height:1.6;white-space:pre-line;font-family:Arial,sans-serif;"><b style="color:#0D1F3C;">Notas / condiciones:</b><br/>${esc(notas)}</div>` : ""}
   </td></tr>
 
@@ -165,7 +175,7 @@ async function enviarMuestra(req: Request, body: any) {
     body: JSON.stringify({
       to: [cfg.correo_prueba], cc: [], reply_to: [cfg.reply_to].filter(Boolean),
       subject: `🧪 [MUESTRA] Aquatrisq · Cotización ${c.folio} · Total ${clp(c.total)}`,
-      html: buildHtml(c, items, String(c.contacto_nombre || c.razon_social || "cliente"), String(cfg.link_pago || "").trim()),
+      html: buildHtml(c, items, String(c.contacto_nombre || c.razon_social || "cliente"), String(cfg.link_pago || "").trim(), await condicionPorRut(rutNorm(c.rut_empresa))),
       attachments: [{ filename: `Cotizacion_${c.folio}_Aquatrisq.pdf`, content: pdf }],
     }),
   });
@@ -212,8 +222,10 @@ Deno.serve(async (req) => {
     if (!cfg?.relay_url) return json({ ok: false, error: "Falta la configuración de correo." }, 500);
 
     let nombre = String(c.contacto_nombre || "").trim();
+    let rutCli = rutNorm(c.rut_empresa);
     if (c.cliente_id) {
-      const cli = (await sb(`clientes?id=eq.${c.cliente_id}&select=nombre,razon_social`))?.[0];
+      const cli = (await sb(`clientes?id=eq.${c.cliente_id}&select=nombre,razon_social,rut`))?.[0];
+      if (cli?.rut) rutCli = rutNorm(cli.rut);
       const rs = String(cli?.razon_social || "").trim();
       nombre = nombre || (/[a-záéíóúñ]/i.test(rs) ? rs : String(cli?.nombre || "")).split("/")[0].trim();
     }
@@ -230,7 +242,7 @@ Deno.serve(async (req) => {
         cc: copia,
         reply_to: [cfg.reply_to || user.email].filter(Boolean),
         subject: asunto,
-        html: buildHtml(c, items, nombre, String(cfg.link_pago || "").trim()),
+        html: buildHtml(c, items, nombre, String(cfg.link_pago || "").trim(), await condicionPorRut(rutCli)),
         attachments: [{ filename: `Cotizacion_${c.folio}_Aquatrisq.pdf`, content: pdf }],
       }),
     });

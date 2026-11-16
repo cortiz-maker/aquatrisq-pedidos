@@ -910,6 +910,9 @@ export default function App() {
   const [procesandoCotiz, setProcesandoCotiz] = useState(false);
   const [generandoPdfCotiz, setGenerandoPdfCotiz] = useState(false);
   const [enviandoCotiz, setEnviandoCotiz] = useState(false);
+  // Condición especial del cliente (tabla condiciones_cotizacion, por RUT) que
+  // se imprime sola al pie de la cotización. null = el cliente no tiene.
+  const [condicionCotiz, setCondicionCotiz] = useState(null);
 
   // Fichas técnicas de producto (opcionales, se anexan a la cotización por
   // línea). Cache en memoria por clave de producto: "id:<uuid>" para
@@ -3159,6 +3162,25 @@ export default function App() {
       doc.setTextColor(0);
       y += lineasRecargo.length * 11 + 8;
 
+      // Condición especial del cliente (por RUT), automática.
+      const condicion = await cargarCondicionCotiz(c);
+      if (condicion) {
+        y += 12;
+        if (y > 700) { doc.addPage(); y = 56; }
+        const lineasCond = doc.splitTextToSize(condicion.texto, 595 - M * 2 - 20);
+        const altoCaja = 26 + lineasCond.length * 11 + 8;
+        doc.setDrawColor(13, 148, 136); doc.setFillColor(240, 253, 250);
+        doc.roundedRect(M, y - 4, 595 - M * 2, altoCaja, 4, 4, "FD");
+        doc.setTextColor(13, 148, 136);
+        doc.setFont("helvetica", "bold"); doc.setFontSize(10);
+        doc.text(condicion.titulo, M + 10, y + 12);
+        doc.setTextColor(0);
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+        doc.text(lineasCond, M + 10, y + 28);
+        y += altoCaja + 4;
+        doc.setDrawColor(0);
+      }
+
       if (c.notas) {
         y += 12;
         if (y > 720) { doc.addPage(); y = 56; }
@@ -3280,6 +3302,37 @@ export default function App() {
 
   // Correo sugerido para la cotización: el de la ficha del cliente si es
   // existente; si no, el correo de contacto de la cotización.
+  // RUT normalizado de la cotización: el de la ficha si es cliente existente,
+  // si no el RUT de empresa del potencial. Sin puntos ni guion, mayúsculas.
+  function rutCotiz(c) {
+    if (!c) return "";
+    const cli = c.cliente_id ? clientes.find((x) => x.id === c.cliente_id) : null;
+    const rut = (cli && cli.rut) || c.rut_empresa || "";
+    return String(rut).replace(/[.\-\s]/g, "").toUpperCase();
+  }
+  async function cargarCondicionCotiz(c) {
+    const rut = rutCotiz(c);
+    if (!rut) return null;
+    const { data, error } = await supabase
+      .from("condiciones_cotizacion")
+      .select("titulo, texto")
+      .eq("rut", rut)
+      .eq("activo", true)
+      .maybeSingle();
+    if (error) return null;
+    return data || null;
+  }
+
+  // Vista previa en el editor: qué condición especial se imprimirá.
+  const rutCotizActual = rutCotiz(cotizEdit);
+  useEffect(() => {
+    let vivo = true;
+    if (!rutCotizActual) { setCondicionCotiz(null); return; }
+    cargarCondicionCotiz(cotizEdit).then((c) => { if (vivo) setCondicionCotiz(c); });
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rutCotizActual]);
+
   function correoDestinoCotiz(c) {
     const cli = c.cliente_id ? clientes.find((x) => x.id === c.cliente_id) : null;
     return String((cli && cli.email) || c.contacto_email || "").trim();
@@ -6931,6 +6984,14 @@ export default function App() {
                 )}
 
                 <p style={{ textAlign: "right", marginTop: 8 }}><strong>Total: {CLP(totalCotiz)}</strong></p>
+
+                {condicionCotiz && (
+                  <div style={{ marginTop: 8, border: "1px solid #0D9488", background: "#F0FDFA", borderRadius: 10, padding: "10px 12px" }}>
+                    <div style={{ color: "#0D9488", fontWeight: 700, fontSize: 13 }}>{condicionCotiz.titulo}</div>
+                    <div style={{ fontSize: 12, color: "#3F4E63", marginTop: 4 }}>{condicionCotiz.texto}</div>
+                    <div style={{ fontSize: 11, color: "#64748B", marginTop: 6 }}>Se agrega automáticamente al PDF y al correo para este cliente.</div>
+                  </div>
+                )}
 
                 <label className="aq-full" style={{ marginTop: 8 }}>Notas / condiciones
                   <textarea rows="3" value={cotizEdit.notas || ""} onChange={(e) => setCotizEdit((prev) => ({ ...prev, notas: e.target.value }))} placeholder="Ej: precios no incluyen IVA · válido para despacho en RM · forma de pago…" />
