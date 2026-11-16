@@ -2794,8 +2794,24 @@ export default function App() {
       q = producto_id ? q.eq("producto_id", producto_id) : q.eq("producto_nombre", producto_nombre);
       const { data, error } = await q.maybeSingle();
       if (error) throw error;
-      setFichasProducto((prev) => ({ ...prev, [k]: data || null }));
-      return data || null;
+      let ficha = data || null;
+      // Sin ficha propia: se usa la ficha base cuyo nombre sea el inicio del
+      // nombre de la línea (ej. "Bomba de agua USB" para
+      // "Bomba de agua USB — negra con aro morado"). Se marca _base para que
+      // un ajuste puntual cree una ficha propia sin tocar la base.
+      if (!ficha && !producto_id && producto_nombre) {
+        const { data: bases } = await supabase
+          .from("fichas_producto")
+          .select("*")
+          .eq("activa", true)
+          .is("producto_id", null);
+        const candidata = (bases || [])
+          .filter((b) => b.producto_nombre && producto_nombre.startsWith(b.producto_nombre))
+          .sort((a, b) => b.producto_nombre.length - a.producto_nombre.length)[0];
+        if (candidata) ficha = { ...candidata, _base: true };
+      }
+      setFichasProducto((prev) => ({ ...prev, [k]: ficha }));
+      return ficha;
     } catch (e) {
       setFichasProducto((prev) => ({ ...prev, [k]: null }));
       return null;
@@ -2814,8 +2830,13 @@ export default function App() {
     setOkFicha("");
     const existente = await cargarFichaProducto(it);
     const { producto_id, producto_nombre } = refProductoFicha(it);
+    if (existente && existente._base) {
+      setOkFicha("Partiendo de la ficha base «" + existente.producto_nombre + "». Al guardar se crea una ficha propia para «" + (producto_nombre || it.nombre) + "»; la base no cambia.");
+    }
     setFichaEditDraft(
-      existente
+      existente && existente._base
+        ? { ...existente, _base: undefined, id: null, producto_id: null, producto_nombre: producto_nombre || it.nombre, specs: Array.isArray(existente.specs) ? existente.specs : [] }
+        : existente
         ? { ...existente, specs: Array.isArray(existente.specs) ? existente.specs : [] }
         : { id: null, producto_id, producto_nombre: producto_nombre || it.nombre, descripcion: "", imagen_url: "", garantia: "", specs: [] }
     );
