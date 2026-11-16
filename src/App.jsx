@@ -2639,6 +2639,7 @@ export default function App() {
       fecha_vigencia: cotizEdit.fecha_vigencia || sumarDias(fechaHoyISO(), 15),
       estado: "borrador",
       notas: cotizEdit.notas || "",
+      incluir_condicion: !!cotizEdit.incluir_condicion,
     });
     setOkCotiz("Copia de " + origen + ": elige el contacto de la otra sucursal y guarda o envía (tendrá su propio folio).");
   }
@@ -2956,6 +2957,7 @@ export default function App() {
         fecha_vigencia: cotizEdit.fecha_vigencia || null,
         estado: cotizEdit.estado || "borrador",
         notas: cotizEdit.notas || null,
+        incluir_condicion: !!cotizEdit.incluir_condicion,
         subtotal: totalCotiz,
         descuento_total: 0,
         total: totalCotiz,
@@ -3199,7 +3201,7 @@ export default function App() {
       y += lineasRecargo.length * 11 + 8;
 
       // Condición especial del cliente (por RUT), automática.
-      const condicion = await cargarCondicionCotiz(c);
+      const condicion = c.incluir_condicion ? await cargarCondicionCotiz(c) : null;
       if (condicion) {
         y += 12;
         if (y > 700) { doc.addPage(); y = 56; }
@@ -7024,10 +7026,17 @@ export default function App() {
                 <p style={{ textAlign: "right", marginTop: 8 }}><strong>Total: {CLP(totalCotiz)}</strong> <span className="aq-muted">(IVA incluido)</span></p>
 
                 {condicionCotiz && (
-                  <div style={{ marginTop: 8, border: "1px solid #0D9488", background: "#F0FDFA", borderRadius: 10, padding: "10px 12px" }}>
-                    <div style={{ color: "#0D9488", fontWeight: 700, fontSize: 13 }}>{condicionCotiz.titulo}</div>
-                    <div style={{ fontSize: 12, color: "#3F4E63", marginTop: 4 }}>{condicionCotiz.texto}</div>
-                    <div style={{ fontSize: 11, color: "#64748B", marginTop: 6 }}>Se agrega automáticamente al PDF y al correo para este cliente.</div>
+                  <div style={{ marginTop: 8, border: "1px solid " + (cotizEdit.incluir_condicion ? "#0D9488" : "#CBD5E1"), background: cotizEdit.incluir_condicion ? "#F0FDFA" : "#F8FAFC", borderRadius: 10, padding: "10px 12px" }}>
+                    <label className="aq-check" style={{ fontWeight: 700, fontSize: 13, color: cotizEdit.incluir_condicion ? "#0D9488" : "#475569" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!cotizEdit.incluir_condicion}
+                        onChange={(e) => setCotizEdit((prev) => ({ ...prev, incluir_condicion: e.target.checked }))}
+                      />{" "}
+                      Incluir condición especial del cliente: {condicionCotiz.titulo}
+                    </label>
+                    <div style={{ fontSize: 12, color: "#3F4E63", marginTop: 4, opacity: cotizEdit.incluir_condicion ? 1 : 0.6 }}>{condicionCotiz.texto}</div>
+                    <div style={{ fontSize: 11, color: "#64748B", marginTop: 6 }}>Solo se agrega al PDF y al correo si marcas la casilla.</div>
                   </div>
                 )}
 

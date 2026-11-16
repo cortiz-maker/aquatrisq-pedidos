@@ -243,7 +243,7 @@ Deno.serve(async (req) => {
         cc: copia,
         reply_to: [cfg.reply_to || user.email].filter(Boolean),
         subject: asunto,
-        html: buildHtml(c, items, nombre, String(cfg.link_pago || "").trim(), await condicionPorRut(rutCli)),
+        html: buildHtml(c, items, nombre, String(cfg.link_pago || "").trim(), c.incluir_condicion ? await condicionPorRut(rutCli) : null),
         attachments: [{ filename: `Cotizacion_${c.folio}_Aquatrisq.pdf`, content: pdf }],
       }),
     });
