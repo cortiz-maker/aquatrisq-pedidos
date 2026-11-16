@@ -790,7 +790,7 @@ export default function App() {
   const [resultado, setResultado] = useState(null); // { ok, guia, sync, msg }
 
   // Navegación entre vistas: inicio (dashboard) | nuevo | mantenedor | confirmacion
-  const VISTAS_PERSISTIBLES = ["inicio", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "boletas", "bidones"];
+  const VISTAS_PERSISTIBLES = ["inicio", "nuevo", "mantenedor", "cobranzas", "deudasprov", "cotizaciones", "facturas", "boletas", "bidones", "sumup"];
   const [vista, setVista] = useState(() => {
     try {
       const guardada = sessionStorage.getItem("aq_vista");
@@ -956,6 +956,13 @@ export default function App() {
 
   // ── Bidones pendientes de retiro (campo "Bidón Pendiente de Entrega") ──
   const [bidonesPend, setBidonesPend] = useState(null);
+  // ── Pedidos de la tienda en línea SumUp (prepedidos por validar) ──
+  const [sumupPre, setSumupPre] = useState(null);       // filas de sumup_prepedidos (últimas 60)
+  const [cargandoSumup, setCargandoSumup] = useState(false);
+  const [errorSumup, setErrorSumup] = useState("");
+  const [sumupEdit, setSumupEdit] = useState({});       // id -> formulario de validación
+  const [sumupProc, setSumupProc] = useState(null);     // id en proceso
+  const [sumupMsg, setSumupMsg] = useState(null);       // { ok, msg }
   const [cargandoBid, setCargandoBid] = useState(false);
   const [errorBid, setErrorBid] = useState("");
   const [guardandoBidonGuia, setGuardandoBidonGuia] = useState(null);
@@ -2026,8 +2033,142 @@ export default function App() {
     // KPIs de Inicio: precargamos ambos conteos aunque el usuario no visite las pantallas.
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && facturasPend === null) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && bidonesPend === null) cargarBidonesPend();
+    // Pedidos SumUp: se precargan al entrar para mostrar el contador en el menú.
+    if ((rol === "admin" || rol === "operador") && session && sumupPre === null && !cargandoSumup) cargarSumup();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rol, vista, session, puedeFine]);
+
+  // Pedidos SumUp: refresco liviano cada 2 minutos (entran solos desde el correo de info@).
+  useEffect(() => {
+    if (!session || !(rol === "admin" || rol === "operador")) return;
+    const t = setInterval(() => { cargarSumup(); }, 120000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, rol]);
+
+  // ── Pedidos SumUp ──────────────────────────────────────────
+  async function cargarSumup() {
+    setCargandoSumup(true); setErrorSumup("");
+    try {
+      const { data, error } = await supabase
+        .from("sumup_prepedidos")
+        .select("id, sumup_numero, sumup_url, fecha_pedido, cliente_nombre, cliente_email, cliente_telefono, direccion, comuna, forma_pago, metodo_envio, pagado, items_sumup, items_aquatrisq, requiere_revision_items, subtotal, envio, total, monto_pedido, cliente_id, domicilio_id, match_metodo, alerta_cliente, estado, pedido_id, chofer, fecha_entrega, validado_por, validado_at, motivo_rechazo")
+        .order("sumup_numero", { ascending: false })
+        .limit(60);
+      if (error) throw error;
+      const pedIds = (data || []).map((p) => p.pedido_id).filter(Boolean);
+      let guias = {};
+      if (pedIds.length) {
+        const { data: ps } = await supabase.from("pedidos").select("id, numero_guia, estado_sync").in("id", pedIds);
+        (ps || []).forEach((p) => { guias[p.id] = p; });
+      }
+      setSumupPre((data || []).map((p) => ({ ...p, pedido: p.pedido_id ? guias[p.pedido_id] || null : null })));
+    } catch (e) {
+      setErrorSumup(mensajeError(e, "No se pudieron cargar los pedidos SumUp."));
+    } finally {
+      setCargandoSumup(false);
+    }
+  }
+
+  const ymdLocal = (d) => {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  function sumupFormBase(pp) {
+    return {
+      chofer: "",
+      dia: "manana",            // hoy | manana | otra
+      fecha: "",
+      desde: "09:00",
+      hasta: "17:00",
+      clienteId: pp.cliente_id || "",
+      domicilioId: pp.domicilio_id || "",
+      buscar: "",
+      items: (pp.items_aquatrisq || []).map((i) => ({
+        codigo: i.codigo || "", cantidad: Number(i.cantidad) || 1, precio_unit: Number(i.precio_unit) || 0, origen: i.origen || i.nombre,
+      })),
+      rechazando: false,
+      motivo: "",
+    };
+  }
+  const sumupForm = (pp) => sumupEdit[pp.id] || sumupFormBase(pp);
+  const setSumupForm = (pp, patch) =>
+    setSumupEdit((prev) => ({ ...prev, [pp.id]: { ...(prev[pp.id] || sumupFormBase(pp)), ...patch } }));
+  function sumupFechaEntrega(f) {
+    const d = new Date();
+    if (f.dia === "manana") d.setDate(d.getDate() + 1);
+    return f.dia === "otra" ? f.fecha : ymdLocal(d);
+  }
+
+  async function aceptarSumup(pp) {
+    const f = sumupForm(pp);
+    const fecha = sumupFechaEntrega(f);
+    if (!f.chofer) { setSumupMsg({ ok: false, msg: `SumUp #${pp.sumup_numero}: elige el chofer.` }); return; }
+    if (!fecha) { setSumupMsg({ ok: false, msg: `SumUp #${pp.sumup_numero}: elige la fecha de entrega.` }); return; }
+    if (!f.clienteId) { setSumupMsg({ ok: false, msg: `SumUp #${pp.sumup_numero}: asocia el cliente.` }); return; }
+    if (!f.items.length || f.items.some((i) => !i.codigo || !(Number(i.cantidad) > 0))) {
+      setSumupMsg({ ok: false, msg: `SumUp #${pp.sumup_numero}: revisa los productos (todos deben tener producto y cantidad).` });
+      return;
+    }
+    setSumupProc(pp.id); setSumupMsg(null);
+    try {
+      const { data, error } = await supabase.rpc("sumup_aceptar_prepedido", {
+        p_id: pp.id,
+        p_chofer: f.chofer,
+        p_fecha_min: new Date(`${fecha}T${f.desde}`).toISOString(),
+        p_fecha_max: new Date(`${fecha}T${f.hasta}`).toISOString(),
+        p_cliente_id: f.clienteId || null,
+        p_domicilio_id: f.domicilioId || null,
+        p_items: f.items.map((i) => ({ codigo: i.codigo, cantidad: Number(i.cantidad), precio_unit: Number(i.precio_unit) || 0, nombre: i.origen })),
+      });
+      if (error) throw error;
+      const pedido = data?.pedido;
+      const lineas = data?.items || [];
+      // Envío a DispatchTrack vía el puente (igual que un pedido nuevo; best-effort).
+      let enviado = false;
+      try {
+        const r = await fetch(`${PUENTE_URL}/api/dispatches`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pedido, items: lineas }),
+        });
+        if (r.ok) {
+          const out = await r.json();
+          await supabase.from("pedidos").update({
+            estado_sync: "enviado_dt",
+            dt_dispatch_id: out?.dispatchtrack?.dispatch_id || null,
+            enviado_at: new Date().toISOString(),
+          }).eq("id", pedido.id);
+          enviado = true;
+        }
+      } catch { /* queda pendiente de envío, igual que un pedido normal */ }
+      setSumupMsg({
+        ok: true,
+        msg: `SumUp #${pp.sumup_numero} → pedido ${pedido?.numero_guia} creado (${f.chofer}, ${fecha.split("-").reverse().join("-")}). ${enviado ? "Enviado a DispatchTrack." : "Envío a DispatchTrack pendiente."}`,
+      });
+      setSumupEdit((prev) => { const n = { ...prev }; delete n[pp.id]; return n; });
+      await cargarSumup();
+    } catch (e) {
+      setSumupMsg({ ok: false, msg: `SumUp #${pp.sumup_numero}: ` + mensajeError(e, "no se pudo aceptar.") });
+    } finally {
+      setSumupProc(null);
+    }
+  }
+
+  async function rechazarSumup(pp) {
+    const f = sumupForm(pp);
+    setSumupProc(pp.id); setSumupMsg(null);
+    try {
+      const { error } = await supabase.rpc("sumup_rechazar_prepedido", { p_id: pp.id, p_motivo: f.motivo || "" });
+      if (error) throw error;
+      setSumupMsg({ ok: true, msg: `SumUp #${pp.sumup_numero} marcado como rechazado.` });
+      await cargarSumup();
+    } catch (e) {
+      setSumupMsg({ ok: false, msg: `SumUp #${pp.sumup_numero}: ` + mensajeError(e, "no se pudo rechazar.") });
+    } finally {
+      setSumupProc(null);
+    }
+  }
 
   // Alerta de documentos inmediatos: refresco liviano cada 2 minutos.
   useEffect(() => {
@@ -4396,6 +4537,7 @@ export default function App() {
   // Conteos de documentos pendientes (facturas de DT + documentos inmediatos).
   const pendDoc = (d) => !d.numero_documento_emitido && !d.factura_no_requerida;
   const boletasPendLista = (docsInm || []).filter((d) => d.tipo_documento === "boleta" && pendDoc(d));
+  const sumupPorValidar = (sumupPre || []).filter((p) => p.estado === "por_validar");
   const factPendGuias = new Set([
     ...(facturasPend || []).filter((f) => pendDoc(f) && !f.factura_diferida).map((f) => f.numero_guia),
     ...(docsInm || []).filter((d) => d.tipo_documento === "factura" && pendDoc(d)).map((d) => d.numero_guia),
@@ -4681,6 +4823,12 @@ export default function App() {
               </button>
             )}
             {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "sumup" ? "on" : ""} onClick={() => setVista("sumup")}>
+                SumUp
+                {sumupPorValidar.length > 0 && <span className="aq-nav-alert">{sumupPorValidar.length}</span>}
+              </button>
+            )}
+            {(rol === "admin" || rol === "operador") && (
               <button className={vista === "bidones" ? "on" : ""} onClick={() => setVista("bidones")}>
                 Bidones
                 {bidonesPend && bidonesPend.filter((b) => !b.bidones_retirados_en).reduce((s, b) => s + b.cantidad, 0) > 0 && (
@@ -4919,10 +5067,17 @@ export default function App() {
                   const factPend = [...factPendBase, ...(docsInm || []).filter((d) => d.tipo_documento === "factura" && pendDoc(d) && !factPendBase.some((f) => f.numero_guia === d.numero_guia))];
                   const bidPend = (bidonesPend || []).filter((b) => !b.bidones_retirados_en);
                   const bidTotal = bidPend.reduce((s, b) => s + b.cantidad, 0);
-                  if (!factPend.length && !bidTotal && !boletasPendLista.length) return null;
+                  if (!factPend.length && !bidTotal && !boletasPendLista.length && !sumupPorValidar.length) return null;
                   const factCrit = factPend.filter((f) => f.dias >= 5).length;
                   return (
                     <div className="aq-gestion-alerts">
+                      {sumupPorValidar.length > 0 && (
+                        <button className="aq-alert-card warn" onClick={() => setVista("sumup")}>
+                          <span>Pedidos SumUp por validar</span>
+                          <strong>{sumupPorValidar.length}</strong>
+                          <em className="aq-money-sub">Pagados en la tienda en línea · asignar chofer y fecha</em>
+                        </button>
+                      )}
                       {factPend.length > 0 && (
                         <button className="aq-alert-card bad" onClick={() => setVista("facturas")}>
                           <span>Facturas por emitir</span>
@@ -6053,6 +6208,189 @@ export default function App() {
         )}
 
         {/* ===================== BIDONES PENDIENTES DE RETIRO (admin/operador) ===================== */}
+        {/* ===================== PEDIDOS SUMUP ===================== */}
+        {credsListas && vista === "sumup" && (rol === "admin" || rol === "operador") && (() => {
+          const prodPorCod = {};
+          productos.forEach((p) => { prodPorCod[p.codigo] = p; });
+          const fechaTxt = (iso) => iso ? new Date(iso).toLocaleString("es-CL", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "America/Santiago" }) : "";
+          const historial = (sumupPre || []).filter((p) => p.estado !== "por_validar").slice(0, 25);
+          const etiquetaEstado = { aceptado: ["ok", "Aceptado"], rechazado: ["bad", "Rechazado"], ya_cargado: ["warn", "Ya cargado a mano"] };
+          return (
+            <section className="aq-card">
+              <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+                <div>
+                  <h2 style={{ margin: 0 }}>Pedidos SumUp por validar</h2>
+                  <span className="aq-muted">Entran solos desde la tienda en línea. Elige chofer y fecha: al aceptar se crea el pedido AQ (pagado, boleta) y se envía a DispatchTrack.</span>
+                </div>
+                <button className="aq-btn-sec" onClick={cargarSumup} disabled={cargandoSumup}>↻ Actualizar</button>
+              </div>
+
+              {errorSumup && <div className="aq-error" style={{ marginBottom: 8 }}>{errorSumup}</div>}
+              {sumupMsg && <div className={sumupMsg.ok ? "aq-sumup-ok" : "aq-error"} style={{ marginBottom: 10 }}>{sumupMsg.msg}</div>}
+              {cargandoSumup && !sumupPre && <p className="aq-muted">Cargando pedidos SumUp…</p>}
+              {sumupPre && sumupPorValidar.length === 0 && <p className="aq-muted">No hay pedidos SumUp pendientes. 🎉</p>}
+
+              {sumupPorValidar.map((pp) => {
+                const f = sumupForm(pp);
+                const cli = f.clienteId ? clientePorId[f.clienteId] : null;
+                const doms = f.clienteId ? todosDomicilios.filter((d) => d.cliente_id === f.clienteId) : [];
+                const totalItems = f.items.reduce((s, i) => s + (Number(i.cantidad) || 0) * (Number(i.precio_unit) || 0), 0);
+                const busq = (f.buscar || "").trim().toLowerCase();
+                const busqDig = busq.replace(/\D/g, "");
+                const resultados = !cli && busq.length >= 3
+                  ? clientes.filter((c) => (c.nombre || "").toLowerCase().includes(busq)
+                      || (busqDig.length >= 4 && String(c.telefono || "").replace(/\D/g, "").includes(busqDig))
+                      || (c.codigo_cliente || "").toLowerCase() === busq).slice(0, 8)
+                  : [];
+                const enProceso = sumupProc === pp.id;
+                return (
+                  <div className="aq-sumup-card" key={pp.id}>
+                    <div className="aq-sumup-head">
+                      <div>
+                        <strong>SumUp #{pp.sumup_numero}</strong>
+                        <span className="aq-muted" style={{ marginLeft: 8 }}>{fechaTxt(pp.fecha_pedido)}</span>
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span className={"aq-badge " + (pp.pagado ? "ok" : "bad")}>{pp.pagado ? "Pagado" : (pp.forma_pago || "Pago no confirmado")}</span>
+                        {pp.sumup_url && <a href={pp.sumup_url} target="_blank" rel="noreferrer" className="aq-link" style={{ textDecoration: "underline" }}>Ver en SumUp ↗</a>}
+                      </div>
+                    </div>
+
+                    <div className="aq-sumup-grid">
+                      <div>
+                        <div className="aq-sumup-lbl">Datos en SumUp</div>
+                        <div>{pp.cliente_nombre}</div>
+                        <div className="aq-muted">{[pp.cliente_telefono, pp.cliente_email].filter(Boolean).join(" · ")}</div>
+                        <div className="aq-muted">{[pp.direccion, pp.comuna].filter(Boolean).join(", ")}</div>
+                        <div className="aq-muted">{(pp.items_sumup || []).map((i) => `${i.cantidad} × ${i.nombre}`).join(" · ")} · Total SumUp {CLP(pp.total)}</div>
+                      </div>
+
+                      <div>
+                        <div className="aq-sumup-lbl">Cliente Aquatrisq</div>
+                        {cli ? (
+                          <>
+                            <div>
+                              <strong>{cli.nombre}</strong> <span className="aq-muted">({cli.codigo_cliente})</span>
+                              {f.clienteId === pp.cliente_id && pp.match_metodo && pp.match_metodo !== "sin_match" && (
+                                <em className="aq-det-chofer">encontrado por {pp.match_metodo === "telefono" ? "teléfono" : pp.match_metodo === "email" ? "correo" : "dirección"}</em>
+                              )}
+                            </div>
+                            <select value={f.domicilioId} onChange={(e) => setSumupForm(pp, { domicilioId: e.target.value })} style={{ marginTop: 6, width: "100%" }}>
+                              {!doms.some((d) => d.id === f.domicilioId) && <option value="">Elige domicilio…</option>}
+                              {doms.map((d) => <option key={d.id} value={d.id}>{[d.direccion, d.comuna].filter(Boolean).join(", ")}{d.es_principal ? " (principal)" : ""}</option>)}
+                            </select>
+                            <button className="aq-link-btn" onClick={() => setSumupForm(pp, { clienteId: "", domicilioId: "", buscar: "" })}>Cambiar cliente</button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="aq-error" style={{ marginBottom: 6 }}>No se encontró el cliente. Búscalo por nombre o teléfono; si es nuevo, créalo en Clientes y luego elígelo aquí.</div>
+                            <input type="text" placeholder="Buscar cliente…" value={f.buscar} onChange={(e) => setSumupForm(pp, { buscar: e.target.value })} style={{ width: "100%" }} />
+                            {resultados.map((c) => (
+                              <button key={c.id} className="aq-sumup-res" onClick={() => {
+                                const dPrin = todosDomicilios.filter((d) => d.cliente_id === c.id).sort((a, b) => (b.es_principal ? 1 : 0) - (a.es_principal ? 1 : 0))[0];
+                                setSumupForm(pp, { clienteId: c.id, domicilioId: dPrin?.id || "", buscar: "" });
+                              }}>
+                                {c.nombre} <span className="aq-muted">· {c.codigo_cliente}{c.telefono ? " · " + c.telefono : ""}</span>
+                              </button>
+                            ))}
+                          </>
+                        )}
+                        {pp.alerta_cliente && f.clienteId === pp.cliente_id && <div className="aq-error" style={{ marginTop: 6 }}>⚠ {pp.alerta_cliente}</div>}
+                      </div>
+                    </div>
+
+                    <div className="aq-sumup-lbl" style={{ marginTop: 10 }}>Productos a cargar</div>
+                    {pp.requiere_revision_items && <div className="aq-error" style={{ marginBottom: 6 }}>Hay productos de SumUp sin equivalencia en Aquatrisq: elige el producto en cada línea.</div>}
+                    {f.items.map((it, idx) => (
+                      <div className="aq-sumup-item" key={idx}>
+                        <select value={it.codigo} onChange={(e) => {
+                          const items = f.items.map((x, j) => j === idx ? { ...x, codigo: e.target.value, precio_unit: x.precio_unit || prodPorCod[e.target.value]?.precio_lista || 0 } : x);
+                          setSumupForm(pp, { items });
+                        }}>
+                          <option value="">Elige producto…</option>
+                          {productos.map((p) => <option key={p.id} value={p.codigo}>{p.nombre}</option>)}
+                        </select>
+                        <input type="number" min="1" value={it.cantidad} onChange={(e) => setSumupForm(pp, { items: f.items.map((x, j) => j === idx ? { ...x, cantidad: e.target.value } : x) })} title="Cantidad" />
+                        <input type="number" min="0" value={it.precio_unit} onChange={(e) => setSumupForm(pp, { items: f.items.map((x, j) => j === idx ? { ...x, precio_unit: e.target.value } : x) })} title="Precio unitario" />
+                        <span className="aq-sumup-sub">{CLP((Number(it.cantidad) || 0) * (Number(it.precio_unit) || 0))}</span>
+                        <button className="aq-link-btn" onClick={() => setSumupForm(pp, { items: f.items.filter((_, j) => j !== idx) })} title="Quitar línea">✕</button>
+                        {it.origen && <em className="aq-det-chofer" style={{ gridColumn: "1 / -1" }}>de SumUp: {it.origen}</em>}
+                      </div>
+                    ))}
+                    <div className="aq-sumup-total">
+                      <button className="aq-link-btn" onClick={() => setSumupForm(pp, { items: [...f.items, { codigo: "", cantidad: 1, precio_unit: 0, origen: "" }] })}>+ Agregar línea</button>
+                      <span>Monto del pedido: <strong>{CLP(totalItems)}</strong>{pp.envio ? <span className="aq-muted"> (sin envío {CLP(pp.envio)})</span> : null}</span>
+                    </div>
+
+                    <div className="aq-sumup-grid" style={{ marginTop: 10 }}>
+                      <div>
+                        <div className="aq-sumup-lbl">Chofer</div>
+                        <select value={f.chofer} onChange={(e) => setSumupForm(pp, { chofer: e.target.value })} style={{ width: "100%" }}>
+                          <option value="">Elige chofer…</option>
+                          {CHOFERES.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="aq-sumup-lbl">Entrega</div>
+                        <div className="aq-seg">
+                          {[["hoy", "Hoy"], ["manana", "Mañana"], ["otra", "Otra fecha"]].map(([k, t]) => (
+                            <button key={k} className={f.dia === k ? "on" : ""} onClick={() => setSumupForm(pp, { dia: k })}>{t}</button>
+                          ))}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                          {f.dia === "otra" && <input type="date" value={f.fecha} min={ymdLocal(new Date())} onChange={(e) => setSumupForm(pp, { fecha: e.target.value })} />}
+                          <input type="time" value={f.desde} onChange={(e) => setSumupForm(pp, { desde: e.target.value })} />
+                          <span className="aq-muted">a</span>
+                          <input type="time" value={f.hasta} onChange={(e) => setSumupForm(pp, { hasta: e.target.value })} />
+                        </div>
+                      </div>
+                    </div>
+
+                    {!f.rechazando ? (
+                      <div className="aq-fact-acciones">
+                        <button className="aq-btn aq-btn-auto" disabled={enProceso} onClick={() => aceptarSumup(pp)}>
+                          {enProceso ? "Creando pedido…" : "Aceptar y crear pedido"}
+                        </button>
+                        <button className="aq-btn-sec" disabled={enProceso} onClick={() => setSumupForm(pp, { rechazando: true })}>Rechazar</button>
+                      </div>
+                    ) : (
+                      <div className="aq-fact-acciones">
+                        <input type="text" placeholder="Motivo (ej: duplicado, sin cobertura, anulado por el cliente)" value={f.motivo} onChange={(e) => setSumupForm(pp, { motivo: e.target.value })} style={{ flex: 1, minWidth: 220 }} />
+                        <button className="aq-btn-sec aq-btn-danger" disabled={enProceso} onClick={() => rechazarSumup(pp)}>Confirmar rechazo</button>
+                        <button className="aq-link-btn" onClick={() => setSumupForm(pp, { rechazando: false })}>Volver</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {historial.length > 0 && (
+                <>
+                  <h3 style={{ margin: "18px 0 6px" }}>Últimos procesados</h3>
+                  {historial.map((pp) => {
+                    const [cls, txtE] = etiquetaEstado[pp.estado] || ["warn", pp.estado];
+                    return (
+                      <div className="aq-det-line" key={pp.id}>
+                        <span>
+                          SumUp #{pp.sumup_numero} · {pp.cliente_nombre}
+                          <em className="aq-det-chofer">
+                            {pp.pedido?.numero_guia ? `Pedido ${pp.pedido.numero_guia}` : ""}
+                            {pp.chofer ? ` · ${pp.chofer}` : ""}
+                            {pp.fecha_entrega ? ` · entrega ${pp.fecha_entrega.split("-").reverse().join("-")}` : ""}
+                            {pp.motivo_rechazo ? ` · ${pp.motivo_rechazo}` : ""}
+                            {pp.validado_por ? ` · por ${pp.validado_por}` : ""}
+                          </em>
+                        </span>
+                        <span className={"aq-badge " + cls}>{txtE}</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </section>
+          );
+        })()}
+
         {credsListas && vista === "boletas" && (rol === "admin" || rol === "operador") && (() => {
           const todas = (docsInm || []).filter((d) => d.tipo_documento === "boleta");
           const q = buscarBol.trim().toLowerCase();
@@ -8553,6 +8891,28 @@ html, body { overflow-x:hidden; }
   .aq-row-head, .aq-modal-head { flex-wrap:wrap; }
   .aq-cob-resumen { grid-template-columns:repeat(2,1fr); }
   input, select, textarea { font-size:16px; } /* evita el zoom automático de iOS al enfocar */
+}
+/* ── Pedidos SumUp ── */
+.aq-sumup-card { border:1px solid var(--line); border-left:4px solid #0EA5E9; border-radius:12px; padding:14px; margin:12px 0; background:#fff; }
+.aq-sumup-head { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.aq-sumup-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; font-size:14px; }
+.aq-sumup-lbl { font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:var(--muted); margin-bottom:4px; }
+.aq-sumup-item { display:grid; grid-template-columns:minmax(160px,1fr) 70px 90px 90px 28px; gap:6px; align-items:center; margin-bottom:6px; }
+.aq-sumup-sub { text-align:right; font-weight:600; font-size:13px; }
+.aq-sumup-total { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; font-size:14px; margin-top:4px; }
+.aq-sumup-res { display:block; width:100%; text-align:left; background:#f7f9fc; border:1px solid var(--line); border-radius:8px; padding:6px 9px; margin-top:4px; font:inherit; font-size:13px; cursor:pointer; }
+.aq-sumup-res:hover { background:#eef4fb; }
+.aq-sumup-ok { background:#e8f5ee; color:var(--ok); border-radius:8px; padding:9px 12px; font-size:14px; font-weight:600; }
+.aq-seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.aq-seg button { background:#fff; border:none; border-right:1px solid var(--line); font:inherit; font-size:13px; font-weight:600; padding:6px 12px; cursor:pointer; color:var(--ink); }
+.aq-seg button:last-child { border-right:none; }
+.aq-seg button.on { background:#0EA5E9; color:#fff; }
+.aq-link-btn { background:none; border:none; color:var(--blue); font:inherit; font-size:13px; cursor:pointer; padding:4px 0; text-decoration:underline; }
+.aq-btn.aq-btn-auto { width:auto; margin-top:0; padding-left:20px; padding-right:20px; font-size:14px; }
+@media (max-width: 640px) {
+  .aq-sumup-grid { grid-template-columns:1fr; }
+  .aq-sumup-item { grid-template-columns:1fr 60px 80px; }
+  .aq-sumup-item .aq-sumup-sub { grid-column:1 / 3; text-align:left; }
 }
 `;
 
