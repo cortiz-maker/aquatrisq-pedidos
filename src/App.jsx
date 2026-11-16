@@ -3167,7 +3167,8 @@ export default function App() {
       if (condicion) {
         y += 12;
         if (y > 700) { doc.addPage(); y = 56; }
-        const lineasCond = doc.splitTextToSize(condicion.texto, 595 - M * 2 - 20);
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+        const lineasCond = doc.splitTextToSize(condicion.texto, 595 - M * 2 - 24);
         const altoCaja = 26 + lineasCond.length * 11 + 8;
         doc.setDrawColor(13, 148, 136); doc.setFillColor(240, 253, 250);
         doc.roundedRect(M, y - 4, 595 - M * 2, altoCaja, 4, 4, "FD");
