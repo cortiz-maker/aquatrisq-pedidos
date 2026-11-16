@@ -925,6 +925,10 @@ export default function App() {
   const [fichaEditDraft, setFichaEditDraft] = useState(null); // borrador { producto_id, producto_nombre, descripcion, imagen_url, garantia, specs: [{label,value}] }
   const [guardandoFicha, setGuardandoFicha] = useState(false);
   const [okFicha, setOkFicha] = useState("");
+  // Biblioteca de fichas técnicas (listar, crear, editar sin pasar por una cotización).
+  const [verFichas, setVerFichas] = useState(false);
+  const [listaFichas, setListaFichas] = useState(null);
+  const [buscarFicha, setBuscarFicha] = useState("");
 
   // ── Bloque 4: mantenedores (sub-pestañas) ──────────────────
   const [mantTab, setMantTab] = useState("clientes"); // clientes | productos | perfiles
@@ -2826,6 +2830,25 @@ export default function App() {
     }
   }
 
+  async function cargarListaFichas() {
+    const { data, error } = await supabase
+      .from("fichas_producto")
+      .select("id, producto_id, producto_nombre, descripcion, garantia, specs, imagen_url, activa, actualizado_en")
+      .order("producto_nombre");
+    if (!error) setListaFichas(data || []);
+  }
+  function abrirFichaBiblioteca(f) {
+    setOkFicha("");
+    setFichaEditDraft(f
+      ? { ...f, specs: Array.isArray(f.specs) ? f.specs : [] }
+      : { id: null, producto_id: null, producto_nombre: "", descripcion: "", imagen_url: "", garantia: "", specs: [] });
+    setFichaEditKey("lib:" + (f ? f.id : "nueva"));
+  }
+  async function cambiarActivaFicha(f, activa) {
+    const { error } = await supabase.from("fichas_producto").update({ activa }).eq("id", f.id);
+    if (!error) { setFichasProducto({}); cargarListaFichas(); }
+  }
+
   async function abrirEditorFicha(it) {
     setOkFicha("");
     const existente = await cargarFichaProducto(it);
@@ -2900,6 +2923,10 @@ export default function App() {
 
   async function guardarFicha() {
     if (!fichaEditDraft) return;
+    if (!fichaEditDraft.producto_id && !(fichaEditDraft.producto_nombre || "").trim()) {
+      setOkFicha("Error: escribe el nombre del producto (tal como aparecerá en la cotización).");
+      return;
+    }
     setGuardandoFicha(true);
     setOkFicha("");
     try {
@@ -2931,6 +2958,7 @@ export default function App() {
       const it = itemsCotiz.find((x) => x.key === fichaEditKey);
       if (it) setFichasProducto((prev) => ({ ...prev, [keyFicha(it)]: row }));
       setOkFicha("Ficha técnica guardada.");
+      if (String(fichaEditKey).startsWith("lib:")) { setFichasProducto({}); cargarListaFichas(); }
       cerrarEditorFicha();
     } catch (e) {
       setOkFicha("Error: " + mensajeError(e, "No se pudo guardar la ficha técnica."));
@@ -6828,8 +6856,63 @@ export default function App() {
               <>
                 <div className="aq-row-head">
                   <h2>Cotizaciones</h2>
-                  <button className="aq-btn-sec" onClick={nuevaCotizacion}>+ Nueva cotización</button>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button className={verFichas ? "aq-btn" : "aq-btn-sec"} onClick={() => { const v = !verFichas; setVerFichas(v); if (v) cargarListaFichas(); }}>
+                      📄 Fichas técnicas
+                    </button>
+                    <button className="aq-btn-sec" onClick={nuevaCotizacion}>+ Nueva cotización</button>
+                  </div>
                 </div>
+
+                {verFichas && (
+                  <div style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 12, marginBottom: 14, background: "#F8FAFC" }}>
+                    <div className="aq-row-head" style={{ marginBottom: 8 }}>
+                      <strong>Fichas técnicas guardadas</strong>
+                      <button className="aq-btn" onClick={() => abrirFichaBiblioteca(null)}>+ Nueva ficha</button>
+                    </div>
+                    <p className="aq-muted" style={{ marginTop: 0 }}>
+                      Una ficha se usa en la cotización cuando el nombre de la línea es igual al nombre de la ficha o empieza con él
+                      (ej. la ficha «Bomba de agua USB» sirve para «Bomba de agua USB — negra»). Las variantes con nombre más largo tienen prioridad.
+                    </p>
+                    <div className="aq-search" style={{ marginBottom: 8 }}>
+                      <input placeholder="Buscar ficha…" value={buscarFicha} onChange={(e) => setBuscarFicha(e.target.value)} />
+                    </div>
+                    {listaFichas === null ? (
+                      <p className="aq-muted">Cargando fichas…</p>
+                    ) : (() => {
+                      const q = buscarFicha.trim().toLowerCase();
+                      const lista = listaFichas.filter((f) => !q || (f.producto_nombre || "").toLowerCase().includes(q));
+                      if (!lista.length) return <p className="aq-muted">No hay fichas para esta búsqueda.</p>;
+                      const nombres = listaFichas.filter((f) => f.activa).map((f) => f.producto_nombre || "");
+                      return (
+                        <div className="aq-items">
+                          {lista.map((f) => {
+                            const nom = f.producto_nombre || "(producto del catálogo)";
+                            const esVariante = nombres.some((n) => n && n !== nom && nom.startsWith(n));
+                            return (
+                              <div className="aq-det-line" key={f.id} style={{ display: "flex", alignItems: "center", gap: 10, opacity: f.activa ? 1 : 0.5 }}>
+                                {f.imagen_url
+                                  ? <img src={f.imagen_url} alt="" style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 8, border: "1px solid var(--line)" }} />
+                                  : <div style={{ width: 44, height: 44, borderRadius: 8, background: "#E2E8F0" }} />}
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontWeight: 700 }}>{nom}</div>
+                                  <div className="aq-muted" style={{ fontSize: 12 }}>
+                                    {esVariante ? "Variante" : "Ficha base"}
+                                    {f.garantia ? " · Garantía " + f.garantia : ""}
+                                    {Array.isArray(f.specs) && f.specs.length ? " · " + f.specs.length + " especificación(es)" : ""}
+                                    {!f.activa ? " · Desactivada" : ""}
+                                  </div>
+                                </div>
+                                <button className="aq-btn-sec" onClick={() => abrirFichaBiblioteca(f)}>Editar</button>
+                                <button className="aq-link" onClick={() => cambiarActivaFicha(f, !f.activa)}>{f.activa ? "Desactivar" : "Activar"}</button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
                 <div className="aq-search" style={{ marginBottom: 8 }}>
                   <input
                     placeholder="Buscar por folio, cliente o RUT…"
@@ -7130,6 +7213,15 @@ export default function App() {
               {okFicha && <div className={"aq-result " + (okFicha.startsWith("Error") ? "bad" : "ok")}>{okFicha}</div>}
 
               <div className="aq-modal-edit">
+                {String(fichaEditKey).startsWith("lib:") && !fichaEditDraft.producto_id && (
+                  <label className="aq-full">Nombre del producto (tal como aparece en la cotización)
+                    <input
+                      value={fichaEditDraft.producto_nombre || ""}
+                      onChange={(e) => setFichaEditDraft((prev) => ({ ...prev, producto_nombre: e.target.value }))}
+                      placeholder="Ej: Bomba de agua USB"
+                    />
+                  </label>
+                )}
                 <label className="aq-full">Descripción
                   <textarea
                     rows="2"
