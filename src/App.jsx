@@ -2144,8 +2144,13 @@ export default function App() {
       } catch { /* queda pendiente de envío, igual que un pedido normal */ }
       setSumupMsg({
         ok: true,
-        msg: `SumUp #${pp.sumup_numero} → pedido ${pedido?.numero_guia} creado (${f.chofer}, ${fecha.split("-").reverse().join("-")}). ${enviado ? "Enviado a DispatchTrack." : "Envío a DispatchTrack pendiente."}`,
+        msg: `SumUp #${pp.sumup_numero} → pedido ${pedido?.numero_guia} creado (${f.chofer}, ${fecha.split("-").reverse().join("-")}). ${enviado ? "Enviado a DispatchTrack." : "Envío a DispatchTrack pendiente."}${data?.email_actualizado ? " Correo del cliente actualizado." : ""}`,
       });
+      // Refleja en memoria el correo nuevo del cliente (la base ya quedó actualizada).
+      if (data?.email_actualizado && pp.cliente_email) {
+        const nuevo = pp.cliente_email.trim().toLowerCase();
+        setClientes((prev) => prev.map((c) => (c.id === f.clienteId ? { ...c, email: nuevo, email_status: "ok" } : c)));
+      }
       setSumupEdit((prev) => { const n = { ...prev }; delete n[pp.id]; return n; });
       await cargarSumup();
     } catch (e) {
@@ -6279,6 +6284,13 @@ export default function App() {
                               {!doms.some((d) => d.id === f.domicilioId) && <option value="">Elige domicilio…</option>}
                               {doms.map((d) => <option key={d.id} value={d.id}>{[d.direccion, d.comuna].filter(Boolean).join(", ")}{d.es_principal ? " (principal)" : ""}</option>)}
                             </select>
+                            {pp.cliente_email && /^[^@\s,;]+@[^@\s,;]+\.[a-z]{2,}$/i.test(pp.cliente_email.trim())
+                              && pp.cliente_email.trim().toLowerCase() !== String(cli.email || "").trim().toLowerCase() && (
+                              <div className="aq-sumup-mail">
+                                ✉ Al aceptar, su correo se actualiza a <strong>{pp.cliente_email.trim().toLowerCase()}</strong>
+                                {cli.email ? <span className="aq-muted"> (antes: {cli.email})</span> : null}
+                              </div>
+                            )}
                             <button className="aq-link-btn" onClick={() => setSumupForm(pp, { clienteId: "", domicilioId: "", buscar: "" })}>Cambiar cliente</button>
                           </>
                         ) : (
@@ -8902,6 +8914,7 @@ html, body { overflow-x:hidden; }
 .aq-sumup-total { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; font-size:14px; margin-top:4px; }
 .aq-sumup-res { display:block; width:100%; text-align:left; background:#f7f9fc; border:1px solid var(--line); border-radius:8px; padding:6px 9px; margin-top:4px; font:inherit; font-size:13px; cursor:pointer; }
 .aq-sumup-res:hover { background:#eef4fb; }
+.aq-sumup-mail { margin-top:6px; background:#eef6ff; border:1px solid #bfdbfe; color:#1e3a8a; border-radius:8px; padding:6px 9px; font-size:13px; }
 .aq-sumup-ok { background:#e8f5ee; color:var(--ok); border-radius:8px; padding:9px 12px; font-size:14px; font-weight:600; }
 .aq-seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
 .aq-seg button { background:#fff; border:none; border-right:1px solid var(--line); font:inherit; font-size:13px; font-weight:600; padding:6px 12px; cursor:pointer; color:var(--ink); }
