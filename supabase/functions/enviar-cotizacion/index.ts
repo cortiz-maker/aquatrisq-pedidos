@@ -106,6 +106,7 @@ function buildHtml(c: any, items: any[], nombre: string, link: string, condicion
       <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;border-radius:12px;padding:10px 22px;">
         <div style="font-size:10px;color:#64748B;letter-spacing:1px;text-transform:uppercase;font-weight:800;font-family:Arial,sans-serif;text-align:center;">Total cotizado</div>
         <div style="font-size:26px;font-weight:900;color:${COLOR};font-family:Arial,sans-serif;text-align:center;">${clp(c.total)}</div>
+        <div style="font-size:10px;color:#64748B;font-family:Arial,sans-serif;text-align:center;">IVA incluido</div>
       </td></tr>
     </table>
   </td></tr>
@@ -126,7 +127,7 @@ function buildHtml(c: any, items: any[], nombre: string, link: string, condicion
       </tr>
       ${filas}
       <tr>
-        <td colspan="3" style="padding:12px 0 0;font-size:13px;font-weight:800;color:${COLOR};font-family:Arial,sans-serif;">Total</td>
+        <td colspan="3" style="padding:12px 0 0;font-size:13px;font-weight:800;color:${COLOR};font-family:Arial,sans-serif;">Total <span style="font-weight:400;color:#64748B;font-size:11px;">(IVA incluido)</span></td>
         <td align="right" style="padding:12px 0 0;font-size:15px;font-weight:900;color:${COLOR};font-family:Arial,sans-serif;white-space:nowrap;">${clp(c.total)}</td>
       </tr>
     </table>

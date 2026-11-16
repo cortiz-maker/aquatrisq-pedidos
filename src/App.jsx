@@ -3173,6 +3173,10 @@ export default function App() {
       y += 22;
       doc.setFont("helvetica", "bold"); doc.setFontSize(12);
       doc.text("Total: " + CLP(totalPdf), 595 - M, y, { align: "right" });
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90);
+      doc.text("Precios con IVA incluido", 595 - M, y + 13, { align: "right" });
+      doc.setTextColor(0);
+      y += 10;
 
       // Medios de pago (fijo, se imprime en toda cotización).
       y += 26;
@@ -7011,7 +7015,7 @@ export default function App() {
                   </div>
                 )}
 
-                <p style={{ textAlign: "right", marginTop: 8 }}><strong>Total: {CLP(totalCotiz)}</strong></p>
+                <p style={{ textAlign: "right", marginTop: 8 }}><strong>Total: {CLP(totalCotiz)}</strong> <span className="aq-muted">(IVA incluido)</span></p>
 
                 {condicionCotiz && (
                   <div style={{ marginTop: 8, border: "1px solid #0D9488", background: "#F0FDFA", borderRadius: 10, padding: "10px 12px" }}>
