@@ -2614,6 +2614,33 @@ export default function App() {
     });
   }
 
+  // Duplicar para otra sucursal: copia productos, precios, vigencia y notas en
+  // una cotización NUEVA (folio propio al guardar) y deja el cliente en blanco
+  // para elegir el contacto de la otra sucursal / mall.
+  function duplicarCotizacion() {
+    if (!cotizEdit) return;
+    const origen = cotizEdit.folio || "";
+    setCotizClienteTipo("existente");
+    setBuscarCotizCliente("");
+    setItemsCotiz((prev) => prev.map((it, i) => ({ ...it, key: "dup-" + Date.now() + "-" + i, id: undefined })));
+    setCotizEdit({
+      _nuevo: true,
+      cliente_id: null,
+      cliente_nombre: "",
+      es_potencial: false,
+      rut_empresa: "",
+      razon_social: "",
+      contacto_nombre: "",
+      contacto_email: "",
+      contacto_telefono: "",
+      fecha_emision: fechaHoyISO(),
+      fecha_vigencia: cotizEdit.fecha_vigencia || sumarDias(fechaHoyISO(), 15),
+      estado: "borrador",
+      notas: cotizEdit.notas || "",
+    });
+    setOkCotiz("Copia de " + origen + ": elige el contacto de la otra sucursal y guarda o envía (tendrá su propio folio).");
+  }
+
   async function abrirCotizacion(c) {
     setOkCotiz("");
     setCotizClienteTipo(c.cliente_id ? "existente" : "potencial");
@@ -7014,6 +7041,9 @@ export default function App() {
                   )}
                   {!cotizEdit._nuevo && (
                     <button className="aq-btn-sec" onClick={copiarTextoEnvioCotiz}>Copiar texto de envío</button>
+                  )}
+                  {!cotizEdit._nuevo && (
+                    <button className="aq-btn-sec" onClick={duplicarCotizacion}>Duplicar para otra sucursal</button>
                   )}
                   {!cotizEdit._nuevo && cotizEdit.estado !== "procesada" && (
                     <>
