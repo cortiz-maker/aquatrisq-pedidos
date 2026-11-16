@@ -204,8 +204,10 @@ function MapaComunasRM({ comunas }) {
   );
 }
 
-const CLP = (n) =>
-  "$" + (Number(n) || 0).toLocaleString("es-CL", { maximumFractionDigits: 0 });
+const CLP = (n) => {
+  const v = Number(n) || 0;
+  return (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("es-CL", { maximumFractionDigits: 0 });
+};
 
 // Mensaje que ve el operador y que se envía por correo al cliente.
 function mensajeConfirmacion(guia, nombreCliente) {
@@ -2655,8 +2657,11 @@ export default function App() {
         // el <select> quede bien seleccionado al reabrir.
         let producto_id = l.producto_id;
         if (!producto_id) {
-          const match = CATALOGO_EQUIPOS_COTIZ.find((p) => p.nombre === l.nombre_producto);
-          if (match) producto_id = match.id;
+          // Coincidencia exacta o por prefijo (p. ej. "Bomba de agua USB — verde…").
+          const match = CATALOGO_EQUIPOS_COTIZ.find((p) => p.nombre === l.nombre_producto)
+            || CATALOGO_EQUIPOS_COTIZ.find((p) => String(l.nombre_producto || "").startsWith(p.nombre));
+          // Línea personalizada (descuento, texto libre): se conserva tal cual.
+          producto_id = match ? match.id : "eq-custom";
         }
         return {
           key: l.id,
@@ -6967,6 +6972,7 @@ export default function App() {
                       <div key={it.key}>
                         <div className="aq-item">
                           <select value={it.producto_id || ""} onChange={(e) => cambiarProductoCotizLinea(it.key, e.target.value)}>
+                            {it.producto_id === "eq-custom" && <option value="eq-custom">{it.nombre}</option>}
                             {Object.entries(catalogoCotizPorGrupo).map(([grupo, lista]) => (
                               <optgroup key={grupo} label={grupo}>
                                 {lista.map((p) => (

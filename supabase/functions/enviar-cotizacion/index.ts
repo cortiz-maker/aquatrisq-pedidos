@@ -45,7 +45,7 @@ const emailOk = (x: unknown) => typeof x === "string" && /^[^@\s,;]+@[^@\s,;]+\.
 function esc(v: unknown): string {
   return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-const clp = (n: unknown) => "$" + Math.round(Number(n) || 0).toLocaleString("es-CL");
+const clp = (n: unknown) => { const v = Math.round(Number(n) || 0); return (v < 0 ? "−$" : "$") + Math.abs(v).toLocaleString("es-CL"); };
 function fechaCL(iso: string | null): string {
   if (!iso) return "—";
   const [y, m, d] = String(iso).slice(0, 10).split("-");
