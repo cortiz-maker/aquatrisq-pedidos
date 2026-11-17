@@ -960,6 +960,7 @@ export default function App() {
   const [buscarFact, setBuscarFact] = useState("");            // texto de búsqueda por cliente, RUT o guía
   const [facturaInputs, setFacturaInputs] = useState({});     // clave (guías separadas por coma) -> texto en edición
   const [facturaArchivos, setFacturaArchivos] = useState({}); // clave -> File (PDF) opcional
+  const [facturaOcArchivos, setFacturaOcArchivos] = useState({}); // PDF de la OC del cliente por grupo
   const [facturaModo, setFacturaModo] = useState({});         // claveG cliente -> "todos" | "individual"
   const [guardandoFacturaGuia, setGuardandoFacturaGuia] = useState(null);
   const [grupoAbierto, setGrupoAbierto] = useState({});       // "fact-<clienteId>" | "bid-<clienteId>" -> bool
@@ -1807,7 +1808,7 @@ export default function App() {
   // Guarda el N° de documento (y opcionalmente el PDF emitido) para todas las
   // guías indicadas de una sola vez — cubre el caso de un cliente que acumula
   // varios pedidos y recibe una sola factura consolidada. El archivo es opcional.
-  async function guardarDocumentoEmitidoGrupo(guias, valor, archivo) {
+  async function guardarDocumentoEmitidoGrupo(guias, valor, archivo, ocArchivo) {
     const v = (valor || "").trim();
     if (!v || !guias.length) return;
     const clave = guias.join(",");
@@ -1823,13 +1824,25 @@ export default function App() {
         if (up.error) throw up.error;
         url = path;
       }
+      // OC del cliente (opcional): se adjunta al aviso de factura junto al documento.
+      let ocUrl = null;
+      if (ocArchivo) {
+        const pathOc = `OC-${guias[0]}-${Date.now()}.pdf`;
+        const upOc = await supabase.storage
+          .from("documentos-facturas")
+          .upload(pathOc, ocArchivo, { upsert: false, contentType: ocArchivo.type || "application/pdf" });
+        if (upOc.error) throw upOc.error;
+        ocUrl = pathOc;
+      }
       const patch = { numero_documento_emitido: v, documento_emitido_en: new Date().toISOString() };
       if (url) patch.documento_emitido_url = url;
+      if (ocUrl) patch.oc_adjunto_url = ocUrl;
       const { error } = await supabase.from("pedidos").update(patch).in("numero_guia", guias);
       if (error) throw error;
       await recargarDocumentos();
       setFacturaInputs((prev) => { const n = { ...prev }; delete n[clave]; return n; });
       setFacturaArchivos((prev) => { const n = { ...prev }; delete n[clave]; return n; });
+      setFacturaOcArchivos((prev) => { const n = { ...prev }; delete n[clave]; return n; });
     } catch (e) {
       setErrorFact(mensajeError(e, "No se pudo guardar el número de documento."));
     } finally {
@@ -6341,10 +6354,19 @@ export default function App() {
                                 title="PDF del documento emitido (opcional)"
                                 onChange={(e) => setFacturaArchivos((prev) => ({ ...prev, [clave]: e.target.files?.[0] || null }))}
                               />
+                              <label className="aq-muted" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                                OC (PDF, opcional)
+                                <input
+                                  type="file"
+                                  accept="application/pdf"
+                                  title="Orden de compra del cliente: se adjunta al correo junto a la factura"
+                                  onChange={(e) => setFacturaOcArchivos((prev) => ({ ...prev, [clave]: e.target.files?.[0] || null }))}
+                                />
+                              </label>
                               <button
                                 className="aq-btn-sec"
                                 disabled={guardandoFacturaGuia === clave || !(facturaInputs[clave] || "").trim()}
-                                onClick={() => guardarDocumentoEmitidoGrupo(guiasAccion, facturaInputs[clave], facturaArchivos[clave])}
+                                onClick={() => guardarDocumentoEmitidoGrupo(guiasAccion, facturaInputs[clave], facturaArchivos[clave], facturaOcArchivos[clave])}
                               >
                                 {guardandoFacturaGuia === clave ? "Guardando…" : (guiasAccion.length > 1 ? `Guardar para los ${guiasAccion.length} pedidos` : "Guardar")}
                               </button>
