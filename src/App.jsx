@@ -321,18 +321,87 @@ function montoEntrega(entrega) {
   const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
-// Compra Proveedor: substatus = "Compra Proveedor", campo "Prooveedor" contiene "Aguas Altas"
-// Monto: campo "Monto Factura"
+// Compra Proveedor: substatus = "Compra Proveedor".
+// Desde nov-2026 el formulario de DT ya no trae "Monto Factura": la deuda se calcula con las
+// cantidades (Bidones Nuevos 20/12 Lts, Recarga 20 Lts, Recarga 10/12 Lts) × precio vigente del
+// proveedor a la fecha de la compra (tabla precios_proveedor). Los cierres antiguos que sí traen
+// "Monto Factura" conservan ese monto digitado.
 function esCompraProveedor(entrega) {
   if (!entrega) return false;
   const sub = (entrega.substatus || "").trim();
   return sub === "Compra Proveedor";
 }
-function montoCompraProveedor(entrega) {
+// Precio general de respaldo (si la tabla aún no carga o no tiene fila).
+const PRECIO_BASE_PROV = { recarga_20: 600, recarga_1012: 300, bidon_nuevo_20: 2200, bidon_nuevo_12: 2000 };
+const CAMPOS_PRECIO_PROV = [
+  { k: "recarga_20", label: "Recarga 20 L", corto: "rec. 20L" },
+  { k: "recarga_1012", label: "Recarga 10/12 L", corto: "rec. 10/12L" },
+  { k: "bidon_nuevo_20", label: "Bidón nuevo 20 L", corto: "bid. nuevo 20L" },
+  { k: "bidon_nuevo_12", label: "Bidón nuevo 12 L", corto: "bid. nuevo 12L" },
+];
+let PRECIOS_PROV = []; // filas de precios_proveedor (proveedor '*' = general)
+let _preciosProvPromise = null;
+async function cargarPreciosProveedor(forzar = false) {
+  if (_preciosProvPromise && !forzar) return _preciosProvPromise;
+  _preciosProvPromise = (async () => {
+    try {
+      const { data, error } = await supabase.from("precios_proveedor").select("*").order("vigente_desde", { ascending: false }).order("id", { ascending: false });
+      if (!error) PRECIOS_PROV = data || [];
+    } catch { /* se usa PRECIO_BASE_PROV */ }
+    return PRECIOS_PROV;
+  })();
+  return _preciosProvPromise;
+}
+// Precio vigente de un campo para un proveedor a una fecha (YYYY-MM-DD). Nulo en el proveedor → general.
+function precioProveedor(proveedor, campo, fecha) {
+  const f = fecha || "9999-12-31";
+  const fila = (prov) => PRECIOS_PROV.find((r) => r.proveedor === prov && String(r.vigente_desde) <= f && r[campo] != null);
+  const r = fila(proveedor) || fila("*");
+  return r ? Number(r[campo]) || 0 : PRECIO_BASE_PROV[campo];
+}
+function cantidadesCompraProveedor(entrega) {
+  const c = { recarga_20: 0, recarga_1012: 0, bidon_nuevo_20: 0, bidon_nuevo_12: 0 };
+  answersFromRaw(entrega).forEach((a) => {
+    const nm = (a.name || "").toLowerCase();
+    const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+    if (!Number.isFinite(n)) return;
+    if (/bid[oó]n(es)?\s*nuevos?/.test(nm)) {
+      if (/12\s*l/.test(nm)) c.bidon_nuevo_12 += n; else c.bidon_nuevo_20 += n; // "Bidones Nuevos" antiguo = 20 L
+    } else if (/^\s*recarga\s*20/.test(nm)) c.recarga_20 += n;
+    else if (/^\s*recarga\s*1[02]/.test(nm)) c.recarga_1012 += n;
+  });
+  return c;
+}
+// Detalle del monto: { monto, origen: "factura" | "calculado", cant, precios }
+function detalleMontoProveedor(entrega) {
+  const cant = cantidadesCompraProveedor(entrega);
   const a = answersFromRaw(entrega).find((x) => /monto factura/i.test(x.name));
-  if (!a) return 0;
-  const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
-  return Number.isFinite(n) ? n : 0;
+  if (a) {
+    const n = Number(String(a.val).replace(/[^\d.-]/g, ""));
+    return { monto: Number.isFinite(n) ? n : 0, origen: "factura", cant, precios: null };
+  }
+  const d = parseFechaDT(entrega?.gestionado_en) || parseFechaDT(entrega?.arrived_at);
+  const fecha = d ? d.toLocaleDateString("en-CA", { timeZone: "America/Santiago" }) : null;
+  const prov = nombreProveedor(entrega);
+  const precios = {};
+  let monto = 0;
+  CAMPOS_PRECIO_PROV.forEach(({ k }) => {
+    precios[k] = precioProveedor(prov, k, fecha);
+    monto += (cant[k] || 0) * precios[k];
+  });
+  return { monto, origen: "calculado", cant, precios };
+}
+function montoCompraProveedor(entrega) {
+  return detalleMontoProveedor(entrega).monto;
+}
+// "20 rec. 20L × $600 · 5 bid. nuevo 20L × $2.200" (o "monto digitado" en cierres antiguos).
+function textoCantProv(d) {
+  if (!d || !d.cant) return "";
+  const fmt = (n) => "$" + Number(n || 0).toLocaleString("es-CL");
+  const partes = CAMPOS_PRECIO_PROV.filter(({ k }) => d.cant[k] > 0)
+    .map(({ k, corto }) => `${d.cant[k]} ${corto}` + (d.precios ? ` × ${fmt(d.precios[k])}` : ""));
+  if (d.origenMonto === "factura") return partes.length ? partes.join(" · ") + " · monto digitado" : "monto digitado";
+  return partes.length ? partes.join(" · ") : "sin cantidades";
 }
 // Rendición Efectivo: substatus = "Compra", campo "Tipo Compra" = "Rendición Efectivo"
 // Monto: campo "Monto Compra"
@@ -399,7 +468,9 @@ function esCompraProvPendiente(entrega) {
 }
 // Nombre del proveedor (campo "Proveedor" / "Prooveedor" — toleramos ambas grafías).
 function nombreProveedor(entrega) {
-  const a = answersFromRaw(entrega).find((x) => /pro+veedor/i.test(x.name));
+  // Solo el campo cuyo nombre es exactamente "Proveedor"/"Prooveedor" (no "Encargado Proveedor que Entrega").
+  const ans = answersFromRaw(entrega);
+  const a = ans.find((x) => /^\s*pro+veedor\s*$/i.test(x.name)) || ans.find((x) => /^\s*pro+veedor/i.test(x.name));
   return a && a.val ? String(a.val).trim() : "Proveedor sin nombre";
 }
 
@@ -489,6 +560,7 @@ function unidadesCompraProveedor(entrega) {
   let u20 = 0, u12 = 0, u10 = 0;
   answersFromRaw(entrega).forEach((a) => {
     const nm = (a.name || "").toLowerCase();
+    if (/bid[oó]n/.test(nm)) return; // bidones nuevos no son recargas
     if (/20\s*l/.test(nm)) u20 += numFrom(a.val);
     else if (/12\s*l/.test(nm)) u12 += numFrom(a.val);
     else if (/10\s*l/.test(nm)) u10 += numFrom(a.val);
@@ -611,6 +683,7 @@ async function descargarResumenEjecutivo(ger) {
 // pago de factura) en un mes posterior se refleje correctamente y no quede "perdido".
 // "Costo recargas del mes" en cambio SÍ es un flujo y se mantiene acotado al mes exacto.
 async function calcularCajaMes(mesKey) {
+  await cargarPreciosProveedor();
   const efectivo = {
     recaudacion: 0, comprasNoRend: 0, compraProvPagado: 0, rendicion: 0, aRendir: 0,
     compras: [], rendiciones: [], compraProvPagadoDet: [], recaudaciones: [], choferes: [],
@@ -871,6 +944,12 @@ export default function App() {
     (fineDesp || []).reduce((s, d) => s + (Number(d.valor) || 0), 0)
     - (fineMov || []).reduce((s, m) => s + (Number(m.monto) || 0), 0));
   const [mesProv, setMesProv] = useState(() => mesSantiago(new Date())); // mes visible en Pagos a proveedor
+  const [preciosProv, setPreciosProv] = useState([]);          // filas de precios_proveedor (editor)
+  const [verPreciosProv, setVerPreciosProv] = useState(false);
+  const [editPrecio, setEditPrecio] = useState({});            // proveedor -> { campo: valor, vigente_desde }
+  const [guardandoPrecio, setGuardandoPrecio] = useState("");
+  const [msgPrecio, setMsgPrecio] = useState("");
+  const [nuevoProvPrecio, setNuevoProvPrecio] = useState("");
   const [verAcumProv, setVerAcumProv] = useState(false);       // acumulado 12 meses (referencial)
   const [seleccionPago, setSeleccionPago] = useState({});   // numero_guia -> bool (marca masiva, solo admin)
   const [guardandoPagoMasivo, setGuardandoPagoMasivo] = useState(false);
@@ -1169,6 +1248,7 @@ export default function App() {
   // sumatoria de Compras (operativa) + Compra Proveedor por mes (línea, en vez
   // de conteo de pedidos).
   async function cargarEvolucion() {
+    await cargarPreciosProveedor();
     if (!credsListas || !session) return;
     setCargandoEvo(true); setErrorEvo("");
     try {
@@ -1383,6 +1463,8 @@ export default function App() {
   async function cargarDeudasProv() {
     setCargandoDeudas(true); setErrorDeudas("");
     try {
+      await cargarPreciosProveedor(true);
+      setPreciosProv([...PRECIOS_PROV]);
       const hoy = new Date();
       const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1).toISOString().slice(0, 10);
       const { data: peds, error: ePed } = await traerTodo(() => supabase
@@ -1434,11 +1516,15 @@ export default function App() {
         const pago = pagosMap[gN];
         const pagadoApp = !!(pago && pago.pagado);
         const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
-        const monto = montoCompraProveedor(e);
+        const det = detalleMontoProveedor(e);
+        const monto = det.monto;
         const abonado = Number(pago?.abonado) || 0;
         // La deuda se genera cuando el chofer cierra la "Compra Proveedor" en DispatchTrack.
         const fDeuda = parseFechaDT(e.gestionado_en) || parseFechaDT(e.arrived_at) || parseFechaDT(creadoPorGuia[e.guide]);
         lista.push({
+          origenMonto: det.origen,
+          cant: det.cant,
+          precios: det.precios,
           fecha_deuda: fDeuda ? fDeuda.toISOString() : null,
           fecha_deuda_txt: fDeuda ? fechaSantiago(fDeuda) : "—",
           mes_deuda: fDeuda ? mesSantiago(fDeuda) : (mesPorGuia[e.guide] || pago?.mes || hoyPeriodo()),
@@ -1463,6 +1549,33 @@ export default function App() {
       setDeudasProv(null);
     } finally {
       setCargandoDeudas(false);
+    }
+  }
+  // Guarda precios de un proveedor ('*' = general) como nueva vigencia (no pisa la historia).
+  async function guardarPrecioProv(proveedor) {
+    const ed = editPrecio[proveedor] || {};
+    const fila = { proveedor, vigente_desde: ed.vigente_desde || new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" }), actualizado_por: perfilNombre || null };
+    let alguno = false;
+    for (const { k, label } of CAMPOS_PRECIO_PROV) {
+      const v = ed[k];
+      if (v === undefined || v === "") { fila[k] = null; continue; }
+      const n = Math.round(Number(v));
+      if (!Number.isFinite(n) || n < 0) { setMsgPrecio(`Precio inválido en ${label}.`); return; }
+      fila[k] = n; alguno = true;
+    }
+    if (proveedor === "*" && CAMPOS_PRECIO_PROV.some(({ k }) => fila[k] == null)) { setMsgPrecio("El precio general debe tener los 4 valores."); return; }
+    if (!alguno) { setMsgPrecio("Ingresa al menos un precio (los vacíos usan el general)."); return; }
+    setGuardandoPrecio(proveedor); setMsgPrecio("");
+    try {
+      const { error } = await supabase.from("precios_proveedor").insert(fila);
+      if (error) throw error;
+      setEditPrecio((prev) => { const n = { ...prev }; delete n[proveedor]; return n; });
+      setMsgPrecio(`Precios de ${proveedor === "*" ? "General" : proveedor} guardados desde ${fila.vigente_desde.split("-").reverse().join("-")}.`);
+      await cargarDeudasProv();
+    } catch (e) {
+      setMsgPrecio(mensajeError(e, "No se pudo guardar el precio."));
+    } finally {
+      setGuardandoPrecio("");
     }
   }
   // ── Cuenta corriente Fine ──
@@ -6217,6 +6330,7 @@ export default function App() {
                                   )}
                                   <span style={{ flex: 1 }}>
                                     Guía {d.numero_guia}<em className="aq-det-chofer">Generada {d.fecha_deuda_txt} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
+                                    <em className="aq-det-chofer">{textoCantProv(d)}</em>
                                   </span>
                                   <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                     {CLP(d.monto)}
@@ -6239,6 +6353,7 @@ export default function App() {
                                       ? `Pagado por ${d.pagado_por || "—"}${d.fecha_pago ? " · " + new Date(d.fecha_pago).toLocaleDateString("es-CL") : ""}`
                                       : "Pagado (DispatchTrack)"}
                                   </em>
+                                  <em className="aq-det-chofer">{textoCantProv(d)}</em>
                                 </span>
                                 <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                   {CLP(d.monto)}
@@ -6253,6 +6368,99 @@ export default function App() {
                       </div>
                     );
                   })}
+
+                  {rol === "admin" && (() => {
+                    const hoyYMD = new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+                    const vigente = (prov) => {
+                      const r = preciosProv.find((x) => x.proveedor === prov && String(x.vigente_desde) <= hoyYMD);
+                      return r || null;
+                    };
+                    const provs = Array.from(new Set([
+                      ...deudasProv.map((d) => d.proveedor).filter((p) => p && p !== "Proveedor sin nombre"),
+                      ...preciosProv.map((r) => r.proveedor).filter((p) => p !== "*"),
+                      ...Object.keys(editPrecio).filter((p) => p !== "*"),
+                    ])).sort((a, b) => a.localeCompare(b));
+                    const filas = ["*", ...provs];
+                    return (
+                      <div className="aq-prov-acum">
+                        <button className="aq-link" onClick={() => { setVerPreciosProv((v) => !v); setMsgPrecio(""); }}>
+                          {verPreciosProv ? "▲" : "▼"} Precios por proveedor
+                        </button>
+                        {verPreciosProv && (
+                          <div style={{ marginTop: 8 }}>
+                            <p className="aq-muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+                              La deuda de cada Compra Proveedor se calcula con las cantidades del cierre en DispatchTrack × el precio vigente a la fecha de la compra.
+                              Un casillero vacío en un proveedor usa el precio General. Guardar crea una nueva vigencia: las compras anteriores mantienen su precio.
+                            </p>
+                            {msgPrecio && <div className="aq-muted" style={{ marginBottom: 8, color: "var(--navy)" }}>{msgPrecio}</div>}
+                            <div className="aq-precios-prov">
+                              <div className="aq-precios-row head">
+                                <span>Proveedor</span>
+                                {CAMPOS_PRECIO_PROV.map(({ k, label }) => <span key={k}>{label}</span>)}
+                                <span>Desde</span>
+                                <span></span>
+                              </div>
+                              {filas.map((prov) => {
+                                const v = vigente(prov);
+                                const ed = editPrecio[prov];
+                                const editando = !!ed;
+                                const general = vigente("*");
+                                return (
+                                  <div className="aq-precios-row" key={prov}>
+                                    <strong>{prov === "*" ? "General" : prov}</strong>
+                                    {CAMPOS_PRECIO_PROV.map(({ k }) => (
+                                      editando ? (
+                                        <input key={k} type="number" min="0" inputMode="numeric" value={ed[k] ?? ""}
+                                          placeholder={prov === "*" ? "" : String(general?.[k] ?? PRECIO_BASE_PROV[k])}
+                                          onChange={(e) => setEditPrecio((p) => ({ ...p, [prov]: { ...p[prov], [k]: e.target.value } }))} />
+                                      ) : (
+                                        <span key={k} className={v && v[k] != null ? "" : "aq-muted"}>
+                                          {v && v[k] != null ? CLP(v[k]) : (prov === "*" ? CLP(PRECIO_BASE_PROV[k]) : "general")}
+                                        </span>
+                                      )
+                                    ))}
+                                    {editando ? (
+                                      <input type="date" value={ed.vigente_desde || hoyYMD}
+                                        onChange={(e) => setEditPrecio((p) => ({ ...p, [prov]: { ...p[prov], vigente_desde: e.target.value } }))} />
+                                    ) : (
+                                      <span className="aq-muted">{v ? String(v.vigente_desde).split("-").reverse().join("-") : "—"}</span>
+                                    )}
+                                    <span style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                                      {editando ? (
+                                        <>
+                                          <button className="aq-btn-sec" disabled={guardandoPrecio === prov} onClick={() => guardarPrecioProv(prov)}>
+                                            {guardandoPrecio === prov ? "Guardando…" : "Guardar"}
+                                          </button>
+                                          <button className="aq-link" onClick={() => setEditPrecio((p) => { const n = { ...p }; delete n[prov]; return n; })}>Cancelar</button>
+                                        </>
+                                      ) : (
+                                        <button className="aq-btn-sec" onClick={() => {
+                                          const ini = {};
+                                          CAMPOS_PRECIO_PROV.forEach(({ k }) => { ini[k] = v && v[k] != null ? String(v[k]) : (prov === "*" ? String(PRECIO_BASE_PROV[k]) : ""); });
+                                          ini.vigente_desde = hoyYMD;
+                                          setEditPrecio((p) => ({ ...p, [prov]: ini }));
+                                          setMsgPrecio("");
+                                        }}>Editar</button>
+                                      )}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+                              <input type="text" placeholder="Agregar proveedor (nombre igual que en DispatchTrack, ej. Cubita)" value={nuevoProvPrecio}
+                                onChange={(e) => setNuevoProvPrecio(e.target.value)} style={{ flex: 1 }} />
+                              <button className="aq-btn-sec" disabled={!nuevoProvPrecio.trim()} onClick={() => {
+                                const n = nuevoProvPrecio.trim();
+                                setEditPrecio((p) => ({ ...p, [n]: { vigente_desde: hoyYMD } }));
+                                setNuevoProvPrecio("");
+                              }}>Agregar</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   <div className="aq-prov-acum">
                     <button className="aq-link" onClick={() => setVerAcumProv((v) => !v)}>
@@ -9215,6 +9423,12 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 /* Tarjetas de Pagos a proveedor agrupadas por proveedor */
 .aq-prov-tarjeta { border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
 .aq-prov-acum { margin-top:18px; padding-top:12px; border-top:1px dashed var(--line); }
+.aq-precios-prov { display:flex; flex-direction:column; gap:4px; overflow-x:auto; }
+.aq-precios-row { display:grid; grid-template-columns: minmax(150px,1.6fr) repeat(4, minmax(90px,1fr)) minmax(110px,1fr) minmax(140px,auto); gap:8px; align-items:center;
+  padding:6px 8px; border-radius:8px; font-size:13px; }
+.aq-precios-row:nth-child(even) { background:#f6f9fc; }
+.aq-precios-row.head { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; background:none; }
+.aq-precios-row input { width:100%; padding:6px 8px; font-size:13px; }
 .aq-prov-tarjeta-head { display:flex; align-items:center; gap:14px; flex-wrap:wrap; cursor:pointer; }
 .aq-prov-tarjeta-head strong { display:block; color:var(--navy); font-size:15px; }
 .aq-prov-tarjeta-info { flex:1; min-width:160px; }
