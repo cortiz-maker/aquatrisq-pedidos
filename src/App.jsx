@@ -451,6 +451,27 @@ async function traerTodo(build, pagina = 1000) {
 
 // ── Reglas de caja compartidas (panel gerencial + mantenedor de deudas) ──
 const normGuia = (g) => String(g || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+// Fechas de DispatchTrack vienen como "2026-11-18 12:40:32-0300" o ISO; se normalizan para todos los navegadores.
+function parseFechaDT(s) {
+  if (!s) return null;
+  // Normaliza la zona horaria al final de la hora: -0300 → -03:00, +00 → +00:00.
+  const t = String(s).trim().replace(" ", "T")
+    .replace(/(T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)([+-]\d{2})(\d{2})?$/, (_, h, hh, mm) => `${h}${hh}:${mm || "00"}`);
+  const d = new Date(t);
+  return isNaN(d.getTime()) ? null : d;
+}
+const mesSantiago = (d) => d.toLocaleDateString("en-CA", { timeZone: "America/Santiago" }).slice(0, 7); // YYYY-MM
+const fechaSantiago = (d) => d.toLocaleDateString("es-CL", { timeZone: "America/Santiago", day: "2-digit", month: "2-digit", year: "numeric" });
+const etiquetaMes = (mesKey) => {
+  const [y, m] = mesKey.split("-").map(Number);
+  const s = new Date(y, m - 1, 1).toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+  return s.charAt(0).toUpperCase() + s.slice(1);
+};
+const moverMes = (mesKey, delta) => {
+  const [y, m] = mesKey.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
 // Guías excluidas de todo cálculo de caja.
 const EXCLUIR_GUIAS = new Set(["AQ00015", "AQ00012", "AQ00006"]);
 // Chofer real cuando DispatchTrack dejó el campo vacío. Clave = guía sin guiones.
@@ -849,6 +870,8 @@ export default function App() {
   const saldoFineGlobal = Math.max(0,
     (fineDesp || []).reduce((s, d) => s + (Number(d.valor) || 0), 0)
     - (fineMov || []).reduce((s, m) => s + (Number(m.monto) || 0), 0));
+  const [mesProv, setMesProv] = useState(() => mesSantiago(new Date())); // mes visible en Pagos a proveedor
+  const [verAcumProv, setVerAcumProv] = useState(false);       // acumulado 12 meses (referencial)
   const [seleccionPago, setSeleccionPago] = useState({});   // numero_guia -> bool (marca masiva, solo admin)
   const [guardandoPagoMasivo, setGuardandoPagoMasivo] = useState(false);
   // ── Abonos parciales (cobro a cliente + deuda proveedor) ──
@@ -1369,12 +1392,14 @@ export default function App() {
         .order("id", { ascending: true }));
       if (ePed) throw ePed;
       const mesPorGuia = {}; // guía → mes de origen (mes del pedido, no el mes actual)
+      const creadoPorGuia = {}; // guía → created_at del pedido (respaldo de la fecha de la deuda)
       const guias = [];
       const vistos = new Set();
       (peds || []).forEach((p) => {
         if (!p.numero_guia) return;
         const m = (p.created_at || "").slice(0, 7);
         if (!mesPorGuia[p.numero_guia]) mesPorGuia[p.numero_guia] = m;
+        if (!creadoPorGuia[p.numero_guia]) creadoPorGuia[p.numero_guia] = p.created_at;
         if (!vistos.has(p.numero_guia)) { vistos.add(p.numero_guia); guias.push(p.numero_guia); }
       });
       let entsMes = [];
@@ -1411,7 +1436,12 @@ export default function App() {
         const pagadoDT = !FORZAR_PENDIENTE.has(gN) && esCompraProvPagada(e);
         const monto = montoCompraProveedor(e);
         const abonado = Number(pago?.abonado) || 0;
+        // La deuda se genera cuando el chofer cierra la "Compra Proveedor" en DispatchTrack.
+        const fDeuda = parseFechaDT(e.gestionado_en) || parseFechaDT(e.arrived_at) || parseFechaDT(creadoPorGuia[e.guide]);
         lista.push({
+          fecha_deuda: fDeuda ? fDeuda.toISOString() : null,
+          fecha_deuda_txt: fDeuda ? fechaSantiago(fDeuda) : "—",
+          mes_deuda: fDeuda ? mesSantiago(fDeuda) : (mesPorGuia[e.guide] || pago?.mes || hoyPeriodo()),
           numero_guia: e.guide,
           proveedor: nombreProveedor(e),
           monto,
@@ -1426,7 +1456,7 @@ export default function App() {
           respaldo_path: pago?.respaldo_path || null,
         });
       });
-      lista.sort((a, b) => Number(a.pagado) - Number(b.pagado) || (a.mes < b.mes ? 1 : a.mes > b.mes ? -1 : 0) || b.monto - a.monto);
+      lista.sort((a, b) => Number(a.pagado) - Number(b.pagado) || String(b.fecha_deuda || "").localeCompare(String(a.fecha_deuda || "")) || b.monto - a.monto);
       setDeudasProv(lista);
     } catch (e) {
       setErrorDeudas(mensajeError(e, "No se pudieron cargar las deudas."));
@@ -6016,7 +6046,7 @@ export default function App() {
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
               <div>
                 <h2 style={{ margin: 0 }}>Pagos a proveedor</h2>
-                <span className="aq-muted">Compras a proveedor pendientes (últimos 12 meses) · marca cada una como pagada con su respaldo bancario.</span>
+                <span className="aq-muted">Compras a proveedor por mes, según la fecha en que se generó la deuda · marca cada una como pagada con su respaldo bancario.</span>
               </div>
               <button className="aq-btn-sec" onClick={cargarDeudasProv} disabled={cargandoDeudas}>↻ Actualizar</button>
             </div>
@@ -6028,12 +6058,39 @@ export default function App() {
             )}
 
             {!cargandoDeudas && deudasProv && deudasProv.length > 0 && (() => {
-              const totGen = deudasProv.reduce((s, d) => s + d.monto, 0);
-              const totSaldo = deudasProv.filter((d) => !d.pagado).reduce((s, d) => s + (d.saldo ?? d.monto), 0);
+              const saldoDe = (arr) => arr.filter((d) => !d.pagado).reduce((s, d) => s + (d.saldo ?? d.monto), 0);
+              // Acumulado 12 meses: solo referencial.
+              const acumGen = deudasProv.reduce((s, d) => s + d.monto, 0);
+              const acumSaldo = saldoDe(deudasProv);
+              // Mes seleccionado (por fecha de generación de la deuda).
+              const mesHoy = mesSantiago(new Date());
+              const delMes = deudasProv.filter((d) => d.mes_deuda === mesProv);
+              const totGen = delMes.reduce((s, d) => s + d.monto, 0);
+              const totSaldo = saldoDe(delMes);
               const totPagado = totGen - totSaldo; // pagos completos + abonos parciales
+              // Saldo pendiente de otros meses, para que no se pierda de vista.
+              const pendOtros = {};
+              deudasProv.forEach((d) => {
+                if (d.pagado || d.mes_deuda === mesProv) return;
+                pendOtros[d.mes_deuda] = (pendOtros[d.mes_deuda] || 0) + (d.saldo ?? d.monto);
+              });
+              const mesesPendOtros = Object.keys(pendOtros).sort().reverse();
+              const mesMin = moverMes(mesHoy, -11);
+              // Resumen por mes para la sección referencial.
+              const porMes = {};
+              deudasProv.forEach((d) => {
+                const k = d.mes_deuda;
+                if (!porMes[k]) porMes[k] = { gen: 0, items: [] };
+                porMes[k].gen += d.monto;
+                porMes[k].items.push(d);
+              });
+              const filasMes = Object.keys(porMes).sort().reverse().map((k) => {
+                const saldo = saldoDe(porMes[k].items);
+                return { mes: k, gen: porMes[k].gen, pag: porMes[k].gen - saldo, saldo };
+              });
 
               const grupos = {};
-              deudasProv.forEach((d) => {
+              delMes.forEach((d) => {
                 const key = d.proveedor || "Proveedor sin nombre";
                 if (!grupos[key]) grupos[key] = { proveedor: key, items: [] };
                 grupos[key].items.push(d);
@@ -6051,11 +6108,33 @@ export default function App() {
 
               return (
                 <>
-                  <div className="aq-desglose" style={{ marginBottom: 16 }}>
-                    <div className="aq-desglose-row"><span>Generado (12 meses)</span><strong>{CLP(totGen)}</strong></div>
-                    <div className="aq-desglose-row"><span>Pagado / abonado</span><strong className="pos">{CLP(totPagado)}</strong></div>
-                    <div className="aq-desglose-row total"><span>Saldo pendiente</span><strong className="neg">{CLP(totSaldo)}</strong></div>
+                  <div className="aq-period" style={{ marginBottom: 10 }}>
+                    <button className="aq-per-nav" onClick={() => setMesProv((m) => moverMes(m, -1))} disabled={mesProv <= mesMin} aria-label="Mes anterior">‹</button>
+                    <div className="aq-per-label"><span>Deuda generada en</span><strong>{etiquetaMes(mesProv)}</strong></div>
+                    <button className="aq-per-nav" onClick={() => setMesProv((m) => moverMes(m, 1))} disabled={mesProv >= mesHoy} aria-label="Mes siguiente">›</button>
                   </div>
+
+                  <div className="aq-desglose" style={{ marginBottom: 10 }}>
+                    <div className="aq-desglose-row"><span>Generado en {etiquetaMes(mesProv).toLowerCase()}</span><strong>{CLP(totGen)}</strong></div>
+                    <div className="aq-desglose-row"><span>Pagado / abonado</span><strong className="pos">{CLP(totPagado)}</strong></div>
+                    <div className="aq-desglose-row total"><span>Saldo pendiente del mes</span><strong className="neg">{CLP(totSaldo)}</strong></div>
+                  </div>
+
+                  {mesesPendOtros.length > 0 && (
+                    <div className="aq-muted" style={{ fontSize: 13, marginBottom: 16 }}>
+                      Pendiente de otros meses:{" "}
+                      {mesesPendOtros.map((k, i) => (
+                        <span key={k}>
+                          {i > 0 && " · "}
+                          <button className="aq-link" onClick={() => setMesProv(k)}>{etiquetaMes(k)} {CLP(pendOtros[k])}</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {delMes.length === 0 && (
+                    <p className="aq-muted">No hay compras a proveedor generadas en {etiquetaMes(mesProv).toLowerCase()}.</p>
+                  )}
 
                   {listaProv.map((g) => {
                     const claveG = "prov-" + g.proveedor;
@@ -6137,7 +6216,7 @@ export default function App() {
                                     />
                                   )}
                                   <span style={{ flex: 1 }}>
-                                    Guía {d.numero_guia}<em className="aq-det-chofer">{d.mes} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
+                                    Guía {d.numero_guia}<em className="aq-det-chofer">Generada {d.fecha_deuda_txt} · {d.chofer}{ab > 0 ? ` · Abonado ${CLP(ab)} · Saldo ${CLP(saldo)}` : ""}</em>
                                   </span>
                                   <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                     {CLP(d.monto)}
@@ -6156,7 +6235,7 @@ export default function App() {
                               <div className="aq-det-line aq-prov-fact" key={"pag" + i}>
                                 <span>Guía {d.numero_guia}
                                   <em className="aq-det-chofer">
-                                    {d.mes} · {d.origenPago === "app"
+                                    Generada {d.fecha_deuda_txt} · {d.origenPago === "app"
                                       ? `Pagado por ${d.pagado_por || "—"}${d.fecha_pago ? " · " + new Date(d.fecha_pago).toLocaleDateString("es-CL") : ""}`
                                       : "Pagado (DispatchTrack)"}
                                   </em>
@@ -6174,6 +6253,31 @@ export default function App() {
                       </div>
                     );
                   })}
+
+                  <div className="aq-prov-acum">
+                    <button className="aq-link" onClick={() => setVerAcumProv((v) => !v)}>
+                      {verAcumProv ? "▲" : "▼"} Acumulado últimos 12 meses (referencial)
+                    </button>
+                    {verAcumProv && (
+                      <div style={{ marginTop: 8 }}>
+                        <div className="aq-desglose" style={{ marginBottom: 10 }}>
+                          <div className="aq-desglose-row"><span>Generado (12 meses)</span><strong>{CLP(acumGen)}</strong></div>
+                          <div className="aq-desglose-row"><span>Pagado / abonado</span><strong className="pos">{CLP(acumGen - acumSaldo)}</strong></div>
+                          <div className="aq-desglose-row total"><span>Saldo pendiente total</span><strong className="neg">{CLP(acumSaldo)}</strong></div>
+                        </div>
+                        {filasMes.map((f) => (
+                          <div className="aq-det-line" key={f.mes} style={{ alignItems: "center" }}>
+                            <button className="aq-link" onClick={() => setMesProv(f.mes)}>{etiquetaMes(f.mes)}</button>
+                            <span style={{ display: "flex", gap: 14, fontSize: 13 }}>
+                              <span className="aq-muted">Generado {CLP(f.gen)}</span>
+                              <span style={{ color: "var(--ok)" }}>Pagado {CLP(f.pag)}</span>
+                              <span style={{ color: f.saldo > 0 ? "var(--bad)" : "var(--muted)" }}>Saldo {CLP(f.saldo)}</span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </>
               );
             })()}
@@ -9110,6 +9214,7 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-prov-fact span:first-child { font-size:12px; }
 /* Tarjetas de Pagos a proveedor agrupadas por proveedor */
 .aq-prov-tarjeta { border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
+.aq-prov-acum { margin-top:18px; padding-top:12px; border-top:1px dashed var(--line); }
 .aq-prov-tarjeta-head { display:flex; align-items:center; gap:14px; flex-wrap:wrap; cursor:pointer; }
 .aq-prov-tarjeta-head strong { display:block; color:var(--navy); font-size:15px; }
 .aq-prov-tarjeta-info { flex:1; min-width:160px; }
