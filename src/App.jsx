@@ -339,6 +339,25 @@ const CAMPOS_PRECIO_PROV = [
   { k: "bidon_nuevo_20", label: "Bidón nuevo 20 L", corto: "bid. nuevo 20L" },
   { k: "bidon_nuevo_12", label: "Bidón nuevo 12 L", corto: "bid. nuevo 12L" },
 ];
+// Proveedores de compra (mismo nombre que en DispatchTrack, para cruzar con la deuda).
+const PROVEEDORES_COMPRA = ["111-4 - AguaFine", "699-1 - Aguas Altas", "205-1 - DALI", "Cubita", "X-1 - Otros ( Especificar en Comentarios)"];
+const COMPRA_VACIA = { proveedor: "", recarga_20: 0, recarga_1012: 0, bidon_nuevo_20: 0, bidon_nuevo_12: 0 };
+// Cantidades de compra registradas en la app (columnas compra_* de pedidos).
+function compraDePedido(p) {
+  return {
+    proveedor: p?.compra_proveedor || "",
+    recarga_20: Number(p?.compra_recarga_20) || 0,
+    recarga_1012: Number(p?.compra_recarga_1012) || 0,
+    bidon_nuevo_20: Number(p?.compra_bidon_nuevo_20) || 0,
+    bidon_nuevo_12: Number(p?.compra_bidon_nuevo_12) || 0,
+  };
+}
+function compraTieneCantidades(c) {
+  return CAMPOS_PRECIO_PROV.some(({ k }) => Number(c?.[k]) > 0);
+}
+function esLineaCompra(l) {
+  return String(l?.codigo || "").toUpperCase() === "CP1" || /^compra$/i.test(String(l?.nombre || "").trim());
+}
 let PRECIOS_PROV = []; // filas de precios_proveedor (proveedor '*' = general)
 let _preciosProvPromise = null;
 async function cargarPreciosProveedor(forzar = false) {
@@ -871,6 +890,8 @@ export default function App() {
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${hora}`;
   }
   const [observacion, setObservacion] = useState("");
+  // Detalle de compra a proveedor (cuando el pedido lleva la línea CP1 · Compra).
+  const [compraDet, setCompraDet] = useState(COMPRA_VACIA);
   const [esFine, setEsFine] = useState(false); // pedido despachado por cuenta de Fine ($800/ítem)
   const [esFineMini, setEsFineMini] = useState(false); // pedido Fine Mini Market ($400/ítem)
   const [creadoPor, setCreadoPor] = useState("");
@@ -2183,6 +2204,70 @@ export default function App() {
     }
   }
 
+  // ── Carga de rutas: lo que hay que cargar por fecha y chofer ─────────
+  const [cargaRutas, setCargaRutas] = useState(null);   // { pedidos, items, entregas }
+  const [cargandoCR, setCargandoCR] = useState(false);
+  const [errorCR, setErrorCR] = useState("");
+  const [compraEdit, setCompraEdit] = useState(null);   // { id, guia, proveedor, recarga_20, ... }
+  const [guardandoCompra, setGuardandoCompra] = useState(false);
+  async function cargarCargaRutas() {
+    setCargandoCR(true);
+    setErrorCR("");
+    try {
+      // Margen de 36 h hacia atrás y filtro fino por fecha local (Santiago) en el cliente.
+      const desde = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+      const { data: peds, error: eP } = await supabase
+        .from("pedidos")
+        .select("id, numero_guia, cliente_id, domicilio_id, creado_por, fecha_min_entrega, dt_route_id, estado_sync, observacion, compra_proveedor, compra_recarga_20, compra_recarga_1012, compra_bidon_nuevo_20, compra_bidon_nuevo_12")
+        .gte("fecha_min_entrega", desde)
+        .neq("estado_sync", "anulado")
+        .order("fecha_min_entrega", { ascending: true });
+      if (eP) throw eP;
+      const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+      const vig = (peds || []).filter((p) => p.fecha_min_entrega
+        && new Date(p.fecha_min_entrega).toLocaleDateString("en-CA", { timeZone: "America/Santiago" }) >= hoy);
+      const ids = vig.map((p) => p.id);
+      const guias = vig.map((p) => p.numero_guia).filter(Boolean);
+      const [rI, rE] = await Promise.all([
+        ids.length ? supabase.from("pedido_items").select("pedido_id, producto_id, nombre, codigo, cantidad").in("pedido_id", ids) : { data: [] },
+        guias.length ? supabase.from("dt_entregas").select("guide, status, gestionado_en, substatus").in("guide", guias) : { data: [] },
+      ]);
+      if (rI.error) throw rI.error;
+      if (rE.error) throw rE.error;
+      setCargaRutas({ pedidos: vig, items: rI.data || [], entregas: rE.data || [] });
+    } catch (e) {
+      setErrorCR(mensajeError(e, "No se pudo cargar el resumen de rutas."));
+    } finally {
+      setCargandoCR(false);
+    }
+  }
+  async function guardarCompraEdit() {
+    if (!compraEdit) return;
+    if (compraTieneCantidades(compraEdit) && !String(compraEdit.proveedor || "").trim()) {
+      setErrorCR("Indica el proveedor de la compra " + compraEdit.guia + ".");
+      return;
+    }
+    setGuardandoCompra(true);
+    setErrorCR("");
+    try {
+      const upd = {
+        compra_proveedor: String(compraEdit.proveedor || "").trim() || null,
+        compra_recarga_20: Number(compraEdit.recarga_20) || 0,
+        compra_recarga_1012: Number(compraEdit.recarga_1012) || 0,
+        compra_bidon_nuevo_20: Number(compraEdit.bidon_nuevo_20) || 0,
+        compra_bidon_nuevo_12: Number(compraEdit.bidon_nuevo_12) || 0,
+      };
+      const { error } = await supabase.from("pedidos").update(upd).eq("id", compraEdit.id);
+      if (error) throw error;
+      setCargaRutas((prev) => prev ? { ...prev, pedidos: prev.pedidos.map((p) => p.id === compraEdit.id ? { ...p, ...upd } : p) } : prev);
+      setCompraEdit(null);
+    } catch (e) {
+      setErrorCR(mensajeError(e, "No se pudo guardar la compra."));
+    } finally {
+      setGuardandoCompra(false);
+    }
+  }
+
   useEffect(() => {
     // Cada módulo carga sus datos solo la primera vez que se visita en la sesión.
     // Volver a entrar (Facturas → Bidones → Facturas) NO vuelve a consultar la
@@ -2195,6 +2280,8 @@ export default function App() {
     if ((rol === "admin" || rol === "operador") && vista === "facturas" && session && facturasPend && docsInm
         && docsInm.some((d) => d.tipo_documento === "factura" && !d.numero_documento_emitido && !d.factura_no_requerida && !facturasPend.some((f) => f.numero_guia === d.numero_guia))) cargarFacturasPend();
     if ((rol === "admin" || rol === "operador") && vista === "bidones" && session && bidonesPend === null) cargarBidonesPend();
+    // Carga de rutas: siempre fresca al entrar (cambia durante el día).
+    if ((rol === "admin" || rol === "operador") && vista === "carga" && session && !cargandoCR) cargarCargaRutas();
     if ((rol === "admin" || rol === "operador") && (vista === "boletas" || vista === "inicio") && session && docsInm === null) cargarDocsInm();
     // KPIs de Inicio: precargamos ambos conteos aunque el usuario no visite las pantallas.
     if ((rol === "admin" || rol === "operador") && vista === "inicio" && session && facturasPend === null) cargarFacturasPend();
@@ -2583,11 +2670,11 @@ export default function App() {
 
   // El perfil gerencial no opera pedidos ni mantiene clientes.
   useEffect(() => {
-    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones")) {
+    if (rol === "gerencial" && (vista === "nuevo" || vista === "mantenedor" || vista === "cobranzas" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones" || vista === "carga")) {
       setVista("inicio");
     }
     // El distribuidor solo crea pedidos: nada de mantenedores ni cobranzas.
-    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones")) {
+    if (rol === "distribuidor" && (vista === "mantenedor" || vista === "cobranzas" || vista === "deudasprov" || vista === "cotizaciones" || vista === "facturas" || vista === "boletas" || vista === "bidones" || vista === "carga")) {
       setVista("inicio");
     }
   }, [rol, vista]);
@@ -4648,6 +4735,10 @@ export default function App() {
   }, [consumePlan]);
 
   // ── Validación ─────────────────────────────────────────────
+  const esPedidoCompra = items.some((it) => {
+    const prod = productos.find((p) => p.id === it.producto_id);
+    return prod && esLineaCompra(prod);
+  });
   function validar() {
     if (!cliente) return "Elige un cliente.";
     if (cliente.lista_negra)
@@ -4658,6 +4749,10 @@ export default function App() {
     if (items.length === 0) return "Agrega al menos un producto.";
     if (items.some((it) => !it.producto_id || Number(it.cantidad) <= 0)) return "Revisa cantidades y productos de las líneas.";
     if (tipoDocumento === "factura" && !rutFactura.trim()) return "Para factura necesitas el RUT de facturación.";
+    if (esPedidoCompra && compraTieneCantidades(compraDet) && !compraDet.proveedor.trim())
+      return "Indica el proveedor de la compra.";
+    if (esPedidoCompra && CAMPOS_PRECIO_PROV.some(({ k }) => Number(compraDet[k]) < 0))
+      return "Las cantidades de la compra no pueden ser negativas.";
     if (consumePlan && planPrepago && unidadesPlan > (planPrepago.unidades_saldo ?? 0))
       return `El plan tiene ${planPrepago.unidades_saldo} recargas de saldo y el pedido consume ${unidadesPlan}.`;
     return "";
@@ -4779,6 +4874,13 @@ export default function App() {
         nro_jumpseller: nroDte.trim() || null,
         plan_contratado_id: consumePlan && planPrepago ? planPrepago.id : null,
         consume_plan: consumePlan && !!planPrepago,
+        ...(esPedidoCompra ? {
+          compra_proveedor: compraDet.proveedor.trim() || null,
+          compra_recarga_20: Number(compraDet.recarga_20) || 0,
+          compra_recarga_1012: Number(compraDet.recarga_1012) || 0,
+          compra_bidon_nuevo_20: Number(compraDet.bidon_nuevo_20) || 0,
+          compra_bidon_nuevo_12: Number(compraDet.bidon_nuevo_12) || 0,
+        } : {}),
       };
 
       const { data: pedido, error: ePed } = await supabase
@@ -4882,6 +4984,7 @@ export default function App() {
       setItems([]);
       setDescuentos([]);
       setObservacion("");
+      setCompraDet(COMPRA_VACIA);
       setEsFine(false);
       setEsFineMini(false);
       setNroDte("");
@@ -5164,6 +5267,9 @@ export default function App() {
             <button className={vista === "inicio" ? "on" : ""} onClick={() => setVista("inicio")}>Inicio</button>
             {rol !== "gerencial" && (
               <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
+            )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "carga" ? "on" : ""} onClick={() => setVista("carga")}>Carga de rutas</button>
             )}
             {rol !== "gerencial" && rol !== "distribuidor" && (
               <button className={vista === "mantenedor" ? "on" : ""} onClick={() => setVista("mantenedor")}>{rol === "admin" ? "Mantenedores" : "Clientes"}</button>
@@ -7045,6 +7151,213 @@ export default function App() {
           );
         })()}
 
+        {credsListas && vista === "carga" && (rol === "admin" || rol === "operador") && (
+          <section className="aq-card">
+            <div className="aq-modal-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Carga de rutas</h2>
+                <span className="aq-muted">Pedidos vigentes desde hoy, por fecha de entrega y chofer · totales de lo que falta entregar.</span>
+              </div>
+              <button className="aq-btn-sec" onClick={cargarCargaRutas} disabled={cargandoCR}>↻ Actualizar</button>
+            </div>
+            {errorCR && <div className="aq-error" style={{ marginBottom: 8 }}>{errorCR}</div>}
+            {cargandoCR && !cargaRutas && <p className="aq-muted">Cargando rutas…</p>}
+            {cargaRutas && cargaRutas.pedidos.length === 0 && (
+              <p className="aq-muted">No hay pedidos con entrega desde hoy en adelante.</p>
+            )}
+            {cargaRutas && cargaRutas.pedidos.length > 0 && (() => {
+              const itemsPorPed = {};
+              cargaRutas.items.forEach((it) => { (itemsPorPed[it.pedido_id] = itemsPorPed[it.pedido_id] || []).push(it); });
+              const entPorGuia = {};
+              cargaRutas.entregas.forEach((e) => { entPorGuia[e.guide] = e; });
+              const fmtFecha = (iso) => {
+                const t = new Date(iso + "T12:00:00");
+                const txt = t.toLocaleDateString("es-CL", { weekday: "long", day: "numeric", month: "long" });
+                return txt.charAt(0).toUpperCase() + txt.slice(1);
+              };
+              const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+              const manana = new Date(Date.now() + 86400000).toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+              const sumarProd = (tot, its) => its.forEach((it) => {
+                const k = it.nombre || it.codigo || "Producto";
+                tot[k] = (tot[k] || 0) + (Number(it.cantidad) || 0);
+              });
+              const sumarCompra = (tot, c) => CAMPOS_PRECIO_PROV.forEach(({ k }) => { tot[k] = (tot[k] || 0) + (c[k] || 0); });
+              const ordenProd = (tot) => Object.entries(tot).filter(([, n]) => n > 0)
+                .sort((a, b) => (/^recarga/i.test(b[0]) - /^recarga/i.test(a[0])) || b[1] - a[1]);
+              const fmtN = (n) => Number(n).toLocaleString("es-CL", { maximumFractionDigits: 2 });
+
+              // fecha → chofer → pedidos
+              const fechas = {};
+              cargaRutas.pedidos.forEach((p) => {
+                const f = new Date(p.fecha_min_entrega).toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+                const ch = (p.creado_por || "").trim() || "Sin chofer asignado";
+                fechas[f] = fechas[f] || {};
+                (fechas[f][ch] = fechas[f][ch] || []).push(p);
+              });
+
+              return Object.keys(fechas).sort().map((f) => {
+                const choferes = Object.keys(fechas[f]).sort();
+                const totDia = {};
+                const compDia = {};
+                const bloques = choferes.map((ch) => {
+                  const peds = fechas[f][ch];
+                  const ventas = [];
+                  const compras = [];
+                  let gestionados = 0;
+                  peds.forEach((p) => {
+                    const its = itemsPorPed[p.id] || [];
+                    const ent = entPorGuia[p.numero_guia];
+                    const gest = entregaGestionada(ent);
+                    const esCompra = its.length > 0 && its.every(esLineaCompra);
+                    const fila = { p, its: its.filter((it) => !esLineaCompra(it)), ent, gest };
+                    if (esCompra) compras.push(fila); else ventas.push(fila);
+                    if (gest) gestionados += 1;
+                  });
+                  const tot = {};
+                  ventas.filter((v) => !v.gest).forEach((v) => sumarProd(tot, v.its));
+                  sumarProd(totDia, ventas.filter((v) => !v.gest).flatMap((v) => v.its));
+                  const totComp = {};
+                  compras.filter((c) => !c.gest).forEach((c) => { const d = compraDePedido(c.p); sumarCompra(totComp, d); sumarCompra(compDia, d); });
+                  const rutas = [...new Set(peds.map((p) => p.dt_route_id).filter(Boolean))];
+                  const sinRuta = peds.filter((p) => !p.dt_route_id).length;
+                  return { ch, peds, ventas, compras, gestionados, tot, totComp, rutas, sinRuta };
+                });
+                const etiqueta = f === hoy ? "Hoy · " : f === manana ? "Mañana · " : "";
+                return (
+                  <div key={f} className="aq-carga-dia">
+                    <div className="aq-carga-dia-head">
+                      <strong>{etiqueta}{fmtFecha(f)}</strong>
+                      {choferes.length > 1 && (
+                        <span className="aq-carga-chips">
+                          {ordenProd(totDia).map(([k, n]) => <span key={k} className="aq-chip-n">{fmtN(n)} {k}</span>)}
+                          {CAMPOS_PRECIO_PROV.filter(({ k }) => compDia[k] > 0).map(({ k, label }) => (
+                            <span key={k} className="aq-chip-n compra">Compra {compDia[k]} {label}</span>
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                    {bloques.map((b) => {
+                      const clave = "cr-" + f + "-" + b.ch;
+                      const abierto = !!grupoAbierto[clave];
+                      const prodOrd = ordenProd(b.tot);
+                      const pendVentas = b.ventas.filter((v) => !v.gest).length;
+                      return (
+                        <div key={b.ch} className="aq-carga-chofer">
+                          <div className="aq-carga-chofer-head">
+                            <span>
+                              👤 <strong>{b.ch}</strong>
+                              <em className="aq-det-chofer">
+                                {pendVentas} entrega(s) por hacer
+                                {b.compras.length ? ` · ${b.compras.length} compra(s)` : ""}
+                                {b.gestionados ? ` · ${b.gestionados} ya gestionado(s), fuera del total` : ""}
+                              </em>
+                            </span>
+                            {b.rutas.length > 0
+                              ? <span className="aq-badge ok" title={"Ruta DT " + b.rutas.join(", ")}>Ruta creada{b.sinRuta ? ` · ${b.sinRuta} fuera de ruta` : ""}</span>
+                              : <span className="aq-badge warn" title="La ruta no está enlazada en la app (se arma en DispatchTrack o aún no se crea)">Ruta no enlazada</span>}
+                          </div>
+
+                          <div className="aq-carga-totales">
+                            {prodOrd.length === 0 && !CAMPOS_PRECIO_PROV.some(({ k }) => b.totComp[k] > 0) && (
+                              <span className="aq-muted">Nada pendiente por cargar.</span>
+                            )}
+                            {prodOrd.map(([k, n]) => (
+                              <div key={k} className="aq-carga-tot"><span className="n">{fmtN(n)}</span><span>{k}</span></div>
+                            ))}
+                          </div>
+
+                          {b.compras.length > 0 && (
+                            <div className="aq-carga-compras">
+                              <div className="aq-carga-sub">Compras a proveedor</div>
+                              {b.compras.map(({ p, gest }) => {
+                                const c = compraDePedido(p);
+                                const editando = compraEdit && compraEdit.id === p.id;
+                                const cli = clientePorId[p.cliente_id]?.nombre || "";
+                                return (
+                                  <div key={p.id} className="aq-carga-compra">
+                                    <div className="aq-det-line">
+                                      <span>
+                                        {p.numero_guia} · {c.proveedor || <em className="aq-muted">{cli || "sin proveedor"}</em>}
+                                        {gest && <span className="aq-badge ok" style={{ marginLeft: 6 }}>Gestionada</span>}
+                                        <em className="aq-det-chofer">
+                                          {compraTieneCantidades(c)
+                                            ? CAMPOS_PRECIO_PROV.filter(({ k }) => c[k] > 0).map(({ k, label }) => `${c[k]} ${label}`).join(" · ")
+                                            : "Sin cantidades registradas"}
+                                        </em>
+                                      </span>
+                                      {!editando && (
+                                        <button className="aq-link" onClick={() => setCompraEdit({ id: p.id, guia: p.numero_guia, ...c })}>
+                                          {compraTieneCantidades(c) ? "Editar" : "Registrar"}
+                                        </button>
+                                      )}
+                                    </div>
+                                    {editando && (
+                                      <div className="aq-carga-edit">
+                                        <label>Proveedor
+                                          <input list="aq-proveedores-compra-cr" value={compraEdit.proveedor}
+                                            onChange={(e) => setCompraEdit({ ...compraEdit, proveedor: e.target.value })} />
+                                        </label>
+                                        {CAMPOS_PRECIO_PROV.map(({ k, label }) => (
+                                          <label key={k}>{label}
+                                            <input className="aq-num" type="number" min="0" step="1" value={compraEdit[k]}
+                                              onChange={(e) => setCompraEdit({ ...compraEdit, [k]: Math.max(0, Math.round(Number(e.target.value) || 0)) })} />
+                                          </label>
+                                        ))}
+                                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                                          <button className="aq-btn" onClick={guardarCompraEdit} disabled={guardandoCompra}>{guardandoCompra ? "Guardando…" : "Guardar"}</button>
+                                          <button className="aq-btn-sec" onClick={() => setCompraEdit(null)} disabled={guardandoCompra}>Cancelar</button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {CAMPOS_PRECIO_PROV.some(({ k }) => b.totComp[k] > 0) && (
+                                <div className="aq-carga-totales">
+                                  {CAMPOS_PRECIO_PROV.filter(({ k }) => b.totComp[k] > 0).map(({ k, label }) => (
+                                    <div key={k} className="aq-carga-tot compra"><span className="n">{b.totComp[k]}</span><span>{label} a comprar</span></div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {b.ventas.length > 0 && (
+                            <>
+                              <button className="aq-link" style={{ marginTop: 6 }} onClick={() => setGrupoAbierto((prev) => ({ ...prev, [clave]: !prev[clave] }))}>
+                                {abierto ? "Ocultar detalle" : `Ver detalle (${b.ventas.length} pedido(s))`}
+                              </button>
+                              {abierto && (
+                                <div className="aq-carga-detalle">
+                                  {b.ventas.map(({ p, its, ent, gest }) => {
+                                    const est = estadoEntregaDT(ent, p);
+                                    return (
+                                      <div key={p.id} className={"aq-det-line" + (gest ? " aq-carga-gest" : "")}>
+                                        <span>
+                                          {p.numero_guia} · {clientePorId[p.cliente_id]?.nombre || "Cliente"}
+                                          <em className="aq-det-chofer">{its.map((it) => `${fmtN(it.cantidad)} ${it.nombre}`).join(" · ") || "sin productos"}</em>
+                                        </span>
+                                        <span className={"aq-badge " + est.cls}>{est.label}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
+            <datalist id="aq-proveedores-compra-cr">
+              {PROVEEDORES_COMPRA.map((p) => <option key={p} value={p} />)}
+            </datalist>
+          </section>
+        )}
+
         {credsListas && vista === "bidones" && (rol === "admin" || rol === "operador") && (
           <section className="aq-card">
             <div className="aq-modal-head" style={{ marginBottom: 8 }}>
@@ -8708,6 +9021,33 @@ export default function App() {
                 </section>
                 )}
 
+                {/* Compra a proveedor: cantidades registradas en la app */}
+                {esPedidoCompra && (
+                <section className="aq-card">
+                  <h2>Compra a proveedor</h2>
+                  <p className="aq-muted" style={{ marginTop: 0 }}>
+                    Si es una compra de agua o bidones, registra aquí qué se va a comprar. Aparece en el resumen de carga.
+                    Si es otra compra (combustible, insumos), déjalo en blanco.
+                  </p>
+                  <div className="aq-grid">
+                    <label>Proveedor
+                      <input list="aq-proveedores-compra" value={compraDet.proveedor}
+                        placeholder="Ej. 111-4 - AguaFine"
+                        onChange={(e) => setCompraDet({ ...compraDet, proveedor: e.target.value })} />
+                    </label>
+                    {CAMPOS_PRECIO_PROV.map(({ k, label }) => (
+                      <label key={k}>{label}
+                        <input className="aq-num" type="number" min="0" step="1" value={compraDet[k]}
+                          onChange={(e) => setCompraDet({ ...compraDet, [k]: Math.max(0, Math.round(Number(e.target.value) || 0)) })} />
+                      </label>
+                    ))}
+                  </div>
+                  <datalist id="aq-proveedores-compra">
+                    {PROVEEDORES_COMPRA.map((p) => <option key={p} value={p} />)}
+                  </datalist>
+                </section>
+                )}
+
                 {/* Descuentos */}
                 {rol !== "distribuidor" && (
                 <section className="aq-card">
@@ -9008,6 +9348,25 @@ export default function App() {
 }
 
 const css = `
+
+.aq-carga-dia { margin-top:14px; }
+.aq-carga-dia-head { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:2px solid #e3f2fb; margin-bottom:8px; font-size:15px; }
+.aq-carga-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.aq-chip-n { font-size:12px; font-weight:600; background:#e8f4fd; color:#0b6fb0; padding:3px 9px; border-radius:20px; }
+.aq-chip-n.compra { background:#fff3e6; color:#a35a00; }
+.aq-carga-chofer { border:1px solid #e6edf2; border-radius:12px; padding:10px 12px; margin-bottom:10px; background:#fff; }
+.aq-carga-chofer-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+.aq-carga-totales { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.aq-carga-tot { display:flex; align-items:baseline; gap:6px; background:#f2f9ff; border-radius:10px; padding:6px 12px; font-size:13px; }
+.aq-carga-tot .n { font-size:22px; font-weight:800; color:#0b6fb0; }
+.aq-carga-tot.compra { background:#fff7ee; }
+.aq-carga-tot.compra .n { color:#c46a00; }
+.aq-carga-compras { margin-top:10px; padding-top:8px; border-top:1px dashed #e6edf2; }
+.aq-carga-sub { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:#8a6a3a; margin-bottom:4px; }
+.aq-carga-edit { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; padding:8px 0; }
+.aq-carga-edit label { display:flex; flex-direction:column; font-size:12px; gap:3px; }
+.aq-carga-detalle { margin-top:6px; }
+.aq-carga-gest { opacity:.55; }
 @import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
 * { box-sizing: border-box; }
 .aq { --navy:#1B2F6E; --blue:#5B8DB8; --ink:#1d2433; --muted:#6b7686; --line:#e3e8f0; --bg:#f4f6fb; --ok:#1f7a4d; --bad:#b3261e;
