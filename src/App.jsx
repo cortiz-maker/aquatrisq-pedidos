@@ -339,8 +339,27 @@ const CAMPOS_PRECIO_PROV = [
   { k: "bidon_nuevo_20", label: "Bidón nuevo 20 L", corto: "bid. nuevo 20L" },
   { k: "bidon_nuevo_12", label: "Bidón nuevo 12 L", corto: "bid. nuevo 12L" },
 ];
-// Proveedores de compra (mismo nombre que en DispatchTrack, para cruzar con la deuda).
-const PROVEEDORES_COMPRA = ["111-4 - AguaFine", "699-1 - Aguas Altas", "205-1 - DALI", "Cubita", "X-1 - Otros ( Especificar en Comentarios)"];
+// Proveedores de compra vigentes (lista desplegable). El valor guardado es el mismo nombre
+// que usa DispatchTrack, para cruzar con la deuda y los precios; la etiqueta es lo que ve el usuario.
+// Para sumar un proveedor nuevo, agregarlo aquí.
+const PROVEEDORES_COMPRA = [
+  { value: "699-1 - Aguas Altas", label: "Aguas Altas" },
+  { value: "111-4 - AguaFine", label: "Fine" },
+  { value: "205-1 - DALI", label: "Dalí" },
+];
+// Desplegable de proveedor. Si una compra antigua trae un proveedor que ya no está vigente,
+// se muestra igual (marcado) para no perder el dato al editar.
+function SelectProveedorCompra({ value, onChange }) {
+  const v = String(value || "");
+  const fuera = v && !PROVEEDORES_COMPRA.some((p) => p.value === v);
+  return (
+    <select value={v} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— Selecciona proveedor —</option>
+      {PROVEEDORES_COMPRA.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+      {fuera && <option value={v}>{v} (no vigente)</option>}
+    </select>
+  );
+}
 const COMPRA_VACIA = { proveedor: "", recarga_20: 0, recarga_1012: 0, bidon_nuevo_20: 0, bidon_nuevo_12: 0 };
 // Cantidades de compra registradas en la app (columnas compra_* de pedidos).
 function compraDePedido(p) {
@@ -7317,8 +7336,8 @@ export default function App() {
                                     {editando && (
                                       <div className="aq-carga-edit">
                                         <label>Proveedor
-                                          <input list="aq-proveedores-compra-cr" value={compraEdit.proveedor}
-                                            onChange={(e) => setCompraEdit({ ...compraEdit, proveedor: e.target.value })} />
+                                          <SelectProveedorCompra value={compraEdit.proveedor}
+                                            onChange={(v) => setCompraEdit({ ...compraEdit, proveedor: v })} />
                                         </label>
                                         {CAMPOS_PRECIO_PROV.map(({ k, label }) => (
                                           <label key={k}>{label}
@@ -7375,9 +7394,6 @@ export default function App() {
                 );
               });
             })()}
-            <datalist id="aq-proveedores-compra-cr">
-              {PROVEEDORES_COMPRA.map((p) => <option key={p} value={p} />)}
-            </datalist>
           </section>
         )}
 
@@ -9054,9 +9070,8 @@ export default function App() {
                   </p>
                   <div className="aq-grid">
                     <label>Proveedor
-                      <input list="aq-proveedores-compra" value={compraDet.proveedor}
-                        placeholder="Ej. 111-4 - AguaFine"
-                        onChange={(e) => setCompraDet({ ...compraDet, proveedor: e.target.value })} />
+                      <SelectProveedorCompra value={compraDet.proveedor}
+                        onChange={(v) => setCompraDet({ ...compraDet, proveedor: v })} />
                     </label>
                     {CAMPOS_PRECIO_PROV.map(({ k, label }) => (
                       <label key={k}>{label}
@@ -9065,9 +9080,6 @@ export default function App() {
                       </label>
                     ))}
                   </div>
-                  <datalist id="aq-proveedores-compra">
-                    {PROVEEDORES_COMPRA.map((p) => <option key={p} value={p} />)}
-                  </datalist>
                 </section>
                 )}
 
