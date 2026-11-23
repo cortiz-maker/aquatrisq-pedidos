@@ -4501,6 +4501,13 @@ export default function App() {
     setPlanPrepago(conSaldo || null);
 
     setDescCliente(dc.data || []);
+    // Abonos únicos (p. ej. devolución de un cobro): se cargan solos en el pedido
+    // y se desactivan al guardarlo, para que se usen una sola vez.
+    const abonos = (dc.data || []).filter((d) => d.tipo === "abono_unico" && Number(d.valor) > 0);
+    setDescuentos((prev) => [
+      ...prev.filter((d) => !d.abono_id),
+      ...abonos.map((a) => ({ key: crypto.randomUUID(), origen: "cliente", descripcion: a.motivo || "Abono", monto: Number(a.valor), abono_id: a.id })),
+    ]);
 
     // Alerta de deuda: entregas con Pago=No que aún no están cobradas
     try {
@@ -4922,6 +4929,14 @@ export default function App() {
           const { error: eDesc } = await supabase.from("pedido_descuentos").insert(ds);
           if (eDesc) throw eDesc;
         }
+      }
+
+      // 3b) Abonos únicos usados: se desactivan para que no se apliquen de nuevo.
+      const abonosUsados = descuentos.filter((d) => d.abono_id && Number(d.monto) > 0).map((d) => d.abono_id);
+      if (abonosUsados.length) {
+        await supabase.from("descuentos_cliente")
+          .update({ activo: false, vigente_hasta: new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" }) })
+          .in("id", abonosUsados);
       }
 
       // 4) Consumo de saldo del plan prepago
@@ -9055,10 +9070,15 @@ export default function App() {
                     <h2>Descuentos</h2>
                     <button className="aq-btn-sec" onClick={() => agregarDescuento()}>+ Agregar</button>
                   </div>
-                  {descCliente.length > 0 && (
+                  {descuentos.some((d) => d.abono_id) && (
+                    <div className="aq-muted" style={{ marginBottom: 6 }}>
+                      💚 Este cliente tiene un abono pendiente: ya quedó cargado abajo y se descuenta solo en este pedido.
+                    </div>
+                  )}
+                  {descCliente.some((d) => d.tipo !== "abono_unico") && (
                     <div className="aq-suggest">
                       <span className="aq-muted">Sugeridos del cliente:</span>
-                      {descCliente.map((d) => (
+                      {descCliente.filter((d) => d.tipo !== "abono_unico").map((d) => (
                         <button
                           key={d.id}
                           className="aq-chip"
