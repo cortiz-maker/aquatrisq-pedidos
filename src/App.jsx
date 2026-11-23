@@ -4551,8 +4551,9 @@ export default function App() {
 
   // ── Bloque 5: repetir última compra ────────────────────────
   // Precarga productos, cantidades, domicilio y forma de pago del último
-  // pedido del cliente. El operador revisa y confirma. Los precios se
-  // recalculan a la lista vigente (un pedido nuevo se cobra a precio de hoy).
+  // pedido del cliente. El operador revisa y confirma. Desde nov-2026 se
+  // replican también los precios de esa compra (precio pactado con el cliente);
+  // si alguno difiere de la lista vigente, se avisa para revisarlo.
   async function repetirUltimaCompra() {
     if (!cliente) return;
     setRepitiendo(true);
@@ -4578,6 +4579,7 @@ export default function App() {
       // Mapear líneas a productos ACTIVOS. Los pausados/eliminados se omiten.
       const nuevas = [];
       const omitidos = [];
+      const distintos = [];
       (lineas || []).forEach((l) => {
         const prod = productos.find((p) => p.id === l.producto_id);
         if (!prod) {
@@ -4585,12 +4587,16 @@ export default function App() {
           return;
         }
         const cantidad = Number(l.cantidad) || 1;
+        const sugerido = precioSugerido(prod, cantidad, tramos);
+        const anterior = l.precio_unit != null ? Number(l.precio_unit) : null;
+        const usaAnterior = anterior != null && Number.isFinite(anterior);
+        if (usaAnterior && anterior !== sugerido) distintos.push(`${prod.nombre} ${CLP(anterior)} (lista ${CLP(sugerido)})`);
         nuevas.push({
           key: crypto.randomUUID(),
           producto_id: prod.id,
           cantidad,
-          precio_unit: precioSugerido(prod, cantidad, tramos),
-          precio_editado: false,
+          precio_unit: usaAnterior ? anterior : sugerido,
+          precio_editado: usaAnterior, // se mantiene aunque cambie la cantidad
         });
       });
 
@@ -4600,7 +4606,8 @@ export default function App() {
       }
 
       setItems(nuevas);
-      setDescuentos([]); // los descuentos no se arrastran: se re-evalúan en el pedido nuevo
+      // Los descuentos manuales no se arrastran; los abonos únicos del cliente se conservan.
+      setDescuentos((prev) => prev.filter((d) => d.abono_id));
 
       // Domicilio del último pedido, si todavía existe entre los del cliente
       if (ult.domicilio_id && domicilios.some((d) => d.id === ult.domicilio_id)) {
@@ -4613,7 +4620,8 @@ export default function App() {
       }
 
       const fecha = ult.created_at ? new Date(ult.created_at).toLocaleDateString("es-CL", { day: "2-digit", month: "short" }) : "";
-      let msg = `Cargada la última compra${ult.numero_guia ? " (guía " + ult.numero_guia + ")" : ""}${fecha ? " del " + fecha : ""}: ${nuevas.length} línea(s). Precios actualizados a lista vigente. Revisa y confirma.`;
+      let msg = `Cargada la última compra${ult.numero_guia ? " (guía " + ult.numero_guia + ")" : ""}${fecha ? " del " + fecha : ""}: ${nuevas.length} línea(s) con los mismos precios de esa compra. Revisa y confirma.`;
+      if (distintos.length) msg += ` ⚠ Precio distinto a la lista vigente: ${distintos.join(" · ")}.`;
       if (omitidos.length) msg += ` ⚠ No se cargaron (pausados/sin stock): ${omitidos.join(", ")}.`;
       setAvisoRepetir(msg);
     } catch (e) {
