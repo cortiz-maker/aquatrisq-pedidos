@@ -346,6 +346,7 @@ const PROVEEDORES_COMPRA = [
   { value: "699-1 - Aguas Altas", label: "Aguas Altas" },
   { value: "111-4 - AguaFine", label: "Fine" },
   { value: "205-1 - DALI", label: "Dalí" },
+  { value: "Cubita", label: "Cubita" },
 ];
 // Desplegable de proveedor. Si una compra antigua trae un proveedor que ya no está vigente,
 // se muestra igual (marcado) para no perder el dato al editar.
