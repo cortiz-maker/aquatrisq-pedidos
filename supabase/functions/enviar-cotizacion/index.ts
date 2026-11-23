@@ -141,7 +141,7 @@ function buildHtml(c: any, items: any[], nombre: string, link: string, condicion
     <div style="font-size:10px;color:${COLOR};letter-spacing:1px;text-transform:uppercase;font-weight:800;margin-bottom:6px;font-family:Arial,sans-serif;">&#128179; Medios de pago</div>
     <div style="font-size:13px;color:#0D1F3C;line-height:1.6;font-family:Arial,sans-serif;">Transferencia bancaria o pago en l&iacute;nea.</div>
     ${bloqueLink}
-    <div style="font-size:12px;color:#64748B;line-height:1.5;margin-top:10px;font-family:Arial,sans-serif;">Pagos a 30 d&iacute;as tienen un recargo del 30% sobre el valor cotizado (v&aacute;lido para clientes con antig&uuml;edad superior a un a&ntilde;o).</div>
+    <div style="font-size:12px;color:#64748B;line-height:1.5;margin-top:10px;font-family:Arial,sans-serif;">Pagos a 30 d&iacute;as tienen un recargo del 30% sobre el valor cotizado (v&aacute;lido para clientes con antig&uuml;edad superior a un a&ntilde;o y sujeto a evaluaci&oacute;n crediticia).</div>
   </td></tr>
 
   <tr><td align="center" style="padding:18px 8px 0;color:#3F4E63;font-size:13px;line-height:1.6;font-family:Arial,sans-serif;">

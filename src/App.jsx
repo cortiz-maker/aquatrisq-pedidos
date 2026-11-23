@@ -26,7 +26,7 @@ const LOGO_AQUATRISQ_B64 = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2
 const MEDIOS_PAGO_COTIZ = ["Transferencia bancaria", "Pago online"];
 const RECARGO_PAGO_30_DIAS = {
   porcentaje: 30,
-  texto: "Pagos a 30 días tienen un recargo del 30% sobre el valor cotizado (válido para clientes con antigüedad superior a un año).",
+  texto: "Pagos a 30 días tienen un recargo del 30% sobre el valor cotizado (válido para clientes con antigüedad superior a un año y sujeto a evaluación crediticia).",
 };
 
 // Catálogo de equipos y planes que SOLO se cotizan (no viven en la tabla
@@ -3644,7 +3644,7 @@ export default function App() {
     const cuerpo =
       "Estimados " + (nombreCli || "-") + "\n" +
       "Adjunto cotización " + (c.folio || "") + " por " + (productos || "los productos cotizados") + ", válida hasta " + formatearFechaCL(c.fecha_vigencia) + ".\n" +
-      "Medios de pago: transferencia bancaria o pago online. Pagos a 30 días tienen un recargo del 30% sobre el valor cotizado (aplica a clientes con antigüedad superior a un año).\n" +
+      "Medios de pago: transferencia bancaria o pago online. Pagos a 30 días tienen un recargo del 30% sobre el valor cotizado (aplica a clientes con antigüedad superior a un año y sujeto a evaluación crediticia).\n" +
       "Quedamos atentos a cualquier consulta para avanzar.\n" +
       "Saludos,\n" +
       "Aquatrisq";
