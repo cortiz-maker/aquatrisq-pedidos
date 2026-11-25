@@ -4136,6 +4136,14 @@ export default function App() {
   async function marcarCobradoConRespaldo(pedido, archivo, fechaPago) {
     const fechaReal = fechaPago || hoyCL();
     if (fechaReal > hoyCL()) { setErrorCob("La fecha del pago no puede ser futura."); return; }
+    // Confirmación antes de marcar Pagado (evita marcas por error), más
+    // enfática si no se adjunta comprobante.
+    const nombreCli = clientePorId[pedido.cliente_id]?.nombre || "";
+    const resumen = `${pedido.numero_guia || "Pedido"}${nombreCli ? " · " + nombreCli : ""}\nMonto: ${CLP(Number(pedido.monto_total) || 0)}\nFecha del pago: ${fechaCLTexto(fechaReal)}`;
+    const ok = archivo
+      ? window.confirm(`¿Confirmas que este pedido está PAGADO?\n\n${resumen}\nComprobante: ${archivo.name}`)
+      : window.confirm(`⚠ Vas a marcar este pedido como PAGADO SIN COMPROBANTE.\n\n${resumen}\n\nSolo confírmalo si verificaste el pago (transferencia recibida, efectivo, etc.). Si tienes el comprobante, cancela y adjúntalo.\n\n¿Marcar como pagado sin respaldo?`);
+    if (!ok) return;
     setGuardandoCob(pedido.id);
     setErrorCob(""); setOkCob("");
     try {
@@ -4158,7 +4166,7 @@ export default function App() {
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
-      setOkCob(`${pedido.numero_guia || ""}: marcado Pagado (pagó el ${fechaCLTexto(fechaReal)})${archivo ? " con comprobante adjunto" : ""}.`);
+      setOkCob(`${pedido.numero_guia || ""}: marcado Pagado (pagó el ${fechaCLTexto(fechaReal)})${archivo ? " con comprobante adjunto" : " · sin comprobante"}.`);
       setCobroRespaldoPedido(null);
       setCobroRespaldoArchivo(null);
     } catch (e) {
@@ -8914,6 +8922,7 @@ export default function App() {
                                   {p.cobro_incobrable
                                     ? <span className="aq-badge bad">Incobrable{p.incobrable_at ? " · " + new Date(p.incobrable_at).toLocaleDateString("es-CL") : ""}</span>
                                     : <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Pagado" : "No pagado"}</span>}
+                                  {p.cobro_cobrado && !p.cobro_incobrable && !p.cobro_respaldo_path && <span className="aq-badge warn">Sin comprobante</span>}
                                   {abonadoP > 0 && !p.cobro_cobrado && <span className="aq-badge">Abonado {CLP(abonadoP)} · Saldo {CLP(saldoP)}</span>}
                                 </div>
                                 {cobroRespaldoPedido === p.id && (
@@ -8922,10 +8931,11 @@ export default function App() {
                                       <span>Fecha real del pago</span>
                                       <input type="date" value={cobroFechaPago} max={hoyCL()} onChange={(e) => setCobroFechaPago(e.target.value)} />
                                     </label>
+                                    <span className="aq-mini aq-muted">Comprobante:</span>
                                     <input
                                       type="file"
                                       accept="image/*,application/pdf"
-                                      title="Comprobante de pago (opcional)"
+                                      title="Comprobante de pago (recomendado)"
                                       onChange={(e) => setCobroRespaldoArchivo(e.target.files?.[0] || null)}
                                     />
                                     <button className="aq-btn-sec" disabled={enProceso || !cobroFechaPago} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo, cobroFechaPago)}>
