@@ -536,6 +536,27 @@ function numeroDocRefDT(entrega) {
   const a = answersFromRaw(entrega).find((x) => /n.?\s*boleta.*factura.*voucher/i.test(x.name));
   return a && a.val ? String(a.val).trim() : "";
 }
+// Fecha de hoy en Chile como "YYYY-MM-DD" (para inputs type=date).
+function hoyCL() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" });
+}
+// Fecha (YYYY-MM-DD) → mediodía en Chile, para calcular días sin desfases de zona horaria.
+function fechaCLaMs(f) {
+  return f ? new Date(String(f).slice(0, 10) + "T12:00:00-03:00").getTime() : null;
+}
+function fechaCLTexto(f) {
+  if (!f) return "";
+  const [y, m, d] = String(f).slice(0, 10).split("-");
+  return `${d}-${m}-${y}`;
+}
+// Fecha real en que el cliente pagó. Desde nov-2026 se registra aparte
+// (cobro_fecha_pago); antes solo existía la fecha en que se registró en la app.
+function fechaPagoRealMs(p) {
+  if (!p) return null;
+  if (p.cobro_fecha_pago) return fechaCLaMs(p.cobro_fecha_pago);
+  return p.cobro_at ? new Date(p.cobro_at).getTime() : null;
+}
+
 // Bidones vacíos pendientes de retiro, según el campo numeral "Bidón Pendiente de Entrega".
 function bidonesPendientesDT(entrega) {
   if (!entrega || !entregaGestionada(entrega)) return 0;
@@ -997,6 +1018,7 @@ export default function App() {
   // ── Abonos parciales (cobro a cliente + deuda proveedor) ──
   const [abonoModal, setAbonoModal] = useState(null);       // { tipo:"cobro"|"proveedor", ...datos, saldo }
   const [abonoMonto, setAbonoMonto] = useState("");         // input monto del abono
+  const [abonoFecha, setAbonoFecha] = useState("");         // fecha REAL del pago (YYYY-MM-DD)
   const [abonoHist, setAbonoHist] = useState([]);           // historial de abonos del ítem abierto
   const [guardandoAbono, setGuardandoAbono] = useState(false);
   const [errorAbono, setErrorAbono] = useState("");
@@ -1124,7 +1146,10 @@ export default function App() {
 
   // Aviso en "Nuevo pedido": el cliente elegido tiene bidones marcados para
   // retirar en su próximo pedido.
-  const [avisoBidones, setAvisoBidones] = useState(null); // { cantidad, guias }
+  // Desde nov-2026 muestra TODOS los bidones pendientes del cliente (no solo
+  // los agendados) para gestionarlos al tomar el pedido.
+  const [avisoBidones, setAvisoBidones] = useState(null); // { cantidad, guias, detalle:[{guia,cantidad,dias,fecha,chofer,agendado}] }
+  const [retirarBidones, setRetirarBidones] = useState(true); // retirar los pendientes con este pedido
 
   // ── Cobranza / gestión de cobro (Pago = No en el formulario de entrega) ──
   const [entregasMap, setEntregasMap] = useState({});   // guide -> dt_entregas (pedidos del dashboard)
@@ -1148,6 +1173,8 @@ export default function App() {
   const [cobExpand, setCobExpand] = useState({});        // cliente_id -> grupo expandido en Cobranzas
   const [cobroRespaldoPedido, setCobroRespaldoPedido] = useState(null); // id de pedido con panel de respaldo abierto
   const [cobroRespaldoArchivo, setCobroRespaldoArchivo] = useState(null); // File del comprobante (opcional)
+  const [cobroFechaPago, setCobroFechaPago] = useState("");  // fecha REAL del pago al marcar Cobrado
+  const [fechaPagoEdit, setFechaPagoEdit] = useState({});    // pedidoId -> fecha en edición (cobros ya marcados)
 
   // Mantenedor de productos (admin)
   const [productosAll, setProductosAll] = useState([]);
@@ -2183,7 +2210,9 @@ export default function App() {
   async function marcarBidonesProximoPedidoGrupo(guias, valor) {
     setGuardandoBidonGuia(guias.join(","));
     try {
-      const { error } = await supabase.from("pedidos").update({ bidones_proximo_pedido: valor }).in("numero_guia", guias);
+      const { error } = await supabase.from("pedidos")
+        .update({ bidones_proximo_pedido: valor, ...(valor ? {} : { bidones_retiro_guia: null }) })
+        .in("numero_guia", guias);
       if (error) throw error;
       await cargarBidonesPend();
     } catch (e) {
@@ -2540,6 +2569,7 @@ export default function App() {
   async function abrirAbono(tipo, data) {
     setAbonoModal({ tipo, ...data });
     setAbonoMonto("");
+    setAbonoFecha(hoyCL());
     setErrorAbono("");
     setAbonoHist([]);
     try {
@@ -2557,12 +2587,15 @@ export default function App() {
     const monto = Math.round(Number(abonoMonto) || 0);
     if (monto <= 0) { setErrorAbono("Ingresa un monto mayor a 0."); return; }
     if (monto > abonoModal.saldo) { setErrorAbono(`El abono supera el saldo (${CLP(abonoModal.saldo)}).`); return; }
+    const fechaReal = abonoFecha || hoyCL();
+    if (fechaReal > hoyCL()) { setErrorAbono("La fecha del pago no puede ser futura."); return; }
     setGuardandoAbono(true); setErrorAbono("");
     try {
       if (abonoModal.tipo === "cobro") {
         const ins = await supabase.from("abonos_cobro").insert({
           numero_guia: abonoModal.numero_guia,
           monto,
+          fecha_pago: fechaReal,
           registrado_por: perfilNombre || null,
         });
         if (ins.error) throw ins.error;
@@ -2573,7 +2606,8 @@ export default function App() {
           cobro_abonado: nuevoAbonado,
           cobro_at: new Date().toISOString(),
           cobro_por: perfilNombre || null,
-          ...(completo ? { cobro_cobrado: true } : {}),
+          // El pago se completa en la fecha real del último abono.
+          ...(completo ? { cobro_cobrado: true, cobro_fecha_pago: fechaReal } : {}),
         };
         const { error } = await supabase.from("pedidos").update(patch).eq("id", abonoModal.pedidoId);
         if (error) throw error;
@@ -3786,7 +3820,7 @@ export default function App() {
     try {
       const { data: pp } = await supabase
         .from("pedidos")
-        .select("numero_guia, cobro_cobrado, cobro_at")
+        .select("numero_guia, cobro_cobrado, cobro_at, cobro_fecha_pago")
         .eq("cliente_id", c.id);
       const guias = (pp || []).map((x) => x.numero_guia).filter(Boolean);
       if (!guias.length) return;
@@ -3795,7 +3829,8 @@ export default function App() {
       (ents || []).forEach((e) => { if (e.guide && esPagoNo(e)) pagoNoMap[e.guide] = e; });
       const conNoPago = (pp || []).filter((x) => pagoNoMap[x.numero_guia]);
       if (!conNoPago.length) return; // nunca entró en no-pago → sin semáforo
-      // Días que tardó/lleva en pagar: si está cobrado, entrega→cobro; si no, entrega→hoy.
+      // Días que tardó/lleva en pagar: si está cobrado, entrega→fecha REAL de pago
+      // (si pagó antes de la entrega cuenta 0); si no, entrega→hoy.
       let diasMax = 0, hayDeuda = false;
       conNoPago.forEach((x) => {
         const e = pagoNoMap[x.numero_guia];
@@ -3803,7 +3838,7 @@ export default function App() {
         if (!g) return;
         let d;
         if (x.cobro_cobrado) {
-          const fin = x.cobro_at ? new Date(x.cobro_at).getTime() : g;
+          const fin = fechaPagoRealMs(x) ?? g;
           d = Math.max(0, Math.floor((fin - g) / 86400000));
         } else {
           hayDeuda = true;
@@ -4048,6 +4083,7 @@ export default function App() {
     if (campo === "cobro_cobrado" && !pedido.cobro_cobrado) {
       setCobroRespaldoPedido(pedido.id);
       setCobroRespaldoArchivo(null);
+      setCobroFechaPago(hoyCL());
       setErrorCob("");
       return;
     }
@@ -4057,7 +4093,7 @@ export default function App() {
     try {
       const nuevo = !pedido[campo];
       const patch = { [campo]: nuevo, cobro_at: new Date().toISOString(), cobro_por: perfilNombre || null };
-      if (campo === "cobro_cobrado" && !nuevo) patch.cobro_respaldo_path = null;
+      if (campo === "cobro_cobrado" && !nuevo) { patch.cobro_respaldo_path = null; patch.cobro_fecha_pago = null; }
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
@@ -4070,7 +4106,9 @@ export default function App() {
   }
   // Confirma el cobro, subiendo opcionalmente el comprobante (transferencia,
   // voucher, etc.) a un bucket privado. Permite guardar sin adjuntar archivo.
-  async function marcarCobradoConRespaldo(pedido, archivo) {
+  async function marcarCobradoConRespaldo(pedido, archivo, fechaPago) {
+    const fechaReal = fechaPago || hoyCL();
+    if (fechaReal > hoyCL()) { setErrorCob("La fecha del pago no puede ser futura."); return; }
     setGuardandoCob(pedido.id);
     setErrorCob(""); setOkCob("");
     try {
@@ -4085,6 +4123,7 @@ export default function App() {
       }
       const patch = {
         cobro_cobrado: true,
+        cobro_fecha_pago: fechaReal,
         cobro_at: new Date().toISOString(),
         cobro_por: perfilNombre || null,
         ...(path ? { cobro_respaldo_path: path } : {}),
@@ -4092,11 +4131,31 @@ export default function App() {
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
-      setOkCob(`${pedido.numero_guia || ""}: Cobrado marcado${archivo ? " con comprobante adjunto" : ""}.`);
+      setOkCob(`${pedido.numero_guia || ""}: Cobrado marcado (pagó el ${fechaCLTexto(fechaReal)})${archivo ? " con comprobante adjunto" : ""}.`);
       setCobroRespaldoPedido(null);
       setCobroRespaldoArchivo(null);
     } catch (e) {
       setErrorCob(mensajeError(e, "No se pudo actualizar."));
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+  // Corrige la fecha REAL de pago de un cobro ya marcado (p. ej. el cliente
+  // pagó antes de la entrega y se registró días después).
+  async function guardarFechaPagoCobro(pedido, fecha) {
+    if (!fecha) return;
+    if (fecha > hoyCL()) { setErrorCob("La fecha del pago no puede ser futura."); return; }
+    setGuardandoCob(pedido.id);
+    setErrorCob(""); setOkCob("");
+    try {
+      const patch = { cobro_fecha_pago: fecha };
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
+      if (error) throw error;
+      actualizarCobranzaLocal(pedido.id, patch);
+      setFechaPagoEdit((prev) => { const n = { ...prev }; delete n[pedido.id]; return n; });
+      setOkCob(`${pedido.numero_guia || ""}: fecha de pago actualizada al ${fechaCLTexto(fecha)}.`);
+    } catch (e) {
+      setErrorCob(mensajeError(e, "No se pudo actualizar la fecha de pago."));
     } finally {
       setGuardandoCob("");
     }
@@ -4548,22 +4607,51 @@ export default function App() {
       }
     } catch { /* si falla (RLS), no bloqueamos el flujo */ }
 
-    // Aviso de bidones pendientes marcados para retirar en el próximo pedido.
+    // Bidones vacíos pendientes de retiro: TODOS los del cliente que aún no se
+    // retiran (agendados o no), con su detalle, para gestionarlos en este pedido.
     setAvisoBidones(null);
+    setRetirarBidones(true);
     try {
       const { data: pp2 } = await supabase
         .from("pedidos")
-        .select("numero_guia")
+        .select("numero_guia, bidones_proximo_pedido")
         .eq("cliente_id", c.id)
-        .eq("bidones_proximo_pedido", true)
         .is("bidones_retirados_en", null);
-      const guiasBid = (pp2 || []).map((x) => x.numero_guia).filter(Boolean);
-      if (guiasBid.length) {
-        const { data: entsBid } = await supabase
-          .from("dt_entregas").select("guide, bidon_pendiente").in("guide", guiasBid).gt("bidon_pendiente", 0);
-        const total = (entsBid || []).reduce((s, e) => s + (Number(e.bidon_pendiente) || 0), 0);
-        if (total > 0) setAvisoBidones({ cantidad: total, guias: guiasBid });
+      const pedPorGuia = {};
+      (pp2 || []).forEach((x) => { if (x.numero_guia) pedPorGuia[x.numero_guia] = x; });
+      const guiasCli = Object.keys(pedPorGuia);
+      let entsBid = [];
+      for (let i = 0; i < guiasCli.length; i += 200) {
+        const { data } = await supabase
+          .from("dt_entregas").select("guide, status, gestionado_en, chofer, bidon_pendiente")
+          .in("guide", guiasCli.slice(i, i + 200)).gt("bidon_pendiente", 0);
+        entsBid = entsBid.concat(data || []);
       }
+      // Una fila por guía (la gestión más reciente).
+      const porGuia = {};
+      entsBid.forEach((e) => {
+        const prev = porGuia[e.guide];
+        const t = e.gestionado_en ? new Date(e.gestionado_en).getTime() : 0;
+        const tp = prev?.gestionado_en ? new Date(prev.gestionado_en).getTime() : -1;
+        if (!prev || t >= tp) porGuia[e.guide] = e;
+      });
+      const detalle = Object.values(porGuia)
+        .map((e) => {
+          const cant = bidonesPendientesDT(e);
+          const f = e.gestionado_en ? new Date(e.gestionado_en) : null;
+          return {
+            guia: e.guide,
+            cantidad: cant,
+            fecha: f,
+            dias: f ? Math.floor((Date.now() - f.getTime()) / 86400000) : 0,
+            chofer: (e.chofer || "").trim(),
+            agendado: !!pedPorGuia[e.guide]?.bidones_proximo_pedido,
+          };
+        })
+        .filter((b) => b.cantidad > 0)
+        .sort((a, b) => b.dias - a.dias);
+      const total = detalle.reduce((s, b) => s + b.cantidad, 0);
+      if (total > 0) setAvisoBidones({ cantidad: total, guias: detalle.map((b) => b.guia), detalle });
     } catch { /* si falla (RLS), no bloqueamos el flujo */ }
 
     calcSemaforo(c);
@@ -4901,7 +4989,12 @@ export default function App() {
         rut_factura: tipoDocumento === "factura" ? rutFactura.trim() : null,
         monto_total: montoTotal,
         origen: rol === "distribuidor" ? "distribuidor" : "formulario",
-        observacion: observacion.trim() || null,
+        observacion: [
+          observacion.trim(),
+          avisoBidones && retirarBidones
+            ? `Retirar ${avisoBidones.cantidad} bidón(es) vacío(s) pendiente(s) (guía(s) ${avisoBidones.guias.join(", ")}).`
+            : "",
+        ].filter(Boolean).join(" ") || null,
         es_fine: rol !== "distribuidor" && (esFine || esFineMini),
         fine_minimarket: rol !== "distribuidor" && esFineMini,
         estado_sync: "pendiente",
@@ -4924,6 +5017,17 @@ export default function App() {
         .select()
         .single();
       if (ePed) throw ePed;
+
+      // 1b) Bidones pendientes: quedan agendados para retirarse con este pedido
+      // (best-effort; en "Bidones" aparece el número de este pedido precargado).
+      if (avisoBidones && retirarBidones && avisoBidones.guias.length) {
+        try {
+          await supabase.from("pedidos")
+            .update({ bidones_proximo_pedido: true, bidones_retiro_guia: pedido.numero_guia || null })
+            .in("numero_guia", avisoBidones.guias)
+            .is("bidones_retirados_en", null);
+        } catch { /* no bloquea el pedido */ }
+      }
 
       // 2) Líneas
       const lineas = items.map((it) => {
@@ -7450,7 +7554,7 @@ export default function App() {
                         <div className="aq-det-line aq-prov-cab aq-fact-head" onClick={() => setGrupoAbierto((prev) => ({ ...prev, [claveG]: !prev[claveG] }))}>
                           <span>
                             {g.nombre}
-                            <em className="aq-det-chofer">{g.pend.length} pedido(s) con bidones · hasta {g.maxDias} día(s) de antigüedad{g.proximoPedido ? " · retiro agendado" : ""}</em>
+                            <em className="aq-det-chofer">{g.pend.length} pedido(s) con bidones · hasta {g.maxDias} día(s) de antigüedad{g.proximoPedido ? " · retiro agendado" + (g.pend.find((b) => b.bidones_retiro_guia)?.bidones_retiro_guia ? " con " + g.pend.find((b) => b.bidones_retiro_guia).bidones_retiro_guia : "") : ""}</em>
                           </span>
                           <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
                             <span className={"aq-badge " + cls}>{g.totalPend} bidón(es)</span>
@@ -7484,14 +7588,14 @@ export default function App() {
                               <input
                                 type="text"
                                 placeholder="Pedido / correlativo del retiro"
-                                value={bidonesCorrelativo[g.cliente_id] ?? ""}
+                                value={bidonesCorrelativo[g.cliente_id] ?? (g.pend.find((b) => b.bidones_retiro_guia)?.bidones_retiro_guia || "")}
                                 onChange={(e) => setBidonesCorrelativo((prev) => ({ ...prev, [g.cliente_id]: e.target.value }))}
                                 style={{ width: 190 }}
                               />
                               <button
                                 className="aq-btn-sec"
-                                disabled={guardandoBidonGuia === clave || !(bidonesCorrelativo[g.cliente_id] || "").trim()}
-                                onClick={() => marcarBidonesRetiradosGrupo(guiasPend, bidonesCorrelativo[g.cliente_id])}
+                                disabled={guardandoBidonGuia === clave || !(bidonesCorrelativo[g.cliente_id] ?? (g.pend.find((b) => b.bidones_retiro_guia)?.bidones_retiro_guia || "")).trim()}
+                                onClick={() => marcarBidonesRetiradosGrupo(guiasPend, bidonesCorrelativo[g.cliente_id] ?? (g.pend.find((b) => b.bidones_retiro_guia)?.bidones_retiro_guia || ""))}
                               >
                                 {guardandoBidonGuia === clave ? "Guardando…" : "Marcar retirado"}
                               </button>
@@ -8083,6 +8187,15 @@ export default function App() {
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button className="aq-link" type="button" onClick={() => setAbonoMonto(String(abonoModal.saldo))}>Abonar saldo completo</button>
                 </div>
+                {abonoModal.tipo === "cobro" && (
+                  <>
+                    <label className="aq-mini" style={{ marginTop: 10, display: "block" }}>Fecha real del pago</label>
+                    <input type="date" value={abonoFecha} max={hoyCL()} onChange={(e) => { setAbonoFecha(e.target.value); setErrorAbono(""); }} />
+                    <span className="aq-mini aq-muted" style={{ display: "block", marginTop: 4 }}>
+                      El día en que el cliente pagó (según la transferencia o el comprobante), no el día en que se registra. Con esta fecha se calcula la mora.
+                    </span>
+                  </>
+                )}
                 {errorAbono && <div className="aq-error" style={{ marginTop: 8 }}>{errorAbono}</div>}
 
                 {abonoHist.length > 0 && (
@@ -8091,7 +8204,9 @@ export default function App() {
                     {abonoHist.map((h) => (
                       <div className="aq-det-line" key={h.id}>
                         <span className="aq-tr-sub">
-                          {h.fecha ? new Date(h.fecha).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "2-digit" }) : ""}
+                          {h.fecha_pago
+                            ? "Pagó el " + fechaCLTexto(h.fecha_pago)
+                            : h.fecha ? new Date(h.fecha).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "2-digit" }) : ""}
                           {h.registrado_por ? " · " + h.registrado_por : ""}
                         </span>
                         <span>{CLP(h.monto)}</span>
@@ -8438,7 +8553,7 @@ export default function App() {
                                         <div className="aq-hist-pago">
                                           <strong>Cobro</strong>
                                           {p.cobro_cobrado ? (
-                                            <div>✓ Pagado{p.cobro_at ? " el " + new Date(p.cobro_at).toLocaleDateString("es-CL") : ""}{p.cobro_por ? " · " + p.cobro_por : ""} · {CLP(p.monto_total)}</div>
+                                            <div>✓ Pagado{p.cobro_fecha_pago ? " el " + fechaCLTexto(p.cobro_fecha_pago) : p.cobro_at ? " (registrado el " + new Date(p.cobro_at).toLocaleDateString("es-CL") + ")" : ""}{p.cobro_por ? " · " + p.cobro_por : ""} · {CLP(p.monto_total)}</div>
                                           ) : esPagoNo(entrega) ? (
                                             (Number(p.cobro_abonado) || 0) > 0
                                               ? <div>Abonado {CLP(p.cobro_abonado)} · Saldo {CLP(Math.max(0, (Number(p.monto_total) || 0) - (Number(p.cobro_abonado) || 0)))}</div>
@@ -8771,13 +8886,17 @@ export default function App() {
                                 </div>
                                 {cobroRespaldoPedido === p.id && (
                                   <div className="aq-fact-acciones" style={{ marginTop: 8 }}>
+                                    <label className="aq-fecha-pago">
+                                      <span>Fecha real del pago</span>
+                                      <input type="date" value={cobroFechaPago} max={hoyCL()} onChange={(e) => setCobroFechaPago(e.target.value)} />
+                                    </label>
                                     <input
                                       type="file"
                                       accept="image/*,application/pdf"
                                       title="Comprobante de pago (opcional)"
                                       onChange={(e) => setCobroRespaldoArchivo(e.target.files?.[0] || null)}
                                     />
-                                    <button className="aq-btn-sec" disabled={enProceso} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo)}>
+                                    <button className="aq-btn-sec" disabled={enProceso || !cobroFechaPago} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo, cobroFechaPago)}>
                                       {enProceso ? "Guardando…" : "Confirmar cobrado"}
                                     </button>
                                     <button className="aq-link" onClick={() => { setCobroRespaldoPedido(null); setCobroRespaldoArchivo(null); }}>Cancelar</button>
@@ -8794,6 +8913,19 @@ export default function App() {
                                   </button>
                                   {p.cobro_cobrado && p.cobro_respaldo_path && (
                                     <button className="aq-link" onClick={() => verRespaldoCobro(p.cobro_respaldo_path)}>Ver comprobante</button>
+                                  )}
+                                  {p.cobro_cobrado && (
+                                    fechaPagoEdit[p.id] !== undefined ? (
+                                      <span className="aq-fecha-pago">
+                                        <input type="date" value={fechaPagoEdit[p.id]} max={hoyCL()} onChange={(ev) => setFechaPagoEdit((prev) => ({ ...prev, [p.id]: ev.target.value }))} />
+                                        <button className="aq-btn-sec" disabled={enProceso || !fechaPagoEdit[p.id]} onClick={() => guardarFechaPagoCobro(p, fechaPagoEdit[p.id])}>Guardar</button>
+                                        <button className="aq-link" onClick={() => setFechaPagoEdit((prev) => { const n = { ...prev }; delete n[p.id]; return n; })}>Cancelar</button>
+                                      </span>
+                                    ) : (
+                                      <button className="aq-link" title="Corregir la fecha en que el cliente pagó" onClick={() => setFechaPagoEdit((prev) => ({ ...prev, [p.id]: p.cobro_fecha_pago || (p.cobro_at ? new Date(p.cobro_at).toLocaleDateString("en-CA", { timeZone: "America/Santiago" }) : hoyCL()) }))}>
+                                        {p.cobro_fecha_pago ? `Pagó el ${fechaCLTexto(p.cobro_fecha_pago)} ✎` : "Indicar fecha real de pago ✎"}
+                                      </button>
+                                    )
                                   )}
                                   <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado || saldoP <= 0} onClick={() => abrirAbono("cobro", { numero_guia: p.numero_guia, pedidoId: p.id, monto_total: montoP, cobro_abonado: abonadoP, saldo: saldoP, titulo: clientePorId[p.cliente_id]?.nombre || p.numero_guia })}>
                                     + Abono
@@ -8925,34 +9057,58 @@ export default function App() {
               </div>
             )}
 
-            {cliente && !cliente.bloqueado && avisoDeuda && (
-              <div className="aq-alerta-deuda">
-                <strong>⚠ Deuda pendiente</strong>
-                <p>Este cliente tiene {avisoDeuda.guias.length} entrega(s) sin pagar por {CLP(avisoDeuda.monto)} (guía(s): {avisoDeuda.guias.join(", ")}).</p>
-                <span>Puedes continuar, pero conviene gestionarlo en Cobranzas.</span>
-              </div>
-            )}
+            {/* Resumen del cliente: deuda, comportamiento de pago y bidones en un solo vistazo */}
+            {cliente && !cliente.lista_negra && (avisoDeuda || semaforoCli || avisoBidones) && (
+              <section className={"aq-card aq-resumen-cli" + (semaforoCli?.moroso ? " moroso" : "")}>
+                <div className="aq-resumen-head">
+                  <h2>Resumen del cliente</h2>
+                  {semaforoCli?.moroso && <span className="aq-resumen-tag">Exigir pago anticipado</span>}
+                </div>
+                <div className="aq-resumen-grid">
+                  <div className={"aq-resumen-tile " + (avisoDeuda ? "warn" : "ok")}>
+                    <span className="aq-resumen-lbl">Deuda pendiente</span>
+                    <strong>{avisoDeuda ? CLP(avisoDeuda.monto) : "Sin deuda"}</strong>
+                    <em>{avisoDeuda ? `${avisoDeuda.guias.length} entrega(s): ${avisoDeuda.guias.join(", ")}` : "Al día con sus entregas"}</em>
+                  </div>
+                  <div className={"aq-resumen-tile " + (semaforoCli ? ({ rojo: "bad", amarillo: "warn", verde: "ok" }[semaforoCli.cls] || "") : "ok")}>
+                    <span className="aq-resumen-lbl">Comportamiento de pago</span>
+                    <strong>{semaforoCli ? semaforoCli.label.split(" · ")[0] : "Sin historial de mora"}</strong>
+                    <em>{semaforoCli ? (semaforoCli.label.split(" · ")[1] || "") : "Nunca quedó con pago pendiente"}</em>
+                  </div>
+                  <div className={"aq-resumen-tile " + (avisoBidones ? "info" : "ok")}>
+                    <span className="aq-resumen-lbl">Bidones vacíos por retirar</span>
+                    <strong>{avisoBidones ? `${avisoBidones.cantidad} bidón(es)` : "Ninguno"}</strong>
+                    <em>{avisoBidones ? `${avisoBidones.detalle.length} entrega(s) · hasta ${avisoBidones.detalle[0]?.dias ?? 0} día(s)` : "No tiene envases pendientes"}</em>
+                  </div>
+                </div>
 
-            {cliente && avisoBidones && (
-              <div className="aq-alerta-bidon">
-                <strong>🧴 Bidones pendientes de retiro</strong>
-                <p>Este cliente tiene {avisoBidones.cantidad} bidón(es) vacío(s) marcados para retirar en su próximo pedido (guía(s): {avisoBidones.guias.join(", ")}).</p>
-                <span>Coordina el retiro con el chofer en esta entrega.</span>
-              </div>
-            )}
+                {semaforoCli?.moroso && (
+                  <p className="aq-resumen-nota bad">
+                    Tiene historial de mora (más de 15 días en pagar, contados desde la entrega hasta la fecha real del pago). Se recomienda cobrar por adelantado antes de despachar.
+                  </p>
+                )}
+                {avisoDeuda && !semaforoCli?.moroso && (
+                  <p className="aq-resumen-nota">Puedes continuar, pero conviene gestionar la deuda en Cobranzas.</p>
+                )}
 
-            {cliente && semaforoCli && (
-              <div className={"aq-semaforo " + semaforoCli.cls} style={{ marginBottom: 14 }}>
-                <span className="aq-sem-dot" />
-                Comportamiento de pago: {semaforoCli.label}
-              </div>
-            )}
-
-            {cliente && semaforoCli && semaforoCli.moroso && (
-              <div className="aq-alerta-cliente" style={{ marginTop: -4 }}>
-                <strong>⚠ Cliente moroso — exigir pago anticipado</strong>
-                <p>Este cliente tiene historial de mora (más de 15 días en pagar). Se recomienda cobrar por adelantado antes de despachar.</p>
-              </div>
+                {avisoBidones && (
+                  <div className="aq-resumen-bid">
+                    {avisoBidones.detalle.map((b) => (
+                      <div className="aq-resumen-bid-row" key={b.guia}>
+                        <span>
+                          Guía {b.guia}
+                          <em>{b.fecha ? b.fecha.toLocaleDateString("es-CL", { day: "2-digit", month: "short" }) + " · " : ""}{b.dias} día(s){b.chofer ? " · " + b.chofer : ""}{b.agendado ? " · retiro agendado" : ""}</em>
+                        </span>
+                        <strong>{b.cantidad}</strong>
+                      </div>
+                    ))}
+                    <label className="aq-check-inline">
+                      <input type="checkbox" checked={retirarBidones} onChange={(e) => setRetirarBidones(e.target.checked)} />
+                      Retirar estos {avisoBidones.cantidad} bidón(es) en esta entrega (se agrega como indicación al chofer)
+                    </label>
+                  </div>
+                )}
+              </section>
             )}
 
             {cliente && (
@@ -9749,6 +9905,34 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-alerta-deuda strong { color:#8a6400; display:block; }
 .aq-alerta-deuda p { margin:4px 0; color:var(--ink); }
 .aq-alerta-deuda span { font-size:13px; color:#a07a2a; }
+.aq-resumen-cli { margin-bottom:14px; }
+.aq-resumen-cli.moroso { border-color:#f3b4ad; box-shadow:inset 4px 0 0 var(--bad); }
+.aq-resumen-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+.aq-resumen-head h2 { margin:0; }
+.aq-resumen-tag { background:#fdecea; color:#b42318; border:1px solid #f3b4ad; font-size:12px; font-weight:700; padding:4px 10px; border-radius:999px; white-space:nowrap; }
+.aq-resumen-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
+.aq-resumen-tile { border:1px solid var(--line); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column; gap:2px; min-width:0; }
+.aq-resumen-tile .aq-resumen-lbl { font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); }
+.aq-resumen-tile strong { font-size:17px; color:var(--ink); }
+.aq-resumen-tile em { font-style:normal; font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+.aq-resumen-tile.ok { background:#f1faf5; border-color:#c4e8d3; }
+.aq-resumen-tile.ok strong { color:#1a7a45; }
+.aq-resumen-tile.warn { background:#fff8e8; border-color:#f0d8a0; }
+.aq-resumen-tile.warn strong { color:#8a6400; }
+.aq-resumen-tile.bad { background:#fdecea; border-color:#f3b4ad; }
+.aq-resumen-tile.bad strong { color:#b42318; }
+.aq-resumen-tile.info { background:#eaf3fd; border-color:#9cc4ee; }
+.aq-resumen-tile.info strong { color:#0c5aa6; }
+.aq-resumen-nota { margin:10px 0 0; font-size:13px; color:var(--muted); }
+.aq-resumen-nota.bad { color:#b42318; font-weight:600; }
+.aq-resumen-bid { margin-top:12px; border-top:1px dashed var(--line); padding-top:10px; }
+.aq-resumen-bid-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:4px 0; font-size:14px; }
+.aq-resumen-bid-row em { font-style:normal; display:block; font-size:12px; color:var(--muted); }
+.aq-resumen-bid-row strong { color:#0c5aa6; }
+.aq-resumen-bid .aq-check-inline { margin-top:8px; }
+.aq-fecha-pago { display:inline-flex; align-items:center; gap:6px; font-size:13px; flex-wrap:wrap; }
+.aq-fecha-pago span { color:var(--muted); }
+@media (max-width: 720px) { .aq-resumen-grid { grid-template-columns:1fr; } }
 .aq-alerta-bidon { background:#e6f1fb; border:1px solid #85b7eb; border-radius:12px; padding:14px 16px; margin-bottom:14px; }
 .aq-alerta-bidon strong { color:#0c447c; display:block; }
 .aq-alerta-bidon p { margin:4px 0; color:var(--ink); }
