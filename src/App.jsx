@@ -557,6 +557,16 @@ function fechaPagoRealMs(p) {
   return p.cobro_at ? new Date(p.cobro_at).getTime() : null;
 }
 
+// Medios de pago de clientes (registro de movimientos de cobro, base ERP).
+const MEDIOS_PAGO = [
+  { v: "transferencia", l: "Transferencia", tipoCuenta: "banco" },
+  { v: "efectivo", l: "Efectivo", tipoCuenta: "caja" },
+  { v: "sumup", l: "SumUp (link o tienda)", tipoCuenta: "sumup" },
+  { v: "tarjeta", l: "Tarjeta (POS SumUp)", tipoCuenta: "sumup" },
+  { v: "otro", l: "Otro", tipoCuenta: null },
+];
+const medioPagoLabel = (v) => MEDIOS_PAGO.find((m) => m.v === v)?.l || (v || "—");
+
 // Bidones vacíos pendientes de retiro, según el campo numeral "Bidón Pendiente de Entrega".
 function bidonesPendientesDT(entrega) {
   if (!entrega || !entregaGestionada(entrega)) return 0;
@@ -1199,6 +1209,13 @@ export default function App() {
   const [cobroRespaldoPedido, setCobroRespaldoPedido] = useState(null); // id de pedido con panel de respaldo abierto
   const [cobroRespaldoArchivo, setCobroRespaldoArchivo] = useState(null); // File del comprobante (opcional)
   const [cobroFechaPago, setCobroFechaPago] = useState("");  // fecha REAL del pago al marcar Cobrado
+  const [cobroMedio, setCobroMedio] = useState("transferencia"); // medio de pago al marcar Pagado
+  const [cobroCuenta, setCobroCuenta] = useState("");        // cuenta de destino (cuentas_dinero.id)
+  const [cuentasDinero, setCuentasDinero] = useState([]);    // cuentas donde entra el dinero
+  const [adjuntoPedido, setAdjuntoPedido] = useState(null);  // pedido con panel "adjuntar comprobante" abierto
+  const [adjuntoArchivo, setAdjuntoArchivo] = useState(null);
+  const [mesExportCob, setMesExportCob] = useState(() => new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" }).slice(0, 7));
+  const [exportandoCob, setExportandoCob] = useState(false);
   const [fechaPagoEdit, setFechaPagoEdit] = useState({});    // pedidoId -> fecha en edición (cobros ya marcados)
 
   // Mantenedor de productos (admin)
@@ -4036,7 +4053,20 @@ export default function App() {
     }
   }
 
+  async function cargarCuentasDinero() {
+    try {
+      const { data } = await supabase.from("cuentas_dinero").select("*").eq("activo", true).order("orden");
+      setCuentasDinero(data || []);
+      return data || [];
+    } catch { return []; }
+  }
+  function cuentaPorMedio(medio, lista) {
+    const tipo = MEDIOS_PAGO.find((m) => m.v === medio)?.tipoCuenta;
+    const c = (lista || cuentasDinero).find((x) => x.tipo === tipo);
+    return c ? String(c.id) : "";
+  }
   async function abrirCobranzas() {
+    if (!cuentasDinero.length) cargarCuentasDinero();
     setVista("cobranzas");
     if (cobranzas !== null) return; // ya está cargado en esta sesión; usa "↻ Actualizar" para refrescar
     await cargarCobranzas();
@@ -4109,18 +4139,32 @@ export default function App() {
       setCobroRespaldoPedido(pedido.id);
       setCobroRespaldoArchivo(null);
       setCobroFechaPago(hoyCL());
+      setCobroMedio("transferencia");
+      setCobroCuenta(cuentaPorMedio("transferencia"));
+      if (!cuentasDinero.length) cargarCuentasDinero().then((l) => setCobroCuenta(cuentaPorMedio("transferencia", l)));
       setErrorCob("");
       return;
     }
-    if (campo === "cobro_cobrado" && pedido.cobro_cobrado &&
-        !window.confirm(`¿Dejar ${pedido.numero_guia || "este pedido"} como NO pagado? Se borra la fecha de pago registrada.`)) return;
+    let motivoAnulacion = "";
+    if (campo === "cobro_cobrado" && pedido.cobro_cobrado) {
+      const m = window.prompt(`¿Dejar ${pedido.numero_guia || "este pedido"} como NO pagado?\n\nEl pago registrado no se borra: queda ANULADO en el historial de movimientos.\nIndica el motivo:`, "");
+      if (m === null) return;
+      motivoAnulacion = m.trim() || "Sin motivo indicado";
+    }
     setGuardandoCob(pedido.id);
     setErrorCob("");
     setOkCob("");
     try {
       const nuevo = !pedido[campo];
       const patch = { [campo]: nuevo, cobro_at: new Date().toISOString(), cobro_por: perfilNombre || null };
-      if (campo === "cobro_cobrado" && !nuevo) { patch.cobro_respaldo_path = null; patch.cobro_fecha_pago = null; }
+      if (campo === "cobro_cobrado" && !nuevo) {
+        patch.cobro_respaldo_path = null; patch.cobro_fecha_pago = null;
+        patch.cobro_medio_pago = null; patch.cobro_cuenta_id = null;
+        const { error: eAn } = await supabase.from("cobros_movimientos")
+          .update({ anulado: true, anulado_por: perfilNombre || null, anulado_en: new Date().toISOString(), motivo_anulacion: motivoAnulacion })
+          .eq("pedido_id", pedido.id).eq("anulado", false);
+        if (eAn) throw eAn;
+      }
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
@@ -4133,13 +4177,16 @@ export default function App() {
   }
   // Confirma el cobro, subiendo opcionalmente el comprobante (transferencia,
   // voucher, etc.) a un bucket privado. Permite guardar sin adjuntar archivo.
-  async function marcarCobradoConRespaldo(pedido, archivo, fechaPago) {
+  async function marcarCobradoConRespaldo(pedido, archivo, fechaPago, medio, cuentaId) {
     const fechaReal = fechaPago || hoyCL();
+    if (!medio) { setErrorCob("Indica el medio de pago."); return; }
+    if (!cuentaId) { setErrorCob("Indica la cuenta donde entró el dinero."); return; }
+    const cuentaNom = cuentasDinero.find((c) => String(c.id) === String(cuentaId))?.nombre || "";
     if (fechaReal > hoyCL()) { setErrorCob("La fecha del pago no puede ser futura."); return; }
     // Confirmación antes de marcar Pagado (evita marcas por error), más
     // enfática si no se adjunta comprobante.
     const nombreCli = clientePorId[pedido.cliente_id]?.nombre || "";
-    const resumen = `${pedido.numero_guia || "Pedido"}${nombreCli ? " · " + nombreCli : ""}\nMonto: ${CLP(Number(pedido.monto_total) || 0)}\nFecha del pago: ${fechaCLTexto(fechaReal)}`;
+    const resumen = `${pedido.numero_guia || "Pedido"}${nombreCli ? " · " + nombreCli : ""}\nMonto: ${CLP(Number(pedido.monto_total) || 0)}\nFecha del pago: ${fechaCLTexto(fechaReal)}\nMedio: ${medioPagoLabel(medio)} → ${cuentaNom}`;
     const ok = archivo
       ? window.confirm(`¿Confirmas que este pedido está PAGADO?\n\n${resumen}\nComprobante: ${archivo.name}`)
       : window.confirm(`⚠ Vas a marcar este pedido como PAGADO SIN COMPROBANTE.\n\n${resumen}\n\nSolo confírmalo si verificaste el pago (transferencia recibida, efectivo, etc.). Si tienes el comprobante, cancela y adjúntalo.\n\n¿Marcar como pagado sin respaldo?`);
@@ -4156,15 +4203,37 @@ export default function App() {
           .upload(path, archivo, { upsert: false, contentType: archivo.type || "application/octet-stream" });
         if (up.error) throw up.error;
       }
+      // Movimiento de cobro (registro contable). Va primero: si falla, no se marca.
+      const { data: mov, error: eMov } = await supabase.from("cobros_movimientos").insert({
+        pedido_id: pedido.id,
+        numero_guia: pedido.numero_guia || null,
+        cliente_id: pedido.cliente_id || null,
+        monto: Number(pedido.monto_total) || 0,
+        fecha_pago: fechaReal,
+        medio_pago: medio,
+        cuenta_id: Number(cuentaId),
+        documento_tipo: pedido.tipo_documento || null,
+        documento_numero: pedido.numero_documento_emitido || null,
+        respaldo_path: path,
+        registrado_por: perfilNombre || null,
+      }).select("id").single();
+      if (eMov) throw eMov;
       const patch = {
         cobro_cobrado: true,
         cobro_fecha_pago: fechaReal,
+        cobro_medio_pago: medio,
+        cobro_cuenta_id: Number(cuentaId),
         cobro_at: new Date().toISOString(),
         cobro_por: perfilNombre || null,
         ...(path ? { cobro_respaldo_path: path } : {}),
       };
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
-      if (error) throw error;
+      if (error) {
+        await supabase.from("cobros_movimientos")
+          .update({ anulado: true, anulado_en: new Date().toISOString(), motivo_anulacion: "Error al marcar el pedido como pagado" })
+          .eq("id", mov.id);
+        throw error;
+      }
       actualizarCobranzaLocal(pedido.id, patch);
       setOkCob(`${pedido.numero_guia || ""}: marcado Pagado (pagó el ${fechaCLTexto(fechaReal)})${archivo ? " con comprobante adjunto" : " · sin comprobante"}.`);
       setCobroRespaldoPedido(null);
@@ -4186,6 +4255,7 @@ export default function App() {
       const patch = { cobro_fecha_pago: fecha };
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
+      await supabase.from("cobros_movimientos").update({ fecha_pago: fecha }).eq("pedido_id", pedido.id).eq("anulado", false);
       actualizarCobranzaLocal(pedido.id, patch);
       setFechaPagoEdit((prev) => { const n = { ...prev }; delete n[pedido.id]; return n; });
       setOkCob(`${pedido.numero_guia || ""}: fecha de pago actualizada al ${fechaCLTexto(fecha)}.`);
@@ -4193,6 +4263,91 @@ export default function App() {
       setErrorCob(mensajeError(e, "No se pudo actualizar la fecha de pago."));
     } finally {
       setGuardandoCob("");
+    }
+  }
+  // Adjunta el comprobante a un pago ya registrado sin respaldo.
+  async function adjuntarComprobanteCobro(pedido, archivo) {
+    if (!archivo) { setErrorCob("Selecciona el archivo del comprobante."); return; }
+    setGuardandoCob(pedido.id);
+    setErrorCob(""); setOkCob("");
+    try {
+      const ext = (archivo.name.split(".").pop() || "jpg").toLowerCase();
+      const path = `${pedido.numero_guia || pedido.id}-${Date.now()}.${ext}`;
+      const up = await supabase.storage.from("respaldos-cobro")
+        .upload(path, archivo, { upsert: false, contentType: archivo.type || "application/octet-stream" });
+      if (up.error) throw up.error;
+      const patch = { cobro_respaldo_path: path };
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
+      if (error) throw error;
+      await supabase.from("cobros_movimientos").update({ respaldo_path: path }).eq("pedido_id", pedido.id).eq("anulado", false);
+      actualizarCobranzaLocal(pedido.id, patch);
+      setAdjuntoPedido(null); setAdjuntoArchivo(null);
+      setOkCob(`${pedido.numero_guia || ""}: comprobante adjuntado.`);
+    } catch (e) {
+      setErrorCob(mensajeError(e, "No se pudo adjuntar el comprobante."));
+    } finally {
+      setGuardandoCob("");
+    }
+  }
+
+  // Exporta los movimientos de cobro del mes (formato fijo, base para el ERP contable).
+  async function exportarMovimientosCobro(mes) {
+    if (!mes) return;
+    setExportandoCob(true); setErrorCob("");
+    try {
+      const [y, m] = mes.split("-").map(Number);
+      const desde = `${mes}-01`;
+      const hasta = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+      const [{ data: movs, error }, cuentas] = await Promise.all([
+        supabase.from("cobros_movimientos").select("*").gte("fecha_pago", desde).lt("fecha_pago", hasta).order("fecha_pago").order("registrado_en"),
+        cuentasDinero.length ? Promise.resolve(cuentasDinero) : cargarCuentasDinero(),
+      ]);
+      if (error) throw error;
+      const cuentaNom = (id) => (cuentas || []).find((c) => c.id === id)?.nombre || "";
+      const ExcelJS = (await import("exceljs")).default;
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Movimientos cobro");
+      ws.getCell("A1").value = `Aquatrisq · Movimientos de cobro · ${mes}`;
+      ws.getCell("A1").font = { name: "Arial", bold: true, size: 12 };
+      const cols = ["ID movimiento", "Fecha pago", "Guía", "Cliente", "RUT", "Monto ($)", "Medio de pago", "Cuenta destino", "Tipo documento", "N° documento", "Comprobante", "Estado", "Registrado por", "Registrado en", "Motivo anulación"];
+      ws.getRow(3).values = cols;
+      ws.getRow(3).font = { name: "Arial", bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+      ws.getRow(3).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F6FB2" } };
+      [38, 12, 11, 30, 13, 12, 20, 22, 14, 13, 12, 10, 24, 18, 26].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+      (movs || []).forEach((mv, i) => {
+        const cli = clientePorId[mv.cliente_id];
+        const r = ws.getRow(4 + i);
+        r.values = [
+          mv.id, fechaCLTexto(mv.fecha_pago), mv.numero_guia || "", cli?.nombre || "", cli?.rut || "",
+          Number(mv.monto) || 0, medioPagoLabel(mv.medio_pago), cuentaNom(mv.cuenta_id),
+          mv.documento_tipo || "", mv.documento_numero || "", mv.respaldo_path ? "Sí" : "No",
+          mv.anulado ? "Anulado" : "Vigente", mv.registrado_por || "",
+          mv.registrado_en ? new Date(mv.registrado_en).toLocaleString("es-CL") : "", mv.motivo_anulacion || "",
+        ];
+        r.font = { name: "Arial", size: 10, ...(mv.anulado ? { color: { argb: "FF999999" }, strike: true } : {}) };
+      });
+      ws.getColumn(6).numFmt = '"$"#,##0';
+      const n = (movs || []).length;
+      if (n) {
+        const t = 4 + n;
+        ws.getCell(t, 5).value = "Total vigente";
+        ws.getCell(t, 6).value = { formula: `SUMIF(L4:L${t - 1},"Vigente",F4:F${t - 1})` };
+        ws.getRow(t).font = { name: "Arial", bold: true, size: 10 };
+      } else {
+        ws.getCell("A4").value = "Sin movimientos en el mes.";
+      }
+      ws.views = [{ state: "frozen", ySplit: 3 }];
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `Aquatrisq_movimientos_cobro_${mes}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      setErrorCob(mensajeError(e, "No se pudo exportar los movimientos."));
+    } finally {
+      setExportandoCob(false);
     }
   }
   async function verRespaldoCobro(path) {
@@ -8781,7 +8936,14 @@ export default function App() {
                 <button className="aq-link" onClick={() => setVista("inicio")}>Volver</button>
               </span>
             </div>
-            <p className="aq-muted">Pedidos entregados con <strong>Pago = No</strong> en el formulario del chofer. Marca Cobrado y/o Recuperado, o registra un intento. Más de 3 intentos sin cobrar bloquea al cliente.</p>
+            <p className="aq-muted">Pedidos entregados con <strong>Pago = No</strong> en el formulario del chofer. Márcalos como <strong>Pagado</strong> indicando la fecha real, el medio de pago, la cuenta donde entró el dinero y, si lo tienes, el comprobante. Cada pago queda en el registro de movimientos (no se borra: si se corrige, queda anulado).</p>
+            <div className="aq-export-cob">
+              <span>Movimientos de cobro del mes</span>
+              <input type="month" value={mesExportCob} onChange={(e) => setMesExportCob(e.target.value)} />
+              <button className="aq-btn-sec" disabled={exportandoCob || !mesExportCob} onClick={() => exportarMovimientosCobro(mesExportCob)}>
+                {exportandoCob ? "Generando…" : "⬇ Exportar Excel"}
+              </button>
+            </div>
 
             <div className="aq-subtabs" style={{ marginTop: 4 }}>
               <button className={filtroCob === "pendientes" ? "on" : ""} onClick={() => setFiltroCob("pendientes")}>Pendientes</button>
@@ -8931,6 +9093,19 @@ export default function App() {
                                       <span>Fecha real del pago</span>
                                       <input type="date" value={cobroFechaPago} max={hoyCL()} onChange={(e) => setCobroFechaPago(e.target.value)} />
                                     </label>
+                                    <label className="aq-fecha-pago">
+                                      <span>Medio</span>
+                                      <select value={cobroMedio} onChange={(e) => { setCobroMedio(e.target.value); const c = cuentaPorMedio(e.target.value); if (c) setCobroCuenta(c); }}>
+                                        {MEDIOS_PAGO.map((m) => <option key={m.v} value={m.v}>{m.l}</option>)}
+                                      </select>
+                                    </label>
+                                    <label className="aq-fecha-pago">
+                                      <span>Entró a</span>
+                                      <select value={cobroCuenta} onChange={(e) => setCobroCuenta(e.target.value)}>
+                                        <option value="">— Cuenta —</option>
+                                        {cuentasDinero.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                                      </select>
+                                    </label>
                                     <span className="aq-mini aq-muted">Comprobante:</span>
                                     <input
                                       type="file"
@@ -8938,7 +9113,7 @@ export default function App() {
                                       title="Comprobante de pago (recomendado)"
                                       onChange={(e) => setCobroRespaldoArchivo(e.target.files?.[0] || null)}
                                     />
-                                    <button className="aq-btn-sec" disabled={enProceso || !cobroFechaPago} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo, cobroFechaPago)}>
+                                    <button className="aq-btn-sec" disabled={enProceso || !cobroFechaPago || !cobroMedio || !cobroCuenta} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo, cobroFechaPago, cobroMedio, cobroCuenta)}>
                                       {enProceso ? "Guardando…" : "Confirmar pago"}
                                     </button>
                                     <button className="aq-link" onClick={() => { setCobroRespaldoPedido(null); setCobroRespaldoArchivo(null); }}>Cancelar</button>
@@ -8955,6 +9130,20 @@ export default function App() {
                                   </button>
                                   {p.cobro_cobrado && p.cobro_respaldo_path && (
                                     <button className="aq-link" onClick={() => verRespaldoCobro(p.cobro_respaldo_path)}>Ver comprobante</button>
+                                  )}
+                                  {p.cobro_cobrado && !p.cobro_respaldo_path && (
+                                    adjuntoPedido === p.id ? (
+                                      <span className="aq-fecha-pago">
+                                        <input type="file" accept="image/*,application/pdf" onChange={(ev) => setAdjuntoArchivo(ev.target.files?.[0] || null)} />
+                                        <button className="aq-btn-sec" disabled={enProceso || !adjuntoArchivo} onClick={() => adjuntarComprobanteCobro(p, adjuntoArchivo)}>{enProceso ? "Subiendo…" : "Subir"}</button>
+                                        <button className="aq-link" onClick={() => { setAdjuntoPedido(null); setAdjuntoArchivo(null); }}>Cancelar</button>
+                                      </span>
+                                    ) : (
+                                      <button className="aq-link" onClick={() => { setAdjuntoPedido(p.id); setAdjuntoArchivo(null); }}>📎 Adjuntar comprobante</button>
+                                    )
+                                  )}
+                                  {p.cobro_cobrado && p.cobro_medio_pago && (
+                                    <span className="aq-mini aq-muted">{medioPagoLabel(p.cobro_medio_pago)}{cuentasDinero.find((c) => c.id === p.cobro_cuenta_id) ? " → " + cuentasDinero.find((c) => c.id === p.cobro_cuenta_id).nombre : ""}</span>
                                   )}
                                   {p.cobro_cobrado && (
                                     fechaPagoEdit[p.id] !== undefined ? (
@@ -9969,6 +10158,10 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-resumen-bid-row em { font-style:normal; display:block; font-size:12px; color:var(--muted); }
 .aq-resumen-bid-row strong { color:#0c5aa6; }
 .aq-resumen-bid .aq-check-inline { margin-top:8px; }
+.aq-export-cob { display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f3f8fc; border:1px solid #cfe0f0; border-radius:10px; padding:8px 12px; margin:6px 0 10px; font-size:13px; font-weight:600; color:var(--navy); }
+.aq-export-cob input { width:auto; }
+.aq-export-cob .aq-btn-sec { margin:0; }
+.aq-fecha-pago select { width:auto; }
 .aq-fecha-pago { display:inline-flex; align-items:center; gap:6px; font-size:13px; flex-wrap:wrap; }
 .aq-fecha-pago span { color:var(--muted); }
 @media (max-width: 720px) { .aq-resumen-grid { grid-template-columns:1fr; } }
