@@ -4112,6 +4112,8 @@ export default function App() {
       setErrorCob("");
       return;
     }
+    if (campo === "cobro_cobrado" && pedido.cobro_cobrado &&
+        !window.confirm(`¿Dejar ${pedido.numero_guia || "este pedido"} como NO pagado? Se borra la fecha de pago registrada.`)) return;
     setGuardandoCob(pedido.id);
     setErrorCob("");
     setOkCob("");
@@ -4122,7 +4124,7 @@ export default function App() {
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
-      setOkCob(`${pedido.numero_guia || ""}: ${campo === "cobro_cobrado" ? "Cobrado" : "Recuperado"} ${nuevo ? "marcado" : "desmarcado"}.`);
+      setOkCob(`${pedido.numero_guia || ""}: ${campo === "cobro_cobrado" ? (nuevo ? "marcado Pagado" : "marcado No pagado") : (nuevo ? "Recuperado marcado" : "Recuperado desmarcado")}.`);
     } catch (e) {
       setErrorCob(mensajeError(e, "No se pudo actualizar."));
     } finally {
@@ -4156,7 +4158,7 @@ export default function App() {
       const { error } = await supabase.from("pedidos").update(patch).eq("id", pedido.id);
       if (error) throw error;
       actualizarCobranzaLocal(pedido.id, patch);
-      setOkCob(`${pedido.numero_guia || ""}: Cobrado marcado (pagó el ${fechaCLTexto(fechaReal)})${archivo ? " con comprobante adjunto" : ""}.`);
+      setOkCob(`${pedido.numero_guia || ""}: marcado Pagado (pagó el ${fechaCLTexto(fechaReal)})${archivo ? " con comprobante adjunto" : ""}.`);
       setCobroRespaldoPedido(null);
       setCobroRespaldoArchivo(null);
     } catch (e) {
@@ -5248,7 +5250,7 @@ export default function App() {
   const cobroDePedido = (p) => {
     const e = p.numero_guia ? entregasMap[p.numero_guia] : null;
     if (!e || !esPagoNo(e)) return null;
-    if (p.cobro_cobrado) return { label: "Cobrado", cls: "ok" };
+    if (p.cobro_cobrado) return { label: "Pagado", cls: "ok" };
     if (p.cobro_incobrable) return { label: "Incobrable", cls: "bad" };
     return { label: "Deuda", cls: "bad" };
   };
@@ -8911,10 +8913,8 @@ export default function App() {
                                 <div className="aq-cob-badges">
                                   {p.cobro_incobrable
                                     ? <span className="aq-badge bad">Incobrable{p.incobrable_at ? " · " + new Date(p.incobrable_at).toLocaleDateString("es-CL") : ""}</span>
-                                    : <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>}
-                                  {abonadoP > 0 && !p.cobro_cobrado && <span className="aq-badge">Saldo {CLP(saldoP)}</span>}
-                                  <span className={"aq-badge " + (p.cobro_recuperado ? "ok" : "warn")}>{p.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
-                                  <span className={"aq-badge " + (intentos > 3 ? "bad" : "")}>Intentos: {intentos}</span>
+                                    : <span className={"aq-badge " + (p.cobro_cobrado ? "ok" : "warn")}>{p.cobro_cobrado ? "Pagado" : "No pagado"}</span>}
+                                  {abonadoP > 0 && !p.cobro_cobrado && <span className="aq-badge">Abonado {CLP(abonadoP)} · Saldo {CLP(saldoP)}</span>}
                                 </div>
                                 {cobroRespaldoPedido === p.id && (
                                   <div className="aq-fact-acciones" style={{ marginTop: 8 }}>
@@ -8929,7 +8929,7 @@ export default function App() {
                                       onChange={(e) => setCobroRespaldoArchivo(e.target.files?.[0] || null)}
                                     />
                                     <button className="aq-btn-sec" disabled={enProceso || !cobroFechaPago} onClick={() => marcarCobradoConRespaldo(p, cobroRespaldoArchivo, cobroFechaPago)}>
-                                      {enProceso ? "Guardando…" : "Confirmar cobrado"}
+                                      {enProceso ? "Guardando…" : "Confirmar pago"}
                                     </button>
                                     <button className="aq-link" onClick={() => { setCobroRespaldoPedido(null); setCobroRespaldoArchivo(null); }}>Cancelar</button>
                                   </div>
@@ -8941,7 +8941,7 @@ export default function App() {
                                 ) : (
                                 <div className="aq-cob-acts">
                                   <button className={"aq-btn-sec" + (p.cobro_cobrado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_cobrado")}>
-                                    {p.cobro_cobrado ? "✓ Cobrado" : "Marcar cobrado"}
+                                    {p.cobro_cobrado ? "✓ Pagado" : "Marcar pagado"}
                                   </button>
                                   {p.cobro_cobrado && p.cobro_respaldo_path && (
                                     <button className="aq-link" onClick={() => verRespaldoCobro(p.cobro_respaldo_path)}>Ver comprobante</button>
@@ -8959,15 +8959,7 @@ export default function App() {
                                       </button>
                                     )
                                   )}
-                                  <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado || saldoP <= 0} onClick={() => abrirAbono("cobro", { numero_guia: p.numero_guia, pedidoId: p.id, monto_total: montoP, cobro_abonado: abonadoP, saldo: saldoP, titulo: clientePorId[p.cliente_id]?.nombre || p.numero_guia })}>
-                                    + Abono
-                                  </button>
-                                  <button className={"aq-btn-sec" + (p.cobro_recuperado ? " on" : "")} disabled={enProceso} onClick={() => marcarCobroCampo(p, "cobro_recuperado")}>
-                                    {p.cobro_recuperado ? "✓ Recuperado" : "Marcar recuperado"}
-                                  </button>
-                                  <button className="aq-btn-sec" disabled={enProceso || p.cobro_cobrado} onClick={() => registrarIntento(p)}>
-                                    + Intento de cobro
-                                  </button>
+                                  {/* Nov-2026: se simplificó a Pagado / No pagado (sin abonos, recuperado ni intentos). */}
                                   <button className="aq-link" onClick={() => abrirPedidoModal(p)}>Ver detalle</button>
                                 </div>
                                 )}
@@ -9557,11 +9549,9 @@ export default function App() {
               {/* Gestión de cobro si corresponde */}
               {esPagoNo(pedidoModal.entrega) && (
                 <div className="aq-modal-cobro">
-                  <strong>{pedidoModal.pedido.cobro_cobrado ? "✓ Deuda cobrada" : "⚠ Entregado sin pago — por cobrar"}</strong>
+                  <strong>{pedidoModal.pedido.cobro_cobrado ? "✓ Pagado" : "⚠ Entregado sin pago — por cobrar"}</strong>
                   <div className="aq-cob-badges" style={{ marginTop: 6 }}>
-                    <span className={"aq-badge " + (pedidoModal.pedido.cobro_cobrado ? "ok" : "warn")}>{pedidoModal.pedido.cobro_cobrado ? "Cobrado" : "No cobrado"}</span>
-                    <span className={"aq-badge " + (pedidoModal.pedido.cobro_recuperado ? "ok" : "warn")}>{pedidoModal.pedido.cobro_recuperado ? "Recuperado" : "No recuperado"}</span>
-                    <span className="aq-badge">Intentos: {Number(pedidoModal.pedido.cobro_intentos) || 0}</span>
+                    <span className={"aq-badge " + (pedidoModal.pedido.cobro_cobrado ? "ok" : "warn")}>{pedidoModal.pedido.cobro_cobrado ? "Pagado" + (pedidoModal.pedido.cobro_fecha_pago ? " el " + fechaCLTexto(pedidoModal.pedido.cobro_fecha_pago) : "") : "No pagado"}</span>
                   </div>
                   <button className="aq-btn-sec" style={{ marginTop: 10 }} onClick={() => { setPedidoModal(null); abrirCobranzas(); }}>
                     Ir a gestión de cobro →
