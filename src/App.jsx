@@ -885,7 +885,32 @@ async function calcularCajaMes(mesKey) {
   return { efectivo, provPendiente, provResumen, costo };
 }
 
+// Aviso de versión nueva: si la pestaña quedó abierta desde antes de un
+// despliegue, sigue corriendo el código viejo (pasó con la fecha real de pago).
+function useVersionNueva() {
+  const [hay, setHay] = useState(false);
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    const actual = typeof __BUILD_ID__ !== "undefined" ? __BUILD_ID__ : "";
+    async function revisar() {
+      try {
+        const r = await fetch("/version.json?t=" + Date.now(), { cache: "no-store" });
+        if (!r.ok) return;
+        const { build } = await r.json();
+        if (build && actual && build !== actual) setHay(true);
+      } catch { /* sin red: se reintenta */ }
+    }
+    revisar();
+    const t = setInterval(revisar, 120000);
+    const alVolver = () => { if (document.visibilityState === "visible") revisar(); };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", alVolver); };
+  }, []);
+  return hay;
+}
+
 export default function App() {
+  const versionNueva = useVersionNueva();
   const credsListas =
     SUPABASE_URL && !SUPABASE_URL.startsWith("PEGA_");
 
@@ -5401,6 +5426,13 @@ export default function App() {
     <div className="aq">
       <style>{css}</style>
 
+      {versionNueva && (
+        <div className="aq-version-nueva">
+          <span>🔄 Hay una versión nueva de la app. Recarga para usar los últimos cambios.</span>
+          <button className="aq-btn-sec" onClick={() => window.location.reload()}>Recargar ahora</button>
+        </div>
+      )}
+
       <header className="aq-header">
         <div className="aq-brand">
           <img src="/logo-aquatrisq.png" className="aq-logo" alt="Aquatrisq" />
@@ -9908,6 +9940,8 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-alerta-deuda strong { color:#8a6400; display:block; }
 .aq-alerta-deuda p { margin:4px 0; color:var(--ink); }
 .aq-alerta-deuda span { font-size:13px; color:#a07a2a; }
+.aq-version-nueva { position:sticky; top:0; z-index:50; display:flex; justify-content:center; align-items:center; gap:12px; flex-wrap:wrap; background:#e8f4ff; border-bottom:1px solid #9cc4ee; color:#0c447c; font-size:14px; font-weight:600; padding:8px 14px; }
+.aq-version-nueva .aq-btn-sec { margin:0; }
 .aq-resumen-cli { margin-bottom:14px; }
 .aq-resumen-cli.moroso { border-color:#f3b4ad; box-shadow:inset 4px 0 0 var(--bad); }
 .aq-resumen-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
