@@ -9071,6 +9071,9 @@ export default function App() {
                     <em>{avisoDeuda ? `${avisoDeuda.guias.length} entrega(s): ${avisoDeuda.guias.join(", ")}` : "Al día con sus entregas"}</em>
                   </div>
                   <div className={"aq-resumen-tile " + (semaforoCli ? ({ rojo: "bad", amarillo: "warn", verde: "ok" }[semaforoCli.cls] || "") : "ok")}>
+                    <span className="aq-resumen-cara" role="img" aria-label="ánimo del comportamiento de pago">
+                      {!semaforoCli ? "😊" : cliente.lista_negra ? "⛔" : ({ verde: "😊", amarillo: "😐", rojo: "😠" }[semaforoCli.cls] || "😐")}
+                    </span>
                     <span className="aq-resumen-lbl">Comportamiento de pago</span>
                     <strong>{semaforoCli ? semaforoCli.label.split(" · ")[0] : "Sin historial de mora"}</strong>
                     <em>{semaforoCli ? (semaforoCli.label.split(" · ")[1] || "") : "Nunca quedó con pago pendiente"}</em>
@@ -9911,7 +9914,9 @@ input:disabled { background:#f1f3f8; color:var(--muted); cursor:not-allowed; }
 .aq-resumen-head h2 { margin:0; }
 .aq-resumen-tag { background:#fdecea; color:#b42318; border:1px solid #f3b4ad; font-size:12px; font-weight:700; padding:4px 10px; border-radius:999px; white-space:nowrap; }
 .aq-resumen-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
-.aq-resumen-tile { border:1px solid var(--line); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column; gap:2px; min-width:0; }
+.aq-resumen-tile { border:1px solid var(--line); border-radius:12px; padding:10px 12px; display:flex; flex-direction:column; gap:2px; min-width:0; position:relative; }
+.aq-resumen-cara { position:absolute; top:50%; right:12px; transform:translateY(-50%); font-size:34px; line-height:1; }
+.aq-resumen-tile:has(.aq-resumen-cara) { padding-right:56px; }
 .aq-resumen-tile .aq-resumen-lbl { font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); }
 .aq-resumen-tile strong { font-size:17px; color:var(--ink); }
 .aq-resumen-tile em { font-style:normal; font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
