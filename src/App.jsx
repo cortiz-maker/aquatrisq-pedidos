@@ -1426,7 +1426,7 @@ export default function App() {
     }
   }
   useEffect(() => {
-    if (vista === "inicio" && rol !== "distribuidor" && rol !== "gerencial") cargarDashboard(periodo);
+    if ((vista === "inicio" || vista === "pedidos") && rol !== "distribuidor" && rol !== "gerencial") cargarDashboard(periodo);
     if (vista === "inicio" && (rol === "admin" || rol === "operador") && session && credsListas) cargarEvolucion();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vista, periodo, credsListas, session, rol]);
@@ -5666,6 +5666,67 @@ export default function App() {
     );
   }
 
+  // Lista "Pedidos del período" (inicio del operador y vista "Pedidos" del admin/operador).
+  const seccionPedidosPeriodo = () => (
+                <section className="aq-card">
+                  <div className="aq-row-head">
+                    <h2>Pedidos del período</h2>
+                    <button className="aq-btn-sec" onClick={() => setVista("nuevo")}>+ Nuevo pedido</button>
+                  </div>
+
+                  <input
+                    className="aq-buscar-ped"
+                    placeholder="Buscar por guía, cliente o comuna…"
+                    value={buscarPedido}
+                    onChange={(e) => setBuscarPedido(e.target.value)}
+                  />
+
+                  {pedidosFiltrados.length === 0 ? (
+                    <p className="aq-muted">
+                      {pedidosMes.length === 0
+                        ? `Sin pedidos en ${periodoLabel}.`
+                        : "Ningún pedido coincide con el filtro."}
+                    </p>
+                  ) : (
+                    <div className="aq-tabla">
+                      {pedidosFiltrados.slice(0, 80).map((p) => {
+                        const i = infoPedido(p);
+                        const cobro = cobroDePedido(p);
+                        return (
+                          <div className="aq-tr aq-tr-click" key={p.id} onClick={() => abrirPedidoModal(p)} title="Ver detalle de entrega">
+                            <div className="aq-tr-main">
+                              <strong>{i.nombre}</strong>
+                              <span className="aq-tr-sub">
+                                {p.numero_guia || "—"}{i.comuna ? " · " + i.comuna : ""}
+                              </span>
+                            </div>
+                            <span className="aq-tr-fecha">
+                              {p.fecha_min_entrega
+                                ? new Date(p.fecha_min_entrega).toLocaleDateString("es-CL", { day: "2-digit", month: "short" })
+                                : p.created_at
+                                ? new Date(p.created_at).toLocaleDateString("es-CL", { day: "2-digit", month: "short" })
+                                : ""}
+                            </span>
+                            <span className="aq-tr-monto">
+                              {CLP(p.monto_total)}
+                              {p.por_cobrar && <em className="aq-pc" onClick={(e) => { e.stopPropagation(); abrirPedidoModal(p); }} title="Ver formulario de entrega / cobro">PC</em>}
+                            </span>
+                            {cobro
+                              ? <span className={"aq-badge " + cobro.cls}>{cobro.label}</span>
+                              : <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>{p.estado_sync === "enviado_dt" ? "En DT" : "Pend."}</span>}
+                          </div>
+                        );
+                      })}
+                      {pedidosFiltrados.length > 80 && (
+                        <p className="aq-muted" style={{ marginTop: 10 }}>
+                          Mostrando 80 de {pedidosFiltrados.length}. Usa el buscador para acotar.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </section>
+  );
+
   return (
     <div className="aq">
       <style>{css}</style>
@@ -5690,6 +5751,9 @@ export default function App() {
             <button className={vista === "inicio" ? "on" : ""} onClick={() => setVista("inicio")}>Inicio</button>
             {rol !== "gerencial" && (
               <button className={vista === "nuevo" ? "on" : ""} onClick={() => setVista("nuevo")}>Nuevo pedido</button>
+            )}
+            {(rol === "admin" || rol === "operador") && (
+              <button className={vista === "pedidos" ? "on" : ""} onClick={() => setVista("pedidos")}>Pedidos</button>
             )}
             {(rol === "admin" || rol === "operador") && (
               <button className={vista === "carga" ? "on" : ""} onClick={() => setVista("carga")}>Carga de rutas</button>
@@ -5762,6 +5826,28 @@ export default function App() {
             </p>
             <button className="aq-btn" onClick={() => setVista("nuevo")}>+ Nuevo correlativo</button>
           </section>
+        )}
+
+        {/* ===================== PEDIDOS EMITIDOS ===================== */}
+        {credsListas && vista === "pedidos" && (rol === "admin" || rol === "operador") && (
+          <>
+            <section className="aq-card aq-period">
+              <button className="aq-per-nav" onClick={() => cambiarPeriodo(-1)} aria-label="Mes anterior">‹</button>
+              <div className="aq-per-label">
+                <span>Pedidos emitidos</span>
+                <strong>{periodoLabel}</strong>
+              </div>
+              <button className="aq-per-nav" onClick={() => cambiarPeriodo(1)} aria-label="Mes siguiente" disabled={periodo >= hoyPeriodo()}>›</button>
+            </section>
+            <div className="aq-kpis">
+              {[["todos", "Todos", dash.ingresados], ["pendientes", "Pend. DT", dash.pendientes], ["enviados", "En DT", dash.enviados], ["hoy", "Para hoy", dash.paraHoy]].map(([k, l, n]) => (
+                <button key={k} className={"aq-kpi aq-kpi-btn" + (filtroEstado === k ? " on" : "")} onClick={() => setFiltroEstado(k)}>
+                  <span>{l}</span><strong>{n ?? 0}</strong>
+                </button>
+              ))}
+            </div>
+            {cargandoDash ? <div className="aq-card">Cargando pedidos…</div> : seccionPedidosPeriodo()}
+          </>
         )}
 
         {/* ===================== INICIO / DASHBOARD ===================== */}
@@ -5999,65 +6085,7 @@ export default function App() {
                   );
                 })()}
 
-                {rol === "operador" && (
-                <section className="aq-card">
-                  <div className="aq-row-head">
-                    <h2>Pedidos del período</h2>
-                    <button className="aq-btn-sec" onClick={() => setVista("nuevo")}>+ Nuevo pedido</button>
-                  </div>
-
-                  <input
-                    className="aq-buscar-ped"
-                    placeholder="Buscar por guía, cliente o comuna…"
-                    value={buscarPedido}
-                    onChange={(e) => setBuscarPedido(e.target.value)}
-                  />
-
-                  {pedidosFiltrados.length === 0 ? (
-                    <p className="aq-muted">
-                      {pedidosMes.length === 0
-                        ? `Sin pedidos en ${periodoLabel}.`
-                        : "Ningún pedido coincide con el filtro."}
-                    </p>
-                  ) : (
-                    <div className="aq-tabla">
-                      {pedidosFiltrados.slice(0, 80).map((p) => {
-                        const i = infoPedido(p);
-                        const cobro = cobroDePedido(p);
-                        return (
-                          <div className="aq-tr aq-tr-click" key={p.id} onClick={() => abrirPedidoModal(p)} title="Ver detalle de entrega">
-                            <div className="aq-tr-main">
-                              <strong>{i.nombre}</strong>
-                              <span className="aq-tr-sub">
-                                {p.numero_guia || "—"}{i.comuna ? " · " + i.comuna : ""}
-                              </span>
-                            </div>
-                            <span className="aq-tr-fecha">
-                              {p.fecha_min_entrega
-                                ? new Date(p.fecha_min_entrega).toLocaleDateString("es-CL", { day: "2-digit", month: "short" })
-                                : p.created_at
-                                ? new Date(p.created_at).toLocaleDateString("es-CL", { day: "2-digit", month: "short" })
-                                : ""}
-                            </span>
-                            <span className="aq-tr-monto">
-                              {CLP(p.monto_total)}
-                              {p.por_cobrar && <em className="aq-pc" onClick={(e) => { e.stopPropagation(); abrirPedidoModal(p); }} title="Ver formulario de entrega / cobro">PC</em>}
-                            </span>
-                            {cobro
-                              ? <span className={"aq-badge " + cobro.cls}>{cobro.label}</span>
-                              : <span className={"aq-badge " + (p.estado_sync === "enviado_dt" ? "ok" : "warn")}>{p.estado_sync === "enviado_dt" ? "En DT" : "Pend."}</span>}
-                          </div>
-                        );
-                      })}
-                      {pedidosFiltrados.length > 80 && (
-                        <p className="aq-muted" style={{ marginTop: 10 }}>
-                          Mostrando 80 de {pedidosFiltrados.length}. Usa el buscador para acotar.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </section>
-                )}
+                {rol === "operador" && seccionPedidosPeriodo()}
 
                 {!dash.tieneEstado && (
                   <p className="aq-muted">
