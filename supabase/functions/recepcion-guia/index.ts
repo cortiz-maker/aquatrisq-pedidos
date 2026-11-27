@@ -84,7 +84,15 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
   ]);
   const c = cs?.[0] || {};
   const d = ds?.[0] || null;
-  const e = (ents || []).find((x: any) => Number(x.status) === 2) || (ents || [])[0];
+  const cerrada = (ents || []).find((x: any) => Number(x.status) === 2);
+  // En prueba, si la entrega aún no se cierra, se muestran datos de recepción de ejemplo.
+  const ejemplo = prueba && !cerrada;
+  const ahora = new Date().toISOString();
+  const e = cerrada || (ejemplo ? { ...(ents?.[0] || {}), arrived_at: ahora, gestionado_en: ahora, raw: { evaluation_answers: [
+    { name: "Nombre Quien Recibe", value: "Nombre de ejemplo" },
+    { name: "RUT Quien Recibe", value: "12.345.678-9" },
+    { name: "Comentarios", value: "Observación de ejemplo (opcional)" },
+  ] } } : null);
   if (!e) throw new Error("la entrega aún no está cerrada en DispatchTrack");
 
   const rs = respuestas(e);
@@ -154,7 +162,7 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
 
   const bannerPrueba = prueba ? `
   <tr><td style="background:#F0F9FF;border:2px dashed ${ACENTO};border-radius:12px;padding:12px 16px;font-size:12px;color:#075985;text-align:center;font-family:Arial,sans-serif;">
-    <b>CORREO DE PRUEBA</b> &middot; No fue enviado al cliente.${para.length ? ` En real ir&iacute;a a <b>${esc(para.join(", "))}</b> con copia a ${INFO}.` : ""}
+    <b>CORREO DE PRUEBA</b> &middot; No fue enviado al cliente.${ejemplo ? " La entrega a&uacute;n no se cierra: nombre, RUT, observaci&oacute;n y horas son de ejemplo, y la firma aparecer&aacute; aqu&iacute; al cerrar." : ""}${para.length ? ` En real ir&iacute;a a <b>${esc(para.join(", "))}</b> con copia a ${INFO}.` : ""}
   </td></tr><tr><td style="height:14px;line-height:14px;font-size:0;">&nbsp;</td></tr>` : "";
 
   const html = `<!DOCTYPE html>
@@ -182,6 +190,7 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
       ${fila("RUT", esc(rut || "—"))}
       ${obs ? fila("Observaci&oacute;n", esc(obs)) : ""}
     </table>
+    ${ejemplo ? `<div style="margin-top:12px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">Firma</div><div style="width:240px;height:80px;border:1px dashed #BAE6FD;border-radius:8px;margin-top:6px;text-align:center;line-height:80px;color:#94A3B8;font-size:12px;font-family:Arial,sans-serif;">Firma de quien recibe</div>` : ""}
     ${firmaImg ? `<div style="margin-top:12px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">Firma</div><img src="${esc(firmaImg)}" alt="Firma" style="display:block;max-width:260px;max-height:120px;border:1px solid ${BORDE};border-radius:8px;margin-top:6px;background:#FFFFFF;">` : (adjuntos.some((a) => a.filename.startsWith("Firma")) ? `<div style="margin-top:10px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">Firma adjunta a este correo.</div>` : "")}`)}
   ${tarjeta("Detalle entregado", `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
       <tr><td style="font-size:11px;color:${SUAVE};padding-bottom:4px;font-family:Arial,sans-serif;">Producto</td><td align="right" style="font-size:11px;color:${SUAVE};font-family:Arial,sans-serif;">Cant.</td><td align="right" style="font-size:11px;color:${SUAVE};font-family:Arial,sans-serif;">Subtotal</td></tr>
