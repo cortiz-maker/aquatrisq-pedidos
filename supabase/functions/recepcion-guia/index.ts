@@ -9,16 +9,22 @@
 //   - datos de quien recibe (nombre, RUT, firma y observación del formulario DT),
 //   - detalle de lo entregado, bidones en préstamo y estado de pago (pendiente),
 //   - trazabilidad (llegada y entrega, chofer y patente),
-//   - la guía de despacho electrónica adjunta (si está cargada en el pedido) y la firma.
+//   - la guía de despacho adjunta con el sello de recepción al pie (nombre, RUT, fecha/hora,
+//     observación, firma y línea de tiempo), igual que el e-Docs de Quantrex. La firma va en el PDF,
+//     no en el correo. Se guarda una copia en pedidos.guia_recepcion_url.
 //
 // Llamada manual: { pedido_id, prueba: true } → va solo a correo_prueba, con PRUEBA en el asunto,
 // y no marca el pedido como enviado. { pedido_id, reenviar: true } permite reenviar.
+
+import * as PDFLib from "https://esm.sh/pdf-lib@1.17.1";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const BUCKET = "documentos-facturas";
 const LOGO = `${SUPABASE_URL}/functions/v1/logo-aquatrisq`;
 const INFO = "info@quantrex.cl";
+// Firma de muestra solo para correos de prueba sin entrega cerrada.
+const FIRMA_EJEMPLO = "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";
 
 const ACENTO = "#0EA5E9"; // celeste
 const TEXTO = "#0F172A";
@@ -70,6 +76,93 @@ async function leerObjeto(path: string): Promise<Uint8Array | null> {
   return r.ok ? new Uint8Array(await r.arrayBuffer()) : null;
 }
 
+// ---------- Sello de recepción sobre la guía (formato e-Docs Quantrex) ----------
+async function conRecepcion(PDFLib: any, bytes: Uint8Array, datos: any, firmaBytes: Uint8Array | null): Promise<Uint8Array> {
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const TEXTO = rgb(0.06, 0.09, 0.16), GRIS = rgb(0.39, 0.45, 0.55), LINEA = rgb(0.80, 0.88, 0.93);
+  const CELESTE = rgb(0.05, 0.65, 0.91), VERDE = rgb(0.02, 0.59, 0.41), FONDO = rgb(0.94, 0.98, 1);
+  const src = await PDFDocument.load(bytes);
+  const out = await PDFDocument.create();
+  const f = await out.embedFont(StandardFonts.Helvetica);
+  const fb = await out.embedFont(StandardFonts.HelveticaBold);
+  let firma: any = null;
+  if (firmaBytes && firmaBytes.length) {
+    const esPng = firmaBytes[0] === 0x89 && firmaBytes[1] === 0x50;
+    try { firma = esPng ? await out.embedPng(firmaBytes) : await out.embedJpg(firmaBytes); } catch { firma = null; }
+  }
+  const pags = src.getPages();
+  const emb = await out.embedPages(pags);
+  const S = 0.78;
+  const corta = (t: any, fo: any, sz: number, max: number) => {
+    let s = String(t || "");
+    if (fo.widthOfTextAtSize(s, sz) <= max) return s;
+    while (s.length > 3 && fo.widthOfTextAtSize(s + "…", sz) > max) s = s.slice(0, -1);
+    return s + "…";
+  };
+  emb.forEach((ep: any, i: number) => {
+    const { width: w, height: h } = pags[i].getSize();
+    const p = out.addPage([w, h]);
+    const dw = w * S, dh = h * S, x0 = (w - dw) / 2, y0 = h - dh - 10;
+    p.drawPage(ep, { x: x0, y: y0, width: dw, height: dh });
+    p.drawRectangle({ x: x0, y: y0, width: dw, height: dh, borderColor: LINEA, borderWidth: 0.6 });
+
+    const mx = 28, ancho = w - mx * 2;
+    const top = y0 - 8;
+    // Encabezado del sello
+    p.drawText("RECEPCIÓN CONFORME · REGISTRO DIGITAL DE ENTREGA", { x: mx, y: top - 10, size: 7.5, font: fb, color: CELESTE });
+    p.drawText(`Pág. ${i + 1}/${pags.length}`, { x: w - mx - 38, y: top - 10, size: 7, font: f, color: GRIS });
+
+    // Caja de recepción
+    const cajaH = 78, cajaY = top - 16 - cajaH;
+    p.drawRectangle({ x: mx, y: cajaY, width: ancho, height: cajaH, color: FONDO, borderColor: LINEA, borderWidth: 0.6 });
+    const colDatos = ancho * 0.58;
+    const filas = [
+      ["Recibido por", datos.nombre || "—"],
+      ["RUT", datos.rut || "—"],
+      ["Fecha y hora", datos.fechaHora || "—"],
+      ["Observación", datos.observacion || "—"],
+    ];
+    filas.forEach(([k, v], j) => {
+      const yy = cajaY + cajaH - 16 - j * 16;
+      p.drawText(k, { x: mx + 10, y: yy, size: 7.2, font: f, color: GRIS });
+      p.drawText(corta(v, fb, 8.4, colDatos - 90), { x: mx + 80, y: yy, size: 8.4, font: fb, color: TEXTO });
+    });
+    // Firma
+    const fx = mx + colDatos + 10, fw = ancho - colDatos - 20, fy = cajaY + 18, fh = cajaH - 26;
+    if (firma) {
+      const r = Math.min(fw / firma.width, fh / firma.height);
+      const iw = firma.width * r, ih = firma.height * r;
+      p.drawImage(firma, { x: fx + (fw - iw) / 2, y: fy + (fh - ih) / 2, width: iw, height: ih });
+    } else {
+      const t = "Sin firma digital (respaldo físico)";
+      p.drawText(t, { x: fx + (fw - f.widthOfTextAtSize(t, 7)) / 2, y: fy + fh / 2, size: 7, font: f, color: GRIS });
+    }
+    p.drawLine({ start: { x: fx + 10, y: cajaY + 15 }, end: { x: fx + fw - 10, y: cajaY + 15 }, thickness: 0.6, color: GRIS });
+    const tf = "Firma de quien recibe";
+    p.drawText(tf, { x: fx + (fw - f.widthOfTextAtSize(tf, 6.5)) / 2, y: cajaY + 6, size: 6.5, font: f, color: GRIS });
+
+    // Línea de tiempo
+    const nodos = datos.nodos || [];
+    const yl = cajaY - 16, paso = ancho / Math.max(nodos.length, 1);
+    if (nodos.length > 1) p.drawLine({ start: { x: mx + paso / 2, y: yl }, end: { x: mx + paso * (nodos.length - 0.5), y: yl }, thickness: 1.4, color: LINEA });
+    nodos.forEach((n: any, k: number) => {
+      const cx = mx + paso * k + paso / 2, col = n.final ? VERDE : CELESTE;
+      p.drawCircle({ x: cx, y: yl, size: 4.2, color: col });
+      const ln = (t: string, dy: number, sz: number, fo: any, c: any) => {
+        if (!t) return; const s = corta(t, fo, sz, paso - 10);
+        p.drawText(s, { x: cx - fo.widthOfTextAtSize(s, sz) / 2, y: yl - dy, size: sz, font: fo, color: c });
+      };
+      ln(n.titulo, 13, 6.8, fb, col); ln(n.linea1, 22, 6.8, fb, TEXTO); ln(n.linea2, 30.5, 6.3, f, GRIS);
+    });
+    const nota = corta(datos.nota || "", f, 5.8, ancho);
+    p.drawText(nota, { x: mx, y: Math.max(yl - 44, 8), size: 5.8, font: f, color: GRIS });
+  });
+  out.setTitle(`Guía de despacho con recepción · ${datos.pedido || ""}`);
+  out.setProducer("Aquatrisq · plataforma Quantrex");
+  return await out.save();
+}
+
+
 async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: boolean) {
   const ps = await sb(`pedidos?id=eq.${pedidoId}&select=*`);
   const p = ps?.[0];
@@ -113,25 +206,51 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
   else if (para.length) { to = para; cc = [INFO]; }
   else { to = [INFO]; cc = []; }
 
-  // Adjuntos: guía de despacho + firma
-  const adjuntos: any[] = [];
-  if (p.guia_despacho_url) {
-    const g = await leerObjeto(p.guia_despacho_url);
-    if (g) adjuntos.push({ filename: `Guia_Despacho_${p.guia_despacho_numero || p.numero_guia}.pdf`, content: b64(g) });
-  }
-  let firmaImg = "";
+  const empresa = nombreEmpresa(c);
+  // Firma (URL o base64 desde el formulario DT): va estampada en la guía, no en el correo.
+  let firmaBytes: Uint8Array | null = null;
   if (/^https?:\/\//i.test(firma)) {
-    firmaImg = firma;
-    try {
-      const rf = await fetch(firma);
-      if (rf.ok) adjuntos.push({ filename: `Firma_${p.numero_guia}.png`, content: b64(new Uint8Array(await rf.arrayBuffer())) });
-    } catch { /* la firma igual va enlazada en el correo */ }
+    try { const rf = await fetch(firma); if (rf.ok) firmaBytes = new Uint8Array(await rf.arrayBuffer()); } catch { /* sin firma */ }
   } else if (/^data:image|^[A-Za-z0-9+/=]{200,}$/.test(firma)) {
-    const data = firma.replace(/^data:image\/\w+;base64,/, "");
-    adjuntos.push({ filename: `Firma_${p.numero_guia}.png`, content: data });
+    try { firmaBytes = Uint8Array.from(atob(firma.replace(/^data:image\/\w+;base64,/, "")), (ch) => ch.charCodeAt(0)); } catch { /* sin firma */ }
+  }
+  if (!firmaBytes && ejemplo) firmaBytes = Uint8Array.from(atob(FIRMA_EJEMPLO), (ch) => ch.charCodeAt(0));
+  // Guía: la cargada en el pedido; en prueba sin guía, una hoja de muestra para ver el formato.
+  let guiaBytes: Uint8Array | null = p.guia_despacho_url ? await leerObjeto(p.guia_despacho_url) : null;
+  const guiaMuestra = !guiaBytes && prueba;
+  if (guiaMuestra) {
+    const doc = await PDFLib.PDFDocument.create(); const pg = doc.addPage([612, 792]);
+    const fb = await doc.embedFont(PDFLib.StandardFonts.HelveticaBold);
+    pg.drawText("AQUÍ VA LA GUÍA DE DESPACHO ELECTRÓNICA", { x: 120, y: 420, size: 16, font: fb, color: PDFLib.rgb(0.6, 0.65, 0.72) });
+    guiaBytes = await doc.save();
+  }
+  const hm = (iso: string | null | undefined) => { const t = fechaHora(iso); return (t.match(/(\d{2}:\d{2})/) || [])[1] || "—"; };
+  const chofer = [String(e.chofer || p.creado_por || "").trim(), String(e.truck_identifier || "").trim()].filter(Boolean).join(" · ");
+  const adjuntos: any[] = [];
+  let guiaSellada: Uint8Array | null = null;
+  if (guiaBytes) {
+    guiaSellada = await conRecepcion(PDFLib, guiaBytes, {
+      pedido: p.numero_guia,
+      nombre, rut, observacion: obs,
+      fechaHora: fechaHora(e.gestionado_en || e.arrived_at),
+      nodos: [
+        { titulo: "LLEGADA A DESTINO", linea1: `${hm(e.arrived_at)} hrs`, linea2: [d?.etiqueta?.split("/")[0]?.trim(), d?.comuna].filter(Boolean).join(", ") || String(e.contact_address || "") },
+        { titulo: "ENTREGA Y RECEPCIÓN", linea1: `${hm(e.gestionado_en)} hrs`, linea2: [nombre, rut ? "RUT " + rut : ""].filter(Boolean).join(" · ") || "—", final: true },
+        { titulo: "TRANSPORTE", linea1: "Aquatrisq", linea2: chofer || "—" },
+      ],
+      nota: `Pedido ${p.numero_guia} · ${empresa} · Registro de recepción generado por la plataforma Aquatrisq al cerrar la entrega (nombre, RUT, firma y hora). Aquatrisq es una empresa Quantrex.`,
+    }, firmaBytes);
+    adjuntos.push({ filename: `Guia_Despacho_${p.guia_despacho_numero || p.numero_guia}_recepcion.pdf`, content: b64(guiaSellada) });
+  }
+  // Copia de la guía con recepción en la plataforma (no en prueba).
+  if (guiaSellada && !prueba) {
+    const path = `GUIA-REC-${p.numero_guia}-${Date.now()}.pdf`;
+    const up = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, {
+      method: "POST", headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}`, "Content-Type": "application/pdf" }, body: guiaSellada,
+    });
+    if (up.ok) await sb(`pedidos?id=eq.${pedidoId}`, { method: "PATCH", body: JSON.stringify({ guia_recepcion_url: path }) }).catch(() => {});
   }
 
-  const empresa = nombreEmpresa(c);
   const direccion = d ? [d.direccion, d.comuna].filter(Boolean).join(", ") : String(e.contact_address || "");
   const totalBidones = (items || []).filter((i: any) => /^R|^B/i.test(String(i.codigo || "")) || /recarga|bid[oó]n/i.test(i.nombre)).reduce((s: number, i: any) => s + (Number(i.cantidad) || 0), 0);
 
@@ -162,7 +281,7 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
 
   const bannerPrueba = prueba ? `
   <tr><td style="background:#F0F9FF;border:2px dashed ${ACENTO};border-radius:12px;padding:12px 16px;font-size:12px;color:#075985;text-align:center;font-family:Arial,sans-serif;">
-    <b>CORREO DE PRUEBA</b> &middot; No fue enviado al cliente.${ejemplo ? " La entrega a&uacute;n no se cierra: nombre, RUT, observaci&oacute;n y horas son de ejemplo, y la firma aparecer&aacute; aqu&iacute; al cerrar." : ""}${para.length ? ` En real ir&iacute;a a <b>${esc(para.join(", "))}</b> con copia a ${INFO}.` : ""}
+    <b>CORREO DE PRUEBA</b> &middot; No fue enviado al cliente.${ejemplo ? ` La entrega a&uacute;n no se cierra: nombre, RUT, observaci&oacute;n y horas son de ejemplo${guiaMuestra ? ", y el PDF adjunto usa una hoja de muestra en lugar de la gu&iacute;a" : ""}. La firma real queda estampada en la gu&iacute;a.` : ""}${para.length ? ` En real ir&iacute;a a <b>${esc(para.join(", "))}</b> con copia a ${INFO}.` : ""}
   </td></tr><tr><td style="height:14px;line-height:14px;font-size:0;">&nbsp;</td></tr>` : "";
 
   const html = `<!DOCTYPE html>
@@ -182,7 +301,7 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
     <p style="color:${TEXTO};font-size:14px;margin:0 0 8px;font-family:Arial,sans-serif;">Hola,</p>
     <p style="color:#334155;font-size:13px;line-height:1.6;margin:0;font-family:Arial,sans-serif;">
       Un integrante de nuestro equipo de distribuci&oacute;n hizo entrega del pedido de <b>${esc(empresa)}</b> en ${esc(d?.etiqueta?.split("/")[0]?.trim() || "su bodega")}${direccion ? `, ${esc(direccion)}` : ""}.
-      Te dejamos el resumen de la recepci&oacute;n${p.guia_despacho_url ? " y la gu&iacute;a de despacho electr&oacute;nica adjunta" : ""}.
+      Te dejamos el resumen de la recepci&oacute;n${guiaSellada ? " y la gu&iacute;a de despacho electr&oacute;nica adjunta, con el registro de recepci&oacute;n y la trazabilidad al pie" : ""}.
     </p>
   </td></tr>
   ${tarjeta("Recibido por", `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
@@ -190,8 +309,7 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
       ${fila("RUT", esc(rut || "—"))}
       ${obs ? fila("Observaci&oacute;n", esc(obs)) : ""}
     </table>
-    ${ejemplo ? `<div style="margin-top:12px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">Firma</div><div style="width:240px;height:80px;border:1px dashed #BAE6FD;border-radius:8px;margin-top:6px;text-align:center;line-height:80px;color:#94A3B8;font-size:12px;font-family:Arial,sans-serif;">Firma de quien recibe</div>` : ""}
-    ${firmaImg ? `<div style="margin-top:12px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">Firma</div><img src="${esc(firmaImg)}" alt="Firma" style="display:block;max-width:260px;max-height:120px;border:1px solid ${BORDE};border-radius:8px;margin-top:6px;background:#FFFFFF;">` : (adjuntos.some((a) => a.filename.startsWith("Firma")) ? `<div style="margin-top:10px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">Firma adjunta a este correo.</div>` : "")}`)}
+    <div style="margin-top:10px;font-size:12px;color:${SUAVE};font-family:Arial,sans-serif;">${guiaSellada ? "La firma y el registro de recepci&oacute;n van estampados en la gu&iacute;a de despacho adjunta." : "Registro de recepci&oacute;n digital."}</div>`)}
   ${tarjeta("Detalle entregado", `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
       <tr><td style="font-size:11px;color:${SUAVE};padding-bottom:4px;font-family:Arial,sans-serif;">Producto</td><td align="right" style="font-size:11px;color:${SUAVE};font-family:Arial,sans-serif;">Cant.</td><td align="right" style="font-size:11px;color:${SUAVE};font-family:Arial,sans-serif;">Subtotal</td></tr>
       ${filasItems}
@@ -227,7 +345,7 @@ async function procesar(pedidoId: string, cfg: any, prueba: boolean, reenviar: b
   if (!prueba) {
     await sb(`pedidos?id=eq.${pedidoId}`, { method: "PATCH", body: JSON.stringify({ recepcion_enviada_at: new Date().toISOString(), recepcion_estado: para.length ? "enviado" : "sin_correo", recepcion_error: null }) });
   }
-  return { pedido_id: pedidoId, estado: prueba ? "prueba" : "enviado", to, cc, adjuntos: adjuntos.map((a) => a.filename), nombre, rut, firma: !!firma };
+  return { pedido_id: pedidoId, estado: prueba ? "prueba" : "enviado", to, cc, adjuntos: adjuntos.map((a) => a.filename), nombre, rut, firma: !!firmaBytes };
 }
 
 Deno.serve(async (req) => {
