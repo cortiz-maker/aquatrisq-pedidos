@@ -513,6 +513,80 @@ function nombreProveedor(entrega) {
   return a && a.val ? String(a.val).trim() : "Proveedor sin nombre";
 }
 
+
+// ── Guía de despacho electrónica (subestado DT "Venta con Guía") ──
+// Se adjunta el PDF de la guía al pedido. Al cerrar la entrega en DispatchTrack como
+// "Venta con Guía" (nombre, RUT, firma y comentarios de quien recibe), la función
+// recepcion-guia envía el comprobante de recepción a los correos indicados, con copia a info@.
+function GuiaDespachoBox({ pedidoId }) {
+  const [p, setP] = useState(null);
+  const [num, setNum] = useState("");
+  const [correos, setCorreos] = useState("");
+  const [archivo, setArchivo] = useState(null);
+  const [guardando, setGuardando] = useState(false);
+  const [msg, setMsg] = useState(null);
+  useEffect(() => {
+    let vivo = true;
+    supabase.from("pedidos")
+      .select("id, numero_guia, guia_despacho_numero, guia_despacho_url, recepcion_correos, recepcion_enviada_at, recepcion_estado, recepcion_error")
+      .eq("id", pedidoId).single()
+      .then(({ data }) => {
+        if (!vivo || !data) return;
+        setP(data);
+        setNum(data.guia_despacho_numero || "");
+        setCorreos((data.recepcion_correos || []).join(", "));
+      });
+    return () => { vivo = false; };
+  }, [pedidoId]);
+  if (!p) return null;
+  async function guardar() {
+    setGuardando(true); setMsg(null);
+    try {
+      const patch = {
+        guia_despacho_numero: num.trim() || null,
+        recepcion_correos: correos.split(/[,;\s]+/).map((x) => x.trim()).filter((x) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(x)),
+      };
+      if (!patch.recepcion_correos.length) patch.recepcion_correos = null;
+      if (archivo) {
+        const path = `GUIA-${p.numero_guia}-${Date.now()}.pdf`;
+        const up = await supabase.storage.from("documentos-facturas")
+          .upload(path, archivo, { upsert: false, contentType: archivo.type || "application/pdf" });
+        if (up.error) throw up.error;
+        patch.guia_despacho_url = path;
+      }
+      const { error } = await supabase.from("pedidos").update(patch).eq("id", p.id);
+      if (error) throw error;
+      setP({ ...p, ...patch }); setArchivo(null);
+      setMsg({ ok: true, t: "Guía guardada. El chofer debe cerrar la entrega como \"Venta con Guía\"." });
+    } catch (e) {
+      setMsg({ ok: false, t: "No se pudo guardar la guía: " + (e?.message || e) });
+    } finally { setGuardando(false); }
+  }
+  async function verGuia() {
+    const { data, error } = await supabase.storage.from("documentos-facturas").createSignedUrl(p.guia_despacho_url, 60);
+    if (!error && data?.signedUrl) window.open(data.signedUrl, "_blank");
+  }
+  return (
+    <div className="aq-modal-cobro" style={{ background: "#f0f9ff", borderColor: "#bae6fd" }}>
+      <strong>📄 Guía de despacho</strong>
+      <p className="aq-mini" style={{ margin: "4px 0 8px" }}>
+        Al cerrar como <b>Venta con Guía</b> en DispatchTrack se envía el comprobante de recepción (nombre, RUT, firma) con la guía adjunta, con copia a info@.
+      </p>
+      <label className="aq-mini">N° guía</label>
+      <input style={{ width: "100%", padding: "8px 10px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box" }} value={num} onChange={(e) => setNum(e.target.value)} placeholder="Ej: 1234" />
+      <label className="aq-mini" style={{ marginTop: 6, display: "block" }}>PDF de la guía</label>
+      <input type="file" accept="application/pdf" onChange={(e) => setArchivo(e.target.files?.[0] || null)} />
+      {p.guia_despacho_url && <button className="aq-link" style={{ display: "block", marginTop: 4 }} onClick={verGuia}>Ver guía cargada</button>}
+      <label className="aq-mini" style={{ marginTop: 6, display: "block" }}>Enviar recepción a (si queda vacío, al correo del cliente)</label>
+      <input style={{ width: "100%", padding: "8px 10px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box" }} value={correos} onChange={(e) => setCorreos(e.target.value)} placeholder="correo@cliente.cl" />
+      <button className="aq-btn" style={{ marginTop: 8, width: "100%" }} disabled={guardando} onClick={guardar}>{guardando ? "Guardando…" : "Guardar guía"}</button>
+      {msg && <div className={"aq-result " + (msg.ok ? "ok" : "bad")} style={{ marginTop: 6 }}>{msg.t}</div>}
+      {p.recepcion_enviada_at && <p className="aq-mini" style={{ marginTop: 6 }}>✓ Recepción enviada el {new Date(p.recepcion_enviada_at).toLocaleString("es-CL")}</p>}
+      {p.recepcion_estado === "error" && <p className="aq-mini" style={{ marginTop: 6, color: "#b91c1c" }}>⚠ Error al enviar la recepción: {p.recepcion_error}</p>}
+    </div>
+  );
+}
+
 // ── Gestión de facturas y bidones pendientes (formulario "Recepción Pedido", substatus Venta) ──
 // ¿La fila de dt_entregas ya fue cerrada por el chofer? (mismo criterio que estadoEntregaDT).
 function entregaGestionada(entrega) {
@@ -525,8 +599,13 @@ function tipoDocumentoEntregaDT(entrega) {
   return a && a.val ? String(a.val).trim() : "";
 }
 // Pedido cerrado con subestado "Venta" cuyo Tipo de Documento indica Factura (requiere emisión).
+function esVentaConGuia(entrega) {
+  return /^venta con gu[ií]a$/i.test((entrega?.substatus || "").trim());
+}
 function esVentaConFactura(entrega) {
   if (!entrega || !entregaGestionada(entrega)) return false;
+  // "Venta con Guía": entrega con guía de despacho electrónica; siempre va a factura.
+  if (esVentaConGuia(entrega)) return true;
   if ((entrega.substatus || "").trim() !== "Venta") return false;
   return /factura/i.test(tipoDocumentoEntregaDT(entrega));
 }
@@ -9743,6 +9822,11 @@ export default function App() {
                       : "⚠ Pendiente de envío a DispatchTrack"}
                   </p>
                 </div>
+              )}
+
+              {/* Guía de despacho electrónica (Venta con Guía) — solo pedidos con factura */}
+              {pedidoModal.pedido?.id && pedidoModal.pedido.tipo_documento === "factura" && (
+                <GuiaDespachoBox pedidoId={pedidoModal.pedido.id} />
               )}
 
               {/* Gestión de cobro si corresponde */}
